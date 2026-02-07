@@ -1,0 +1,198 @@
+from __future__ import annotations
+
+import json
+import os
+import sys
+from typing import Any, Dict
+
+from pydantic import BaseModel, Field, ValidationError
+
+from .config import settings
+from .fss_pir import PirClient
+from .guardrails import ObliviousGuardrails
+from .handles import HandleStore
+from .router import IntentRouter
+
+
+MCP_PROTOCOL_VERSION = "2024-11-05"
+
+
+class ActArgs(BaseModel):
+    intent_id: str = Field(..., description="High-level intent ID (no low-level tools).")
+    inputs: Dict[str, Any] = Field(default_factory=dict)
+    constraints: Dict[str, Any] = Field(default_factory=dict)
+    caller: str = Field(..., description="Skill/agent identity (untrusted).")
+
+
+def _send(obj: dict[str, Any]) -> None:
+    sys.stdout.write(json.dumps(obj, ensure_ascii=True) + "\n")
+    sys.stdout.flush()
+
+
+def _jsonrpc_result(req_id: Any, result: dict[str, Any]) -> dict[str, Any]:
+    return {"jsonrpc": "2.0", "id": req_id, "result": result}
+
+
+def _jsonrpc_error(req_id: Any, code: int, message: str, data: Any | None = None) -> dict[str, Any]:
+    err: dict[str, Any] = {"code": int(code), "message": str(message)}
+    if data is not None:
+        err["data"] = data
+    return {"jsonrpc": "2.0", "id": req_id, "error": err}
+
+
+def _tool_result(structured: dict[str, Any], *, is_error: bool = False) -> dict[str, Any]:
+    # MCP "tools/call" result: provide both text and structured output.
+    return {
+        "content": [{"type": "text", "text": json.dumps(structured, ensure_ascii=True)}],
+        "structuredContent": structured,
+        "isError": bool(is_error),
+    }
+
+
+def _tools_list() -> dict[str, Any]:
+    # Minimal tool definition, matching gateway/schemas/act.schema.json semantically.
+    return {
+        "tools": [
+            {
+                # Prefer the simple name "act" for MCP hosts that map tools to
+                # `mcp__{server}__{tool}` identifiers (avoids dots).
+                "name": "act",
+                "description": "Execute a high-level intent via MIRAGE gateway. The agent cannot access low-level tools directly.",
+                "inputSchema": {
+                    "type": "object",
+                    "required": ["intent_id", "inputs", "constraints", "caller"],
+                    "properties": {
+                        "intent_id": {"type": "string"},
+                        "inputs": {"type": "object"},
+                        "constraints": {"type": "object"},
+                        "caller": {"type": "string"},
+                    },
+                    "additionalProperties": False,
+                },
+            },
+            {
+                # Backwards-compatible alias used by this repo's Python demo client.
+                "name": "mirage.act",
+                "description": "Execute a high-level intent via MIRAGE gateway. The agent cannot access low-level tools directly.",
+                "inputSchema": {
+                    "type": "object",
+                    "required": ["intent_id", "inputs", "constraints", "caller"],
+                    "properties": {
+                        "intent_id": {"type": "string"},
+                        "inputs": {"type": "object"},
+                        "constraints": {"type": "object"},
+                        "caller": {"type": "string"},
+                    },
+                    "additionalProperties": False,
+                },
+            }
+        ]
+    }
+
+
+class MirageMcpServer:
+    def __init__(self) -> None:
+        self._initialized = False
+
+        handles = HandleStore()
+        pir = PirClient(
+            policy0_url=settings.policy_servers[0],
+            policy1_url=settings.policy_servers[1],
+            domain_size=settings.fss_domain_size,
+        )
+        guardrails = ObliviousGuardrails(
+            pir=pir,
+            handles=handles,
+            domain_size=settings.fss_domain_size,
+            max_tokens=settings.max_tokens_per_message,
+        )
+        self._router = IntentRouter(handles=handles, guardrails=guardrails)
+
+    def serve_forever(self) -> None:
+        # Stdio transport: one JSON-RPC message per line.
+        for line in sys.stdin:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                msg = json.loads(line)
+            except json.JSONDecodeError:
+                # Can't recover request id.
+                _send(_jsonrpc_error(None, -32700, "Parse error"))
+                continue
+            self._handle_message(msg)
+
+    def _handle_message(self, msg: dict[str, Any]) -> None:
+        method = msg.get("method")
+        req_id = msg.get("id", None)
+        params = msg.get("params") or {}
+
+        # Notifications have no id and must not be answered.
+        is_notification = "id" not in msg
+
+        try:
+            if method == "initialize":
+                result = {
+                    "protocolVersion": MCP_PROTOCOL_VERSION,
+                    "capabilities": {"tools": {}},
+                    "serverInfo": {"name": "mirage-ogpp-gateway", "version": "0.1"},
+                }
+                if not is_notification:
+                    _send(_jsonrpc_result(req_id, result))
+                return
+
+            if method == "notifications/initialized":
+                self._initialized = True
+                return
+
+            if method == "tools/list":
+                if not is_notification:
+                    _send(_jsonrpc_result(req_id, _tools_list()))
+                return
+
+            if method == "tools/call":
+                if not self._initialized:
+                    if not is_notification:
+                        _send(_jsonrpc_error(req_id, -32002, "Server not initialized"))
+                    return
+
+                name = params.get("name")
+                arguments = params.get("arguments") or {}
+                if name not in ("act", "mirage.act"):
+                    if not is_notification:
+                        _send(_jsonrpc_result(req_id, _tool_result({"error": "unknown tool"}, is_error=True)))
+                    return
+
+                try:
+                    act = ActArgs.model_validate(arguments)
+                except ValidationError as e:
+                    if not is_notification:
+                        _send(_jsonrpc_result(req_id, _tool_result({"error": "bad arguments", "details": e.errors()}, is_error=True)))
+                    return
+
+                # In a real system, session would bind user identity/device attestation.
+                session = os.getenv("MIRAGE_SESSION_ID", "demo-session")
+                obs = self._router.act(act.intent_id, act.inputs, act.constraints, caller=act.caller, session=session)
+                if not is_notification:
+                    _send(_jsonrpc_result(req_id, _tool_result(obs, is_error=(obs.get("status") == "DENY"))))
+                return
+
+            if method == "ping":
+                if not is_notification:
+                    _send(_jsonrpc_result(req_id, {}))
+                return
+
+            # Unknown method
+            if not is_notification:
+                _send(_jsonrpc_error(req_id, -32601, f"Method not found: {method}"))
+        except Exception as e:
+            if not is_notification:
+                _send(_jsonrpc_error(req_id, -32603, "Internal error", data=str(e)))
+
+
+def main() -> None:
+    MirageMcpServer().serve_forever()
+
+
+if __name__ == "__main__":
+    main()

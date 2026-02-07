@@ -1,0 +1,49 @@
+services:
+  policy0:
+    build: .
+    command: ["bash", "-lc", "python -m policy_server.build_dbs && python -m policy_server.server"]
+    environment:
+      SERVER_ID: "0"
+      PORT: "9001"
+      FSS_DOMAIN_SIZE: "4096"
+      POLICY_MAC_KEY: "1111111111111111111111111111111111111111111111111111111111111111"
+    ports:
+      - "9001:9001"
+
+  policy1:
+    build: .
+    command: ["bash", "-lc", "python -m policy_server.build_dbs && python -m policy_server.server"]
+    environment:
+      SERVER_ID: "1"
+      PORT: "9002"
+      FSS_DOMAIN_SIZE: "4096"
+      POLICY_MAC_KEY: "2222222222222222222222222222222222222222222222222222222222222222"
+    ports:
+      - "9002:9002"
+
+  executor:
+    build: .
+    command: ["python", "-m", "executor_server.server"]
+    environment:
+      EXECUTOR_PORT: "9100"
+      POLICY_MAC_TTL_S: "30"
+      POLICY0_MAC_KEY: "1111111111111111111111111111111111111111111111111111111111111111"
+      POLICY1_MAC_KEY: "2222222222222222222222222222222222222222222222222222222222222222"
+    ports:
+      - "9100:9100"
+
+  agent:
+    build: .
+    depends_on:
+      - policy0
+      - policy1
+      - executor
+    command: ["bash", "-lc", "bash scripts/run_agent.sh"]
+    environment:
+      POLICY0_URL: "http://policy0:9001"
+      POLICY1_URL: "http://policy1:9002"
+      EXECUTOR_URL: "http://executor:9100"
+      FSS_DOMAIN_SIZE: "4096"
+      DLP_MODE: "dfa"
+      SIGNED_PIR: "1"
+

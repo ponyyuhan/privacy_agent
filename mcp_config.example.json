@@ -1,0 +1,18 @@
+{
+  "mcpServers": {
+    "mirage-ogpp-gateway": {
+      "command": "python",
+      "args": [
+        "-m",
+        "gateway.mcp_server"
+      ],
+      "env": {
+        "POLICY0_URL": "http://localhost:9001",
+        "POLICY1_URL": "http://localhost:9002",
+        "FSS_DOMAIN_SIZE": "4096",
+        "MAX_TOKENS_PER_MESSAGE": "32"
+      }
+    }
+  }
+}
+

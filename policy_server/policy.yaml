@@ -1,0 +1,28 @@
+# Default policy configuration for the MIRAGE-OG++ demo.
+#
+# You can point build_dbs to a different file via:
+#   POLICY_CONFIG_PATH=/path/to/policy.yaml python -m policy_server.build_dbs
+#
+# Domain size must be a power of two.
+domain_size: 4096
+
+allow_recipients:
+  - alice@example.com
+  - bob@example.com
+
+allow_domains:
+  - example.com
+  - api.github.com
+
+dlp_patterns:
+  - AKIA
+  - xoxb-
+  - OPENSSH PRIVATE KEY
+  - BEGIN PRIVATE KEY
+
+# DFA confirm is built from the same patterns. (Gateway controls whether it is used.)
+dfa_enabled: true
+
+# Build an additional concatenated bitset DB (`policy_bundle.bitset`) that can be used
+# to hide `db_name` from policy servers (gateway knob: USE_POLICY_BUNDLE=1).
+bundle_enabled: true

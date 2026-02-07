@@ -1,0 +1,21 @@
+{
+  "id": "mirage_ogpp",
+  "name": "MIRAGE-OG++ Gateway Bridge",
+  "version": "0.1.0",
+  "description": "Expose a single tool (mirage_act) that forwards to the local Python MIRAGE MCP gateway (gateway.mcp_server).",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "python": {
+        "type": "string",
+        "description": "Python executable used to spawn the MIRAGE MCP gateway (default: python)."
+      },
+      "session_id": {
+        "type": "string",
+        "description": "Optional MIRAGE_SESSION_ID to bind sealed handles to this OpenClaw run."
+      }
+    }
+  }
+}
+

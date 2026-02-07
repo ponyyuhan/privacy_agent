@@ -1,0 +1,9 @@
+{
+  "name": "openclaw-runner",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "openclaw": "2026.2.6-3"
+  }
+}
+

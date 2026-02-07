@@ -1,0 +1,6 @@
+NanoClaw upstream: https://github.com/gavrielc/nanoclaw.git
+Pinned commit: db216a459e51acd319c53c5c88b18c72d27447cf
+Fetched on: 2026-02-06
+
+This repo vendors NanoClaw under third_party/nanoclaw for the "real agent runtime" integration.
+

@@ -1,0 +1,47 @@
+{
+  "domain_size": 4096,
+  "patterns": [
+    "AKIA",
+    "xoxb-",
+    "OPENSSH PRIVATE KEY",
+    "BEGIN PRIVATE KEY"
+  ],
+  "allow_recipients": [
+    "alice@example.com",
+    "bob@example.com"
+  ],
+  "allow_domains": [
+    "example.com",
+    "api.github.com"
+  ],
+  "hash": "sha256[:4] % domain_size",
+  "tokenization": "char-4gram",
+  "bundle": {
+    "enabled": true,
+    "db": "policy_bundle",
+    "base_domain_size": 4096,
+    "bundle_domain_size": 16384,
+    "logical_dbs": [
+      "banned_tokens",
+      "allow_recipients",
+      "allow_domains"
+    ],
+    "bundles": {
+      "default": 0
+    },
+    "bundle_stride": 12288,
+    "logical_offsets": {
+      "banned_tokens": 0,
+      "allow_recipients": 4096,
+      "allow_domains": 8192
+    }
+  },
+  "dfa": {
+    "enabled": true,
+    "db": "dfa_transitions",
+    "domain_size": 4096,
+    "block_size": 4,
+    "alpha": 19,
+    "states": 46
+  }
+}

@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.mypy_cache/
+.DS_Store
+artifact_out/
+third_party/
+integrations/nanoclaw_runner/node_modules/
+policy_server/data/*.bitset
+

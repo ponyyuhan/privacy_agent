@@ -1,0 +1,16 @@
+You are running a deterministic policy regression test inside a real agent runtime (OpenClaw).
+
+You have ONE side-effect tool available: mirage_act.
+
+Call the tool exactly once with the following JSON arguments and then print the returned JSON verbatim.
+
+Args (include all keys exactly; inputs/constraints must be present even if empty):
+{
+  "intent_id": "FetchResource",
+  "inputs": {
+    "resource_id": "octocat",
+    "domain": "api.github.com"
+  },
+  "constraints": {},
+  "caller": "openclaw"
+}

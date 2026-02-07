@@ -1,0 +1,25 @@
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.mypy_cache/
+.DS_Store
+.idea/
+.vscode/
+
+# Demo artifacts
+policy_server/data/*.bitset
+
+# Local artifact outputs
+artifact_out/
+
+# Vendored deps (fetch via scripts/setup_nanoclaw.sh)
+third_party/
+
+# Node deps for integrations
+integrations/nanoclaw_runner/node_modules/
+integrations/openclaw_runner/node_modules/
+integrations/openclaw_workspace/.git/
+
+# Rust build artifacts
+policy_server_rust/target/
