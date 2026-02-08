@@ -5,17 +5,24 @@ from .executors.fsexec import FSExec
 from .executors.msgexec import MsgExec
 from .executors.cryptoexec import CryptoExec
 from .executors.netexec import NetExec
+from .executors.webhookexec import WebhookExec
 from .guardrails import ObliviousGuardrails
+from .egress_policy import EgressPolicyEngine
+from .tx_store import TxStore
+from .capabilities import get_capabilities
 from .audit import AuditEvent, get_audit_logger, now_ts
 
 class IntentRouter:
     def __init__(self, handles: HandleStore, guardrails: ObliviousGuardrails):
         self.handles = handles
         self.guardrails = guardrails
+        self.tx_store = TxStore()
+        self.policy = EgressPolicyEngine(pir=guardrails.pir, handles=handles, tx_store=self.tx_store, domain_size=guardrails.domain_size, max_tokens=guardrails.max_tokens)
         self.fs = FSExec(handles)
-        self.msg = MsgExec(handles, guardrails)
+        self.msg = MsgExec(handles, self.policy)
         self.crypto = CryptoExec(handles)
-        self.net = NetExec(handles, guardrails)
+        self.net = NetExec(handles, self.policy)
+        self.webhook = WebhookExec(handles, self.policy)
 
     def act(self, intent_id: str, inputs: Dict[str, Any], constraints: Dict[str, Any], caller: str, session: str) -> Dict[str, Any]:
         audit = get_audit_logger()
@@ -29,6 +36,18 @@ class IntentRouter:
                 data={"input_keys": sorted(list((inputs or {}).keys()))},
             )
         )
+
+        caps = get_capabilities(caller)
+        if not caps.allow_intent(intent_id):
+            obs = {
+                "status": "DENY",
+                "summary": "Caller capability does not allow this intent.",
+                "data": {"caller": caller, "intent_id": intent_id},
+                "artifacts": [],
+                "reason_code": "CAPABILITY_DENY",
+            }
+            audit.log(AuditEvent(ts=now_ts(), event="act_result", session=session, caller=caller, intent_id=intent_id, status=str(obs.get("status", "")), reason_code=str(obs.get("reason_code", ""))))
+            return obs
 
         # Level 2: the agent cannot choose low-level tools; only intents exist.
         if intent_id == "ReadFile":
@@ -52,11 +71,19 @@ class IntentRouter:
             audit.log(AuditEvent(ts=now_ts(), event="act_result", session=session, caller=caller, intent_id=intent_id, status=str(obs.get("status", "")), reason_code=str(obs.get("reason_code", ""))))
             return obs
         if intent_id == "SendMessage":
-            obs = self.msg.send_message(inputs, session=session, caller=caller)
+            obs = self.msg.send_message(inputs, constraints, session=session, caller=caller)
+            audit.log(AuditEvent(ts=now_ts(), event="act_result", session=session, caller=caller, intent_id=intent_id, status=str(obs.get("status", "")), reason_code=str(obs.get("reason_code", ""))))
+            return obs
+        if intent_id == "CheckWebhookPolicy":
+            obs = self.webhook.check_webhook_policy(inputs, session=session, caller=caller)
+            audit.log(AuditEvent(ts=now_ts(), event="act_result", session=session, caller=caller, intent_id=intent_id, status=str(obs.get("status", "")), reason_code=str(obs.get("reason_code", ""))))
+            return obs
+        if intent_id == "PostWebhook":
+            obs = self.webhook.post_webhook(inputs, constraints, session=session, caller=caller)
             audit.log(AuditEvent(ts=now_ts(), event="act_result", session=session, caller=caller, intent_id=intent_id, status=str(obs.get("status", "")), reason_code=str(obs.get("reason_code", ""))))
             return obs
         if intent_id == "FetchResource":
-            obs = self.net.fetch(inputs, session=session, caller=caller)
+            obs = self.net.fetch(inputs, constraints, session=session, caller=caller)
             audit.log(AuditEvent(ts=now_ts(), event="act_result", session=session, caller=caller, intent_id=intent_id, status=str(obs.get("status", "")), reason_code=str(obs.get("reason_code", ""))))
             return obs
         if intent_id == "WriteWorkspaceFile":

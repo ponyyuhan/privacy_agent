@@ -1,0 +1,89 @@
+# Capability projection config for MIRAGE-OG++ demo.
+#
+# Caller identities are untrusted strings provided by the agent runtime, but are still useful
+# as a local policy knob in the trusted gateway (e.g., separate "openclaw" vs "nanoclaw").
+#
+# For a production system you would bind caller to a stronger identity (signed plugin manifest,
+# attestation, per-skill installation identity, etc).
+version: 1
+
+default:
+  allow_intents:
+    - ReadFile
+    - ReadSecret
+    - UseCredential
+    - Declassify
+    - DescribeHandle
+    - RevokeHandle
+    - RevokeSession
+    - ListWorkspaceFiles
+    - ReadWorkspaceFile
+    - WriteWorkspaceFile
+    - CheckMessagePolicy
+    - SendMessage
+    - FetchResource
+    - PostWebhook
+  egress:
+    send_message: true
+    fetch_resource: true
+    post_webhook: true
+
+callers:
+  # OpenClaw validation uses FetchResource + CheckMessagePolicy; real "SendMessage" can be
+  # blocked in capability to avoid depending on provider side-effect allowances.
+  openclaw:
+    allow_intents:
+      - ReadFile
+      - ReadSecret
+      - UseCredential
+      - Declassify
+      - DescribeHandle
+      - FetchResource
+      - CheckMessagePolicy
+    egress:
+      send_message: false
+      fetch_resource: true
+      post_webhook: false
+
+  nanoclaw:
+    allow_intents:
+      - ReadFile
+      - ReadSecret
+      - UseCredential
+      - Declassify
+      - DescribeHandle
+      - RevokeHandle
+      - RevokeSession
+      - ListWorkspaceFiles
+      - ReadWorkspaceFile
+      - WriteWorkspaceFile
+      - CheckMessagePolicy
+      - SendMessage
+      - FetchResource
+      - PostWebhook
+    egress:
+      send_message: true
+      fetch_resource: true
+      post_webhook: true
+
+  artifact:
+    allow_intents:
+      - ReadFile
+      - ReadSecret
+      - UseCredential
+      - Declassify
+      - DescribeHandle
+      - RevokeHandle
+      - RevokeSession
+      - ListWorkspaceFiles
+      - ReadWorkspaceFile
+      - WriteWorkspaceFile
+      - CheckMessagePolicy
+      - SendMessage
+      - FetchResource
+      - PostWebhook
+    egress:
+      send_message: true
+      fetch_resource: true
+      post_webhook: true
+

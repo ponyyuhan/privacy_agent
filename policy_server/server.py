@@ -11,8 +11,10 @@ import hmac
 import time
 from .config import settings
 from .db import BitsetDB
+from .mpc_engine import Gate, MpcSession, MpcSessionStore
 
 db = BitsetDB(settings.data_dir)
+mpc_store = MpcSessionStore()
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
@@ -33,6 +35,43 @@ class PirQueryBatch(BaseModel):
 
 class PirQueryBatchSigned(PirQueryBatch):
     action_id: str = Field(..., description="Opaque action identifier (bound into the MAC).")
+
+class MpcGate(BaseModel):
+    op: str
+    out: int
+    a: int | None = None
+    b: int | None = None
+    value: int | None = None
+
+
+class MpcInitReq(BaseModel):
+    action_id: str
+    program_id: str
+    request_sha256: str
+    n_wires: int
+    gates: list[MpcGate]
+    input_shares: dict[str, int] = Field(default_factory=dict, description="wire_index(str)->bit_share(0/1)")
+    outputs: dict[str, int] = Field(default_factory=dict, description="output_name->wire_index")
+    ttl_seconds: int = 30
+
+
+class MpcAndMaskReq(BaseModel):
+    action_id: str
+    gate_index: int
+    a_share: int
+    b_share: int
+    c_share: int
+
+
+class MpcAndFinishReq(BaseModel):
+    action_id: str
+    gate_index: int
+    d: int
+    e: int
+
+
+class MpcFinalizeReq(BaseModel):
+    action_id: str
 
 @app.get("/health")
 def health():
@@ -188,6 +227,82 @@ def pir_query_block_batch_signed(q: PirQueryBatchSigned):
     }
     return {
         "block_shares_b64": blocks_b64,
+        "proof": {
+            **payload,
+            "mac_b64": _mac_b64(key, payload),
+        },
+    }
+
+
+@app.post("/mpc/init")
+def mpc_init(req: MpcInitReq):
+    # Initialize/overwrite an MPC session keyed by action_id.
+    party = int(settings.server_id)
+    gates: list[Gate] = []
+    for g in req.gates:
+        gates.append(Gate(op=str(g.op), out=int(g.out), a=(int(g.a) if g.a is not None else None), b=(int(g.b) if g.b is not None else None), value=(int(g.value) if g.value is not None else None)))
+    # JSON object keys come in as strings.
+    input_shares: dict[int, int] = {}
+    for k, v in (req.input_shares or {}).items():
+        input_shares[int(k)] = int(v) & 1
+
+    sess = MpcSession(
+        action_id=req.action_id,
+        program_id=req.program_id,
+        request_sha256=req.request_sha256,
+        party=party,
+        n_wires=int(req.n_wires),
+        gates=gates,
+        input_shares=input_shares,
+        outputs=dict(req.outputs or {}),
+        ttl_seconds=int(req.ttl_seconds),
+    )
+    mpc_store.init(req.action_id, sess)
+    return {"ok": True, "party": party, "gates": len(gates)}
+
+
+@app.post("/mpc/and_mask")
+def mpc_and_mask(req: MpcAndMaskReq):
+    sess = mpc_store.get(req.action_id)
+    d_share, e_share = sess.and_mask(gate_index=int(req.gate_index), a_share=int(req.a_share), b_share=int(req.b_share), c_share=int(req.c_share))
+    return {"d_share": int(d_share) & 1, "e_share": int(e_share) & 1}
+
+
+@app.post("/mpc/and_finish")
+def mpc_and_finish(req: MpcAndFinishReq):
+    sess = mpc_store.get(req.action_id)
+    z = sess.and_finish(gate_index=int(req.gate_index), d=int(req.d), e=int(req.e))
+    return {"z_share": int(z) & 1}
+
+
+@app.post("/mpc/finalize")
+def mpc_finalize(req: MpcFinalizeReq):
+    sess = mpc_store.pop(req.action_id)
+    if not sess:
+        return {"ok": False, "error": "missing_session"}
+    kid, key = _active_mac_key()
+    if not key:
+        raise RuntimeError("POLICY_MAC_KEY not configured")
+
+    outs = sess.finalize()
+    commit_tag_share = os.urandom(16)
+    commit_tag_share_b64 = base64.b64encode(commit_tag_share).decode("ascii")
+    ts = int(time.time())
+    payload = {
+        "v": 1,
+        "kind": "commit",
+        "server_id": int(settings.server_id),
+        "kid": str(kid),
+        "ts": ts,
+        "action_id": str(sess.action_id),
+        "program_id": str(sess.program_id),
+        "request_sha256": str(sess.request_sha256),
+        "outputs": {k: int(v) & 1 for k, v in outs.items()},
+        "commit_tag_share_b64": commit_tag_share_b64,
+    }
+    return {
+        "ok": True,
+        "outputs": outs,
         "proof": {
             **payload,
             "mac_b64": _mac_b64(key, payload),

@@ -35,7 +35,9 @@
   * 保护 recipient / domain（同样通过 FSS‑PIR 查询）
   * 也就是说：policy server 能提供“集中规则库”，但**不知道你在检查谁、检查了什么内容片段**
 
-> 注意：此 demo 的网关是可信 TCB，因此网关能看到明文（这符合你要的“把复杂 agent 踢出信任域，只信任小网关”的系统论文路线）。如果你未来想把 gateway 也弱化信任，需要加 “commit token / 双人签署 / 2PC” 之类机制，我也在代码结构里留出了可扩展点。
+> 注意：此 demo 的网关仍在可信 TCB 内，因此网关能看到明文（符合你要的“把复杂 agent 踢出信任域，只信任小网关”的系统论文路线）。
+> 为了对齐 `guide.md` 的“完整版蓝图”，本仓库已经实现了 **PREVIEW→COMMIT + 2PC/MPC commit proofs**：即使网关逻辑被绕过，executor 仍会在 COMMIT 阶段基于两台 policy server 的双证明 fail-closed，并在 executor 内强制应用 `sanitize_patch`。
+> 如果你未来还想进一步弱化对 gateway 的信任（例如连 gateway 也不应看到明文/意图），仍需要把更多流程迁移到 MPC（例如更强的 oblivious routing / policy fetch 等）。
 
 ---
 
@@ -48,13 +50,20 @@ agent/
   nanoclaw_agent.py            # 极简 agent（benign / malicious 两种场景；通过 MCP 调用网关）
   mcp_client.py                # MCP stdio client（demo 用）
   skills/
+common/
+  canonical.py                 # request_sha256 绑定（PREVIEW->COMMIT）
+  sanitize.py                  # sanitize patch 定义与应用
 gateway/
   mcp_server.py                # MCP 网关入口：tool = mirage.act
   router.py                    # intent 路由（Level 2 的核心）
+  capabilities.yaml            # per-caller capability 配置
+  capabilities.py              # capability projection 实现
   handles.py                   # handle store（Level 1 的核心）
   guardrails.py                # Oblivious Guardrails（调用 PIR；两阶段 DLP：4-gram + DFA confirm）
   fss_pir.py                   # PIR client（使用 DPF/FSS，O(log N) keys）
+  egress_policy.py             # “完整版蓝图” egress policy engine（PIR + DSL->电路 + MPC PREVIEW->COMMIT）
   executor_client.py           # 调用 executor（提交双授权证据）
+  tx_store.py                  # PREVIEW token/tx_id 存储（可选 SQLite 持久化）
   executors/
 executor_server/
   server.py                    # Executor：验证 MAC 证明并执行外发/外联（不可绕过）
@@ -63,6 +72,7 @@ policy_server/
   db.py                        # bitset DB + DPF-eval(inner_product)
   dfa.py                       # Aho-Corasick DFA builder（confirm stage）
   build_dbs.py                 # 构建 banned_tokens / allow_recipients / allow_domains + DFA block DB
+  mpc_engine.py                # MPC evaluator（GMW + Beaver，提供 /mpc/*）
   data/
 policy_server_rust/
   ...                          # 可选 Rust 编译后端 policy server（同 API；更高吞吐）
@@ -90,15 +100,15 @@ fss/
 
 这就是典型的 **2‑server PIR with DPF/FSS** 的“点函数查询”骨架（本仓库已是 DPF 版本）。
 
-### 2) 这份 demo 里，“MPC”没有做成重型 2PC（这是刻意的）
+### 2) 这份 repo 现在已经实现了“通用 MPC policy engine + PREVIEW→COMMIT”
 
-原因：你前面强调的主线是“集中审计 + 本地隐私”悖论。这个悖论用 **2‑server FSS‑PIR** 就能非常自然地闭环：
+为了对齐 `guide.md` 的“完整版蓝图”，当前实现新增了：
 
-* policy 在远端集中维护
-* payload/intent token 不上传明文
-* 单个审计点看不到你在查什么
-
-如果你下一步要把 guardrails 从“查询 DB”升级为“执行更复杂函数”（例如 MatchQuest 正则、多模式流式匹配），再引入更强的 MPC/协议会更顺（你可以把这一版当作“系统骨架 + 可跑 demo”，下一版再把 guardrails 替换为 2PC/FSS‑Regex 引擎）。
+* **策略语言/DSL**：`policy_server/policy.yaml:policy_programs.egress_v1`，用 `& | ^ ~` 的布尔表达式描述 egress 策略与 sanitize patch 位。
+* **DSL→电路编译链**：网关 `gateway/egress_policy.py` 把 DSL 编译成布尔电路（gate list）。
+* **2PC/MPC 执行**：两台 policy server 通过 `/mpc/init`, `/mpc/and_mask`, `/mpc/and_finish`, `/mpc/finalize` 执行 GMW（XOR-share）+ Beaver triples（AND gate）。
+* **PREVIEW→COMMIT**：PREVIEW 产出 `tx_id` 与 `commit proof`（两台 server 的 MAC 证明），COMMIT 时 executor 验证双证据并在 executor 内应用 `sanitize_patch`（fail-closed）。
+* **intent shadowing / capability projection**：通过 secret-shared one-hot intent bits + 固定形状的 PIR 查询，让单个 policy server 更难从“请求形状/DB 选择”推断 `intent_id`；caller 能力由 `gateway/capabilities.yaml` 投影为 MPC 输入位。
 
 ---
 
@@ -173,7 +183,9 @@ POLICY_BACKEND=rust bash scripts/run_all.sh
 
 	  * 读私钥：只拿到 handle（看不到明文）
 	  * 试图把 handle 外发：被 `HIGH_HANDLE_BLOCKED`
-	  * 试图夹带 `AKIA...` 外发给 allowlisted recipient：被 `DLP_BLOCKED`
+	  * 试图夹带 `AKIA...` 外发给 allowlisted recipient：
+        * PREVIEW 返回 `REQUIRE_CONFIRM` + `sanitize_patch=REDACT` + `tx_id`
+        * 随后带 `tx_id` 且 `constraints.user_confirm=true` 的 COMMIT 会放行，但 executor 会强制 redaction 后再“发送”（demo stub）
 
 ---
 

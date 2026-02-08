@@ -234,7 +234,7 @@ P0/P1 在 2PC/MPC 中计算：
 G 重构 `allow=1` 后，生成 commit 请求给执行器 E，并附上：
 
 * `txid`
-* `sanitized_args`（G 根据 sanitize_patch 应用到输入）
+* `args`（未净化的 effectful args；E 在验证 token 后按 `sanitize_patch` 在执行器内强制净化/重写）
 * `token0`（来自 P0）
 * `token1`（来自 P1）
 
@@ -399,7 +399,7 @@ mirage-og/
       share.py                     # secret-share + padding
       preview_commit.py            # PREVIEW/COMMIT orchestration
   executors/
-    netexec.py                     # 只接受 sanitized_args + dual tokens
+    netexec.py                     # 接受 args + dual tokens；在执行器内强制 sanitize/deny
     fsexec.py
     cryptoexec.py
     msgexec.py

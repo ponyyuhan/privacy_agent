@@ -8,6 +8,8 @@ use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 use hmac::{Hmac, Mac};
 use rayon::prelude::*;
+use rand::rngs::OsRng;
+use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256, Sha512};
@@ -15,7 +17,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -29,6 +31,183 @@ struct AppState {
     active_kid: String,
     bitsets: Arc<HashMap<String, Arc<Vec<u8>>>>,
     blocks: Arc<HashMap<String, (Arc<Vec<u8>>, usize)>>,
+    mpc_sessions: Arc<Mutex<HashMap<String, MpcSession>>>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct MpcGate {
+    op: String,
+    out: usize,
+    a: Option<usize>,
+    b: Option<usize>,
+    value: Option<u8>,
+}
+
+#[derive(Debug)]
+struct MpcSession {
+    program_id: String,
+    request_sha256: String,
+    created_at: u64,
+    ttl_seconds: u64,
+    gates: Vec<MpcGate>,
+    wires: Vec<Option<u8>>,
+    outputs: HashMap<String, usize>,
+    pc: usize,
+    pending: HashMap<usize, (u8, u8, u8)>, // gate_index -> (a,b,c) shares
+}
+
+impl MpcSession {
+    fn expired(&self, now: u64) -> bool {
+        now.saturating_sub(self.created_at) > self.ttl_seconds
+    }
+
+    fn wire(&self, idx: usize) -> Result<u8, String> {
+        self.wires
+            .get(idx)
+            .and_then(|v| *v)
+            .map(|v| v & 1)
+            .ok_or_else(|| "wire_not_ready".to_string())
+    }
+
+    fn set_wire(&mut self, idx: usize, v: u8) -> Result<(), String> {
+        if idx >= self.wires.len() {
+            return Err("wire_oob".to_string());
+        }
+        self.wires[idx] = Some(v & 1);
+        Ok(())
+    }
+
+    fn eval_gate(&mut self, party: u8, gi: usize) -> Result<(), String> {
+        let g = self.gates.get(gi).ok_or_else(|| "gate_oob".to_string())?;
+        let op = g.op.to_ascii_uppercase();
+        if op == "XOR" {
+            let a = g.a.ok_or_else(|| "bad_gate".to_string())?;
+            let b = g.b.ok_or_else(|| "bad_gate".to_string())?;
+            let v = self.wire(a)? ^ self.wire(b)?;
+            self.set_wire(g.out, v)?;
+            return Ok(());
+        }
+        if op == "NOT" {
+            let a = g.a.ok_or_else(|| "bad_gate".to_string())?;
+            let v = self.wire(a)? ^ if party == 0 { 1 } else { 0 };
+            self.set_wire(g.out, v)?;
+            return Ok(());
+        }
+        if op == "CONST" {
+            let v = g.value.unwrap_or(0) & 1;
+            self.set_wire(g.out, if party == 0 { v } else { 0 })?;
+            return Ok(());
+        }
+        if op == "AND" {
+            return Err("and_requires_interaction".to_string());
+        }
+        Err("unknown_gate".to_string())
+    }
+
+    fn eval_until(&mut self, party: u8, gate_index: usize) -> Result<(), String> {
+        if gate_index > self.gates.len() {
+            return Err("gate_oob".to_string());
+        }
+        while self.pc < gate_index {
+            let op = self.gates[self.pc].op.to_ascii_uppercase();
+            if op == "AND" {
+                return Err("hit_and_early".to_string());
+            }
+            self.eval_gate(party, self.pc)?;
+            self.pc += 1;
+        }
+        Ok(())
+    }
+
+    fn and_mask(&mut self, party: u8, gate_index: usize, a_share: u8, b_share: u8, c_share: u8) -> Result<(u8, u8), String> {
+        if gate_index >= self.gates.len() {
+            return Err("gate_oob".to_string());
+        }
+        self.eval_until(party, gate_index)?;
+        if self.pc != gate_index {
+            return Err("bad_pc".to_string());
+        }
+        let g = &self.gates[gate_index];
+        if g.op.to_ascii_uppercase() != "AND" {
+            return Err("not_and_gate".to_string());
+        }
+        let a = g.a.ok_or_else(|| "bad_gate".to_string())?;
+        let b = g.b.ok_or_else(|| "bad_gate".to_string())?;
+        self.pending.insert(gate_index, (a_share & 1, b_share & 1, c_share & 1));
+        let d_share = self.wire(a)? ^ (a_share & 1);
+        let e_share = self.wire(b)? ^ (b_share & 1);
+        Ok((d_share & 1, e_share & 1))
+    }
+
+    fn and_finish(&mut self, party: u8, gate_index: usize, d: u8, e: u8) -> Result<u8, String> {
+        if self.pc != gate_index {
+            return Err("bad_pc".to_string());
+        }
+        let g = &self.gates[gate_index];
+        if g.op.to_ascii_uppercase() != "AND" {
+            return Err("not_and_gate".to_string());
+        }
+        let (a_share, b_share, c_share) = self.pending.remove(&gate_index).ok_or_else(|| "missing_triple".to_string())?;
+        let dd = d & 1;
+        let ee = e & 1;
+        let mut z = (c_share ^ (dd & b_share) ^ (ee & a_share)) & 1;
+        if party == 0 {
+            z ^= (dd & ee) & 1;
+        }
+        self.set_wire(g.out, z)?;
+        self.pc += 1;
+        Ok(z & 1)
+    }
+
+    fn finalize(&mut self, party: u8) -> Result<HashMap<String, u8>, String> {
+        while self.pc < self.gates.len() {
+            let op = self.gates[self.pc].op.to_ascii_uppercase();
+            if op == "AND" {
+                return Err("unfinished_and".to_string());
+            }
+            self.eval_gate(party, self.pc)?;
+            self.pc += 1;
+        }
+        let mut out = HashMap::new();
+        for (k, wi) in self.outputs.iter() {
+            out.insert(k.clone(), self.wire(*wi)? & 1);
+        }
+        Ok(out)
+    }
+}
+
+#[derive(Deserialize)]
+struct MpcInitReq {
+    action_id: String,
+    program_id: String,
+    request_sha256: String,
+    n_wires: usize,
+    gates: Vec<MpcGate>,
+    input_shares: HashMap<String, u8>,
+    outputs: HashMap<String, usize>,
+    ttl_seconds: Option<u64>,
+}
+
+#[derive(Deserialize)]
+struct MpcAndMaskReq {
+    action_id: String,
+    gate_index: usize,
+    a_share: u8,
+    b_share: u8,
+    c_share: u8,
+}
+
+#[derive(Deserialize)]
+struct MpcAndFinishReq {
+    action_id: String,
+    gate_index: usize,
+    d: u8,
+    e: u8,
+}
+
+#[derive(Deserialize)]
+struct MpcFinalizeReq {
+    action_id: String,
 }
 
 #[derive(Debug)]
@@ -539,6 +718,118 @@ async fn pir_query_block_batch_signed(
     }))
 }
 
+fn now_s() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+fn cleanup_mpc_sessions(map: &mut HashMap<String, MpcSession>) {
+    let now = now_s();
+    map.retain(|_, s| !s.expired(now));
+}
+
+async fn mpc_init(State(st): State<AppState>, Json(req): Json<MpcInitReq>) -> Result<Json<Value>, (StatusCode, String)> {
+    let mut wires: Vec<Option<u8>> = vec![None; req.n_wires];
+    for (k, v) in req.input_shares.iter() {
+        let idx: usize = k.parse::<usize>().map_err(|_| (StatusCode::BAD_REQUEST, "bad_wire_index".to_string()))?;
+        if idx >= wires.len() {
+            return Err((StatusCode::BAD_REQUEST, "wire_oob".to_string()));
+        }
+        wires[idx] = Some(v & 1);
+    }
+    let ttl = req.ttl_seconds.unwrap_or(30);
+    let sess = MpcSession {
+        program_id: req.program_id.clone(),
+        request_sha256: req.request_sha256.clone(),
+        created_at: now_s(),
+        ttl_seconds: ttl,
+        gates: req.gates.clone(),
+        wires,
+        outputs: req.outputs.clone(),
+        pc: 0,
+        pending: HashMap::new(),
+    };
+
+    let mut map = st.mpc_sessions.lock().unwrap();
+    cleanup_mpc_sessions(&mut map);
+    map.insert(req.action_id.clone(), sess);
+    Ok(Json(json!({"ok": true, "party": st.server_id, "gates": req.gates.len()})))
+}
+
+async fn mpc_and_mask(State(st): State<AppState>, Json(req): Json<MpcAndMaskReq>) -> Result<Json<Value>, (StatusCode, String)> {
+    let mut map = st.mpc_sessions.lock().unwrap();
+    cleanup_mpc_sessions(&mut map);
+    let sess = map.get_mut(&req.action_id).ok_or_else(|| (StatusCode::BAD_REQUEST, "missing_session".to_string()))?;
+    let (d, e) = sess
+        .and_mask(st.server_id, req.gate_index, req.a_share, req.b_share, req.c_share)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    Ok(Json(json!({"d_share": d & 1, "e_share": e & 1})))
+}
+
+async fn mpc_and_finish(State(st): State<AppState>, Json(req): Json<MpcAndFinishReq>) -> Result<Json<Value>, (StatusCode, String)> {
+    let mut map = st.mpc_sessions.lock().unwrap();
+    cleanup_mpc_sessions(&mut map);
+    let sess = map.get_mut(&req.action_id).ok_or_else(|| (StatusCode::BAD_REQUEST, "missing_session".to_string()))?;
+    let z = sess
+        .and_finish(st.server_id, req.gate_index, req.d, req.e)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    Ok(Json(json!({"z_share": z & 1})))
+}
+
+async fn mpc_finalize(State(st): State<AppState>, Json(req): Json<MpcFinalizeReq>) -> Result<Json<Value>, (StatusCode, String)> {
+    let mut sess = {
+        let mut map = st.mpc_sessions.lock().unwrap();
+        cleanup_mpc_sessions(&mut map);
+        map.remove(&req.action_id)
+    }
+    .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing_session".to_string()))?;
+
+    let outs = sess.finalize(st.server_id).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+
+    let kid = st.active_kid.clone();
+    let key = st
+        .mac_keys
+        .get(&kid)
+        .ok_or_else(|| (StatusCode::INTERNAL_SERVER_ERROR, "missing mac key".to_string()))?;
+
+    let mut tag = [0u8; 16];
+    OsRng.fill_bytes(&mut tag);
+    let tag_b64 = B64.encode(tag);
+    let ts = now_s() as i64;
+
+    let mut outs_obj = serde_json::Map::new();
+    for (k, v) in outs.iter() {
+        outs_obj.insert(k.clone(), Value::from((*v & 1) as i64));
+    }
+
+    let mut payload: BTreeMap<&str, Value> = BTreeMap::new();
+    payload.insert("v", Value::from(1));
+    payload.insert("kind", Value::from("commit"));
+    payload.insert("server_id", Value::from(st.server_id as i64));
+    payload.insert("kid", Value::from(kid.clone()));
+    payload.insert("ts", Value::from(ts));
+    payload.insert("action_id", Value::from(req.action_id.clone()));
+    payload.insert("program_id", Value::from(sess.program_id.clone()));
+    payload.insert("request_sha256", Value::from(sess.request_sha256.clone()));
+    payload.insert("outputs", Value::Object(outs_obj));
+    payload.insert("commit_tag_share_b64", Value::from(tag_b64.clone()));
+
+    let mac_b64 = sign_payload(key, &payload);
+    let mut proof_obj = serde_json::Map::new();
+    for (k, v) in payload.into_iter() {
+        proof_obj.insert(k.to_string(), v);
+    }
+    proof_obj.insert("mac_b64".to_string(), Value::from(mac_b64));
+
+    Ok(Json(json!({
+        "ok": true,
+        "outputs": outs,
+        "proof": Value::Object(proof_obj),
+    })))
+}
+
 fn load_bitsets(data_dir: &Path) -> HashMap<String, Arc<Vec<u8>>> {
     let mut out = HashMap::new();
     if let Ok(rd) = fs::read_dir(data_dir) {
@@ -632,6 +923,7 @@ async fn main() {
         active_kid,
         bitsets,
         blocks,
+        mpc_sessions: Arc::new(Mutex::new(HashMap::new())),
     };
 
     let app = Router::new()
@@ -641,10 +933,13 @@ async fn main() {
         .route("/pir/query_block_batch", post(pir_query_block_batch))
         .route("/pir/query_batch_signed", post(pir_query_batch_signed))
         .route("/pir/query_block_batch_signed", post(pir_query_block_batch_signed))
+        .route("/mpc/init", post(mpc_init))
+        .route("/mpc/and_mask", post(mpc_and_mask))
+        .route("/mpc/and_finish", post(mpc_and_finish))
+        .route("/mpc/finalize", post(mpc_finalize))
         .with_state(st);
 
     let addr = format!("0.0.0.0:{}", port);
     let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
     axum::serve(listener, app).await.unwrap();
 }
-

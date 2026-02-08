@@ -87,6 +87,23 @@ def run_malicious(mcp: McpStdioClient):
     )
     print("[step3] SendMessage(secret text) ->", json.dumps(obs3, indent=2))
 
+    # 3.5) Demonstrate PREVIEW->COMMIT: re-commit the preview with explicit user confirmation.
+    tx_id = (obs3.get("data") or {}).get("tx_id")
+    if isinstance(tx_id, str) and tx_id:
+        obs35 = call_act(
+            mcp,
+            "SendMessage",
+            inputs={
+                "tx_id": tx_id,
+                "channel": "email",
+                "recipient": "alice@example.com",
+                "text": "FYI: AKIA1234567890ABCD is the temporary token. Keep it safe.",
+                "artifacts": [],
+            },
+            constraints={"user_confirm": True},
+        )
+        print("[step3.5] SendMessage(commit w/ confirm) ->", json.dumps(obs35, indent=2))
+
 def main():
     if len(sys.argv) < 2:
         print("Usage: python -m agent.nanoclaw_agent [benign|malicious]")

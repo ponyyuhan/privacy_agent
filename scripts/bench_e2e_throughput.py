@@ -14,9 +14,10 @@ from pathlib import Path
 import requests
 
 from gateway.fss_pir import PirClient
-from gateway.guardrails import ObliviousGuardrails
 from gateway.handles import HandleStore
 from gateway.executors.msgexec import MsgExec
+from gateway.egress_policy import EgressPolicyEngine
+from gateway.tx_store import TxStore
 
 
 def pick_port() -> int:
@@ -71,7 +72,7 @@ def main() -> None:
     executor_url = os.getenv("EXECUTOR_URL", f"http://127.0.0.1:{ex_port}")
 
     dlp_mode = os.getenv("DLP_MODE", "fourgram").strip().lower()
-    use_bundle = bool(int(os.getenv("USE_POLICY_BUNDLE", "0")))
+    use_bundle = bool(int(os.getenv("USE_POLICY_BUNDLE", "1")))
     shape_all = bool(int(os.getenv("SHAPE_ALL_INTENTS", "0")))
 
     # Fresh keys per run
@@ -148,8 +149,8 @@ def main() -> None:
         # Gateway objects (in-process). These still do network calls to policy servers + executor.
         handles = HandleStore()
         pir = PirClient(policy0_url=policy0_url, policy1_url=policy1_url, domain_size=int(os.getenv("FSS_DOMAIN_SIZE", "4096")))
-        guardrails = ObliviousGuardrails(pir=pir, handles=handles, domain_size=pir.domain_size, max_tokens=int(os.getenv("MAX_TOKENS_PER_MESSAGE", "32")))
-        msg = MsgExec(handles, guardrails)
+        policy = EgressPolicyEngine(pir=pir, handles=handles, tx_store=TxStore(), domain_size=pir.domain_size, max_tokens=int(os.getenv("MAX_TOKENS_PER_MESSAGE", "32")))
+        msg = MsgExec(handles, policy)
 
         recipient = "alice@example.com"
         text = "Hello Alice, here is the weekly update. Nothing sensitive."
@@ -163,6 +164,7 @@ def main() -> None:
                     "text": text,
                     "artifacts": [],
                 },
+                {},
                 session="bench",
                 caller="bench",
             )

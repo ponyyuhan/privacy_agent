@@ -11,6 +11,8 @@ import uvicorn
 from fastapi import FastAPI
 from pydantic import BaseModel, Field
 
+from common.canonical import request_sha256_v1
+from common.sanitize import SanitizePatch, apply_patch_to_domain, apply_patch_to_message
 
 def _sha256_hex(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
@@ -128,6 +130,78 @@ def _validate_proof_common(proof: dict, *, kind: str, action_id: str, db: str) -
     if not _verify_mac(proof, key):
         return False, "bad_mac"
     return True, "OK"
+
+
+def _validate_commit_proof_common(proof: dict, *, action_id: str, program_id: str, request_sha256: str) -> tuple[bool, str]:
+    if not isinstance(proof, dict):
+        return False, "bad_proof"
+    if proof.get("v") != 1:
+        return False, "bad_proof_version"
+    if proof.get("kind") != "commit":
+        return False, "bad_proof_kind"
+    if proof.get("action_id") != action_id:
+        return False, "bad_action_id"
+    if proof.get("program_id") != program_id:
+        return False, "bad_program_id"
+    if proof.get("request_sha256") != request_sha256:
+        return False, "bad_request_sha256"
+    try:
+        ts = int(proof.get("ts"))
+    except Exception:
+        return False, "bad_ts"
+    now = int(time.time())
+    if abs(now - ts) > MAC_TTL_S:
+        return False, "expired_proof"
+    try:
+        server_id = int(proof.get("server_id"))
+    except Exception:
+        return False, "bad_server_id"
+    kid = str(proof.get("kid") or "0")
+    try:
+        key = _mac_key_for_server(server_id, kid=kid)
+    except Exception:
+        return False, "unknown_kid"
+    if not _verify_mac(proof, key):
+        return False, "bad_mac"
+    return True, "OK"
+
+
+def _verify_commit_evidence(commit: dict, *, action_id: str, program_id: str, request_sha256: str) -> tuple[Optional[dict[str, int]], Optional[bytes], str]:
+    if not isinstance(commit, dict):
+        return None, None, "missing_commit"
+    p0 = commit.get("policy0")
+    p1 = commit.get("policy1")
+    ok0, code0 = _validate_commit_proof_common(p0, action_id=action_id, program_id=program_id, request_sha256=request_sha256)
+    if not ok0:
+        return None, None, code0
+    ok1, code1 = _validate_commit_proof_common(p1, action_id=action_id, program_id=program_id, request_sha256=request_sha256)
+    if not ok1:
+        return None, None, code1
+
+    outs0 = p0.get("outputs") if isinstance(p0, dict) else None
+    outs1 = p1.get("outputs") if isinstance(p1, dict) else None
+    if not isinstance(outs0, dict) or not isinstance(outs1, dict):
+        return None, None, "bad_outputs"
+
+    # Reconstruct outputs by XOR-ing shares.
+    outs: dict[str, int] = {}
+    keys = set(str(k) for k in outs0.keys()) | set(str(k) for k in outs1.keys())
+    for k in keys:
+        a = int(outs0.get(k, 0)) & 1
+        b = int(outs1.get(k, 0)) & 1
+        outs[str(k)] = (a ^ b) & 1
+
+    tag0_b64 = str((p0 or {}).get("commit_tag_share_b64") or "")
+    tag1_b64 = str((p1 or {}).get("commit_tag_share_b64") or "")
+    try:
+        t0 = base64.b64decode(tag0_b64) if tag0_b64 else b""
+        t1 = base64.b64decode(tag1_b64) if tag1_b64 else b""
+    except Exception:
+        return None, None, "bad_commit_tag_b64"
+    if len(t0) != len(t1) or len(t0) == 0:
+        return None, None, "bad_commit_tag_len"
+    tag = bytes([x ^ y for x, y in zip(t0, t1)])
+    return outs, tag, "OK"
 
 
 def _verify_bit_batch_evidence(ev: dict, *, action_id: str, logical_db: str, allowed_dbs: list[str]) -> tuple[Optional[List[int]], str]:
@@ -252,10 +326,15 @@ class ExecSendMessageReq(BaseModel):
     action_id: str
     channel: str = "email"
     recipient: str
+    domain: str = ""
     text: str
     artifacts: list[dict[str, Any]] = Field(default_factory=list)
     dlp_mode: str = "fourgram"
     evidence: dict[str, Any] = Field(default_factory=dict)
+    commit: dict[str, Any] = Field(default_factory=dict)
+    caller: str = ""
+    session: str = ""
+    user_confirm: bool = False
 
 
 class ExecFetchReq(BaseModel):
@@ -263,6 +342,26 @@ class ExecFetchReq(BaseModel):
     resource_id: str = "example"
     domain: str
     evidence: dict[str, Any] = Field(default_factory=dict)
+    commit: dict[str, Any] = Field(default_factory=dict)
+    caller: str = ""
+    session: str = ""
+    user_confirm: bool = False
+    recipient: str = ""
+    text: str = ""
+
+
+class ExecWebhookReq(BaseModel):
+    action_id: str
+    domain: str
+    path: str = "/"
+    body: str = ""
+    evidence: dict[str, Any] = Field(default_factory=dict)
+    commit: dict[str, Any] = Field(default_factory=dict)
+    caller: str = ""
+    session: str = ""
+    user_confirm: bool = False
+    recipient: str = ""
+    text: str = ""
 
 
 app = FastAPI(title="MIRAGE-OG++ Executor", version="0.1")
@@ -281,6 +380,36 @@ def exec_send_message(req: ExecSendMessageReq):
     # Hard-stop: never allow exporting handles as artifacts in this demo executor.
     if req.artifacts:
         return {"status": "DENY", "reason_code": "ARTIFACTS_NOT_ALLOWED"}
+
+    # New path: PREVIEW->COMMIT commit tokens from both policy servers.
+    if isinstance(req.commit, dict) and req.commit.get("policy0") and req.commit.get("policy1"):
+        request_sha = request_sha256_v1(
+            intent_id="SendMessage",
+            caller=str(req.caller or ""),
+            session=str(req.session or ""),
+            inputs={"channel": str(req.channel), "recipient": str(req.recipient), "domain": str(req.domain), "text": str(req.text)},
+        )
+        outs, tag, code = _verify_commit_evidence(req.commit, action_id=action_id, program_id="egress_v1", request_sha256=request_sha)
+        if outs is None:
+            return {"status": "DENY", "reason_code": "BAD_COMMIT_PROOF", "details": code}
+        allow_pre = int(outs.get("allow_pre", 0)) & 1
+        need_confirm = int(outs.get("need_confirm", 0)) & 1
+        patch0 = int(outs.get("patch0", 0)) & 1
+        patch1 = int(outs.get("patch1", 0)) & 1
+        patch_id = (patch0 | (patch1 << 1)) & 3
+        if allow_pre != 1:
+            return {"status": "DENY", "reason_code": "POLICY_DENY"}
+        if need_confirm == 1 and not bool(req.user_confirm):
+            patch = SanitizePatch(patch_id, {})
+            preview = apply_patch_to_message(text=req.text, patch=patch)
+            return {"status": "DENY", "reason_code": "REQUIRE_CONFIRM", "data": {"text_preview": preview[:200]}}
+        patch = SanitizePatch(patch_id, {})
+        out_text = apply_patch_to_message(text=req.text, patch=patch)
+        return {
+            "status": "OK",
+            "reason_code": "ALLOW",
+            "data": {"recipient": req.recipient, "sent_chars": len(out_text), "commit_tag_b64": base64.b64encode(tag or b"").decode("ascii")},
+        }
 
     # Recipient allowlist must be proven by both servers.
     recon, code = _verify_bit_batch_evidence(
@@ -323,6 +452,28 @@ def exec_fetch(req: ExecFetchReq):
     action_id = req.action_id
     ev = req.evidence or {}
 
+    if isinstance(req.commit, dict) and req.commit.get("policy0") and req.commit.get("policy1"):
+        request_sha = request_sha256_v1(
+            intent_id="FetchResource",
+            caller=str(req.caller or ""),
+            session=str(req.session or ""),
+            inputs={"resource_id": str(req.resource_id), "recipient": str(req.recipient), "domain": str(req.domain), "text": str(req.text)},
+        )
+        outs, tag, code = _verify_commit_evidence(req.commit, action_id=action_id, program_id="egress_v1", request_sha256=request_sha)
+        if outs is None:
+            return {"status": "DENY", "reason_code": "BAD_COMMIT_PROOF", "details": code}
+        allow_pre = int(outs.get("allow_pre", 0)) & 1
+        need_confirm = int(outs.get("need_confirm", 0)) & 1
+        if allow_pre != 1:
+            return {"status": "DENY", "reason_code": "POLICY_DENY"}
+        if need_confirm == 1 and not bool(req.user_confirm):
+            return {"status": "DENY", "reason_code": "REQUIRE_CONFIRM"}
+        return {
+            "status": "OK",
+            "reason_code": "ALLOW",
+            "data": {"resource_id": req.resource_id, "domain": req.domain, "content_preview": "<html>...</html>", "commit_tag_b64": base64.b64encode(tag or b"").decode("ascii")},
+        }
+
     recon, code = _verify_bit_batch_evidence(
         ev.get("allow_domains") or {},
         action_id=action_id,
@@ -338,6 +489,41 @@ def exec_fetch(req: ExecFetchReq):
         "reason_code": "ALLOW",
         "data": {"resource_id": req.resource_id, "domain": req.domain, "content_preview": "<html>...</html>"},
     }
+
+
+@app.post("/exec/webhook")
+def exec_webhook(req: ExecWebhookReq):
+    action_id = req.action_id
+    if isinstance(req.commit, dict) and req.commit.get("policy0") and req.commit.get("policy1"):
+        request_sha = request_sha256_v1(
+            intent_id="PostWebhook",
+            caller=str(req.caller or ""),
+            session=str(req.session or ""),
+            inputs={"path": str(req.path), "body": str(req.body), "recipient": str(req.recipient), "domain": str(req.domain), "text": str(req.text)},
+        )
+        outs, tag, code = _verify_commit_evidence(req.commit, action_id=action_id, program_id="egress_v1", request_sha256=request_sha)
+        if outs is None:
+            return {"status": "DENY", "reason_code": "BAD_COMMIT_PROOF", "details": code}
+        allow_pre = int(outs.get("allow_pre", 0)) & 1
+        need_confirm = int(outs.get("need_confirm", 0)) & 1
+        patch0 = int(outs.get("patch0", 0)) & 1
+        patch1 = int(outs.get("patch1", 0)) & 1
+        patch_id = (patch0 | (patch1 << 1)) & 3
+        if allow_pre != 1:
+            return {"status": "DENY", "reason_code": "POLICY_DENY"}
+        if need_confirm == 1 and not bool(req.user_confirm):
+            patch = SanitizePatch(patch_id, {})
+            preview = apply_patch_to_message(text=req.body, patch=patch)
+            return {"status": "DENY", "reason_code": "REQUIRE_CONFIRM", "data": {"body_preview": preview[:200]}}
+        patch = SanitizePatch(patch_id, {})
+        out_body = apply_patch_to_message(text=req.body, patch=patch)
+        out_domain = apply_patch_to_domain(domain=req.domain, patch=patch)
+        return {
+            "status": "OK",
+            "reason_code": "ALLOW",
+            "data": {"domain": out_domain, "path": req.path, "sent_chars": len(out_body), "commit_tag_b64": base64.b64encode(tag or b"").decode("ascii")},
+        }
+    return {"status": "DENY", "reason_code": "MISSING_EVIDENCE"}
 
 
 def main():

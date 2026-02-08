@@ -45,7 +45,7 @@ bash scripts/run_nanoclaw.sh
   - `ReadFile(~/.ssh/id_rsa)` 只返回 `handle`（不返回私钥明文；本 demo 会把该路径映射到 repo 内置的假 key 文件）。
   - `Declassify(handle)` 未提供 `user_confirm` 时被拒绝（`REQUIRE_CONFIRM`）。
   - 携带 `HIGH` handle 的 `SendMessage` 被拒绝（`HIGH_HANDLE_BLOCKED`）。
-  - 外发文本包含 AWS-like token 子串时被拒绝（`DLP_BLOCKED`）。
+  - 外发文本包含 AWS-like token 子串时：PREVIEW 返回 `REQUIRE_CONFIRM` + `sanitize_patch=REDACT` + `tx_id`；随后带 `tx_id` 且 `constraints.user_confirm=true` 的 COMMIT 会被放行，并在 executor 内强制 redaction（`ALLOW`）。
 
 如果你需要使用 **OpenAI OAuth** 的“真实 agent”验证（通过 OpenClaw 的 `openai-codex` provider），可运行：
 
@@ -67,7 +67,7 @@ bash scripts/run_openclaw.sh
   - `ReadFile(~/.ssh/id_rsa)` 只返回 `handle`（不返回明文；本 demo 会把该路径映射到 repo 内置的假 key 文件）。
   - `Declassify(handle)` 未提供 `user_confirm` 时被拒绝（`REQUIRE_CONFIRM`）。
   - `CheckMessagePolicy(..., artifacts=[handle], recipient=evil@attacker.invalid)` 被拒绝（`HIGH_HANDLE_BLOCKED`）。
-  - `CheckMessagePolicy(recipient=alice@example.com, text contains "AKIA...")` 被拒绝（`DLP_BLOCKED`）。
+  - `CheckMessagePolicy(recipient=alice@example.com, text contains "AKIA...")` 返回 `REQUIRE_CONFIRM` + `sanitize_patch=REDACT` + `tx_id`（PREVIEW token）。
 
 ## Level 1：为什么 Sealed Handles 能阻止“明文泄露给 Agent”
 

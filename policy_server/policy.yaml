@@ -26,3 +26,29 @@ dfa_enabled: true
 # Build an additional concatenated bitset DB (`policy_bundle.bitset`) that can be used
 # to hide `db_name` from policy servers (gateway knob: USE_POLICY_BUNDLE=1).
 bundle_enabled: true
+
+# --- "Full blueprint" policy programs (DSL -> boolean circuit -> 2PC/MPC) ---
+#
+# The gateway compiles these expressions into an MPC circuit executed by the 2 policy servers
+# (GMW on XOR shares + Beaver triples for AND). The executor verifies dual commit proofs.
+#
+# Expression syntax: bitwise boolean ops over named inputs: `&` (AND), `|` (OR), `^` (XOR), `~` (NOT).
+# Constants: `0` and `1`. Parentheses supported.
+policy_programs:
+  egress_v1:
+    intents:
+      SendMessage:
+        allow_pre: "cap_send & recipient_ok & ~high_handle_present"
+        need_confirm: "dlp_hit"
+        patch0: "dlp_hit"   # patch_id bit0 (1 => REDACT)
+        patch1: "0"         # patch_id bit1
+      FetchResource:
+        allow_pre: "cap_fetch & domain_ok"
+        need_confirm: "0"
+        patch0: "0"
+        patch1: "0"
+      PostWebhook:
+        allow_pre: "cap_webhook & domain_ok & ~high_handle_present"
+        need_confirm: "dlp_hit"
+        patch0: "dlp_hit"
+        patch1: "0"
