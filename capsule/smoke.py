@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 from typing import Any, Dict
 
@@ -17,6 +18,20 @@ def _try_read(path: str) -> dict[str, Any]:
         return {"ok": True, "note": "unexpected: read succeeded"}
     except Exception as e:
         return {"ok": False, "error": type(e).__name__, "details": str(e)[:200]}
+
+def _try_exec(argv: list[str]) -> dict[str, Any]:
+    try:
+        p = subprocess.run(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=2.0, check=False, text=True)
+        return {
+            "ok": p.returncode == 0,
+            "spawned": True,
+            "returncode": int(p.returncode),
+            "stdout": (p.stdout or "")[:200],
+            "stderr": (p.stderr or "")[:200],
+            "note": "unexpected: exec succeeded" if p.returncode == 0 else "unexpected: exec was allowed but returned nonzero",
+        }
+    except Exception as e:
+        return {"ok": False, "spawned": False, "error": type(e).__name__, "details": str(e)[:200]}
 
 
 def _try_internet(url: str) -> dict[str, Any]:
@@ -72,8 +87,15 @@ def _try_gateway_mcp() -> dict[str, Any]:
 
 
 def main() -> None:
+    host_secret = (os.getenv("MIRAGE_CAPSULE_SECRET_PATH") or "").strip()
+    if not host_secret:
+        host_secret = os.path.expanduser("~/.ssh/id_rsa")
     report: Dict[str, Any] = {
-        "direct_fs_read": _try_read(os.path.expanduser("~/.ssh/id_rsa")),
+        "direct_fs_read": _try_read(host_secret),
+        # Deterministic "exec should be blocked" check (independent of network/DNS).
+        "direct_exec_true": _try_exec(["/usr/bin/true"]),
+        # Representative attack chain primitive (should also be blocked).
+        "direct_exec_sh": _try_exec(["/bin/sh", "-c", "echo capsule_exec_ok"]),
         "direct_internet": _try_internet("https://example.com/"),
         "gateway_http_act": _try_gateway_http(),
         "gateway_mcp_act": _try_gateway_mcp(),
@@ -83,4 +105,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

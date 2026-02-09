@@ -262,7 +262,9 @@ This runs:
 - unit tests
 - FSS/DPF micro-benchmark
 - end-to-end report generation (`artifact_out/report.json`)
-- end-to-end throughput micro-bench (`artifact_out/bench_e2e.json`)
+- end-to-end throughput micro-bench:
+  - Python policy server: `artifact_out/bench_e2e.json`
+  - Rust policy server (optional): `artifact_out/bench_e2e.rust.json`
 
 What to look at:
 
@@ -277,6 +279,7 @@ Example outcomes from an artifact run on **2026-02-09** (local macOS dev machine
 
 - Capsule smoke (`report.json:capsule_smoke`):
   - `direct_fs_read.ok == false` (host secret path is not accessible)
+  - `direct_exec_true.ok == false` and `direct_exec_sh.ok == false` (direct process exec is blocked)
   - `direct_internet.ok == false` (public Internet blocked)
   - `gateway_http_act.ok == true` and `gateway_mcp_act.ok == true`
 - Skill ingress (`report.json:skill_ingress`):
@@ -347,12 +350,50 @@ Reproduce:
 ```bash
 python scripts/bench_fss.py
 BENCH_ITERS=10 BENCH_CONCURRENCY=2 python scripts/bench_e2e_throughput.py
+POLICY_BACKEND=rust BENCH_ITERS=10 BENCH_CONCURRENCY=2 BENCH_OUT_PATH=artifact_out/bench_e2e.rust.json python scripts/bench_e2e_throughput.py
 ```
 
 Example results from `python main.py artifact` on 2026-02-09 (local macOS dev machine):
 
-- FSS/DPF microbench (`artifact_out/bench_fss.txt`): `domain_size=4096`, `dpf_key_bytes=235`, `eval_pir_share_avg_s=0.009652` (includes keygen + 2 evals).
-- E2E throughput (`artifact_out/bench_e2e.json`): `throughput_ops_s=0.726` at `concurrency=2`, `iters=10` (includes PREVIEW→COMMIT MPC commit proof verification).
+- FSS/DPF microbench (`artifact_out/bench_fss.txt`): `domain_size=4096`, `dpf_key_bytes=235`, `eval_pir_share_avg_s=0.009585` (includes keygen + 2 evals).
+- E2E throughput (Python policy server, `artifact_out/bench_e2e.json`): `throughput_ops_s=0.731` at `concurrency=2`, `iters=10` (includes PREVIEW→COMMIT MPC commit proof verification).
+- E2E throughput (Rust policy server, `artifact_out/bench_e2e.rust.json`): `throughput_ops_s=10.929` at `concurrency=2`, `iters=10` (same workload; compiled PIR backend reduces O(N) constant).
+
+## Threat Coverage: ClawHub-Style Malicious Skills (SKILL.md Supply Chain)
+
+This repo’s **capsule + skill ingress** path is designed for the concrete attack class seen in the OpenClaw ecosystem:
+
+1. A skill marketplace distributes a “skill folder” whose core is a `SKILL.md`.
+2. `SKILL.md` social-engineers the user/runtime to run shell commands (e.g. `curl | bash`, base64 decode pipelines, staged loaders).
+3. First-stage scripts download a second-stage payload, then steal local files and exfiltrate to a small set of C2 domains/IPs.
+
+What MIRAGE-OG++ enforces (demo scope):
+
+- **No raw “clickfix” docs by default**: staged skill packages are `HIGH` handles; `DescribeSkill` returns a sanitized summary (links/code blocks redacted). Raw display requires explicit `Declassify(..., user_confirm=true)`.
+- **Skill enable is a guarded side effect**: `ImportSkill` stages only; `CheckSkillInstallPolicy` runs PIR membership queries against IOC DBs and “install marker” DBs (via `policy_bundle`) and evaluates `policy_programs.skill_ingress_v1` in MPC; `CommitSkillInstall` requires **dual MAC commit proofs** (fail-closed).
+- **OS-level mediation for bypass attempts (capsule MVP)**: the capsule denies host-secret reads, blocks public Internet, and blocks arbitrary process execution. The artifact smoke test records deterministic `PermissionError` failures for these cases (`report.json:capsule_smoke`).
+- **Even after enable, side effects are non-bypassable**: egress/network side effects go through the executor, which requires MAC-backed evidence from **both** policy servers and enforces `sanitize_patch` at commit time.
+
+Limitations (honest demo scope):
+
+- IOC / keyword markers are only as good as the DB. The point here is the **non-bypassable enforcement line** and the ability to use centralized policy DBs without revealing query contents to any single server.
+- The capsule is an MVP (`sandbox-exec` on macOS). A production capsule would need a cross-platform sandbox (Linux namespaces/seccomp, Windows job objects/AppContainer) and hardening against OS escapes.
+
+## Relation To “Guardrail Models” (arXiv:2601.15588v1, YuFeng-XGuard)
+
+`tmp/pdfs/2601.15588v1.pdf` (YuFeng-XGuard) is a **reasoning-centric guardrail model**: it classifies risk categories, produces confidence scores, and can generate explanations. That is fundamentally different from MIRAGE-OG++:
+
+- MIRAGE-OG++ is a **system-level reference monitor** that enforces *non-bypassability* (executor dual authorization) and *privacy-preserving centralized policy checks* (2-server PIR + 2PC/MPC), independent of LLM compliance.
+- A guardrail model can be plugged into the gateway as an additional signal (e.g. set `need_confirm` or pick stricter patches), but by itself it does not provide dual-authorization enforcement or policy-server single-point privacy.
+
+## What Still Separates This From A Production “Full System”
+
+This repo is intentionally a research demo. The biggest gaps to production hardening are:
+
+- **FSS performance**: the demo uses SHA-based PRG for clarity; a production DPF/FSS backend would use AES/CTR PRG + SIMD/vectorized evaluation and tighter constant factors.
+- **MPC maturity**: the demo includes a boolean-circuit GMW+Beaver evaluator; production deployments would likely use a battle-tested 2PC framework (e.g. MOTION2NX/ABY2) and a richer policy IR (budgets, rate limits, typed flows, stateful counters).
+- **Traffic analysis resistance**: fixed-shape token padding + intent shadowing + bundles reduce leakage, but a production system would need cover traffic / batching across users and constant-time response shaping.
+- **Identity/session security**: production deployments should use strong authentication and binding (mTLS, per-session keys, attestation), strict revocation semantics, and encrypted persistence for handle/tx stores.
 
 ## Configuration Knobs (Selected)
 

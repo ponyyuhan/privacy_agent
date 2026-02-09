@@ -20,7 +20,16 @@ OUT_CSV="$OUT_DIR/bench_fss_curve.csv" python scripts/bench_fss_curve.py | tee "
 echo "[artifact] 3) end-to-end demo + JSON report (policy servers + executor + MCP gateway)"
 python scripts/artifact_report.py | tee "$OUT_DIR/report_path.txt"
 
-echo "[artifact] 4) end-to-end throughput (short)"
-BENCH_ITERS="${BENCH_ITERS:-10}" BENCH_CONCURRENCY="${BENCH_CONCURRENCY:-2}" python scripts/bench_e2e_throughput.py | tee "$OUT_DIR/bench_e2e_path.txt"
+echo "[artifact] 4) end-to-end throughput (short) [python policy servers]"
+BENCH_ITERS="${BENCH_ITERS:-10}" BENCH_CONCURRENCY="${BENCH_CONCURRENCY:-2}" POLICY_BACKEND=python BENCH_OUT_PATH="$OUT_DIR/bench_e2e.json" \
+  python scripts/bench_e2e_throughput.py | tee "$OUT_DIR/bench_e2e_path.txt"
+
+echo "[artifact] 4b) end-to-end throughput (short) [rust policy servers, optional]"
+if command -v cargo >/dev/null 2>&1; then
+  BENCH_ITERS="${BENCH_ITERS:-10}" BENCH_CONCURRENCY="${BENCH_CONCURRENCY:-2}" POLICY_BACKEND=rust BENCH_OUT_PATH="$OUT_DIR/bench_e2e.rust.json" \
+    python scripts/bench_e2e_throughput.py | tee "$OUT_DIR/bench_e2e_rust_path.txt"
+else
+  echo "[artifact] cargo not found; skipping rust throughput bench." | tee "$OUT_DIR/bench_e2e_rust_path.txt"
+fi
 
 echo "[artifact] done; outputs at: $OUT_DIR"

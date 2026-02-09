@@ -203,7 +203,13 @@ def main() -> None:
             "throughput_ops_s": round(thr, 3),
         }
 
-        out_path = out_dir / "bench_e2e.json"
+        out_path_env = (os.getenv("BENCH_OUT_PATH") or "").strip()
+        if out_path_env:
+            out_path = Path(out_path_env)
+            if not out_path.is_absolute():
+                out_path = out_dir / out_path
+        else:
+            out_path = out_dir / "bench_e2e.json"
         out_path.write_text(json.dumps(row, indent=2, sort_keys=True) + "\n")
         print(str(out_path))
     finally:

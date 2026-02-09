@@ -20,7 +20,8 @@ Outputs are written to `artifact_out/`:
 - `artifact_out/unittest.txt`
 - `artifact_out/bench_fss.txt`
 - `artifact_out/report.json` (machine-readable end-to-end result)
-- `artifact_out/bench_e2e.json` (short end-to-end throughput numbers)
+- `artifact_out/bench_e2e.json` (short end-to-end throughput numbers; Python policy server)
+- `artifact_out/bench_e2e.rust.json` (same throughput workload; Rust policy server backend, if `cargo` is available)
 - `artifact_out/audit.jsonl` (gateway audit trail; JSONL)
 
 ## “Real Agent” Integration (NanoClaw Runtime)

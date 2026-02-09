@@ -46,6 +46,7 @@ cleanup () {
   if [[ -n "${EX:-}" ]]; then kill "$EX" 2>/dev/null || true; fi
   if [[ -n "${P0:-}" ]]; then kill "$P0" 2>/dev/null || true; fi
   if [[ -n "${P1:-}" ]]; then kill "$P1" 2>/dev/null || true; fi
+  if [[ -n "${CAPSULE_SECRET_PATH:-}" ]]; then rm -f "$CAPSULE_SECRET_PATH" 2>/dev/null || true; fi
 }
 trap cleanup EXIT
 
@@ -88,6 +89,13 @@ mkdir -p "$OUT_DIR"
 CAPSULE_WORKSPACE="$OUT_DIR/capsule_workspace"
 CAPSULE_STATE="$OUT_DIR/capsule_state"
 mkdir -p "$CAPSULE_WORKSPACE" "$CAPSULE_STATE"
+
+# Create a deterministic "host secret" outside the sandbox allowlist, so the smoke test
+# proves we get a permission denial (not just FileNotFoundError).
+CAPSULE_SECRET_PATH="${CAPSULE_SECRET_PATH:-$HOME/.mirage_capsule_secret_test_$(python -c 'import secrets; print(secrets.token_hex(4))')}"
+echo "capsule-host-secret" > "$CAPSULE_SECRET_PATH"
+chmod 600 "$CAPSULE_SECRET_PATH" 2>/dev/null || true
+export MIRAGE_CAPSULE_SECRET_PATH="$CAPSULE_SECRET_PATH"
 
 TMPDIR="${TMPDIR:-/tmp}"
 export MIRAGE_GATEWAY_HTTP_URL="http://127.0.0.1:${GW_PORT}"

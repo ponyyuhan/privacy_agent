@@ -405,6 +405,19 @@ def main() -> None:
         sb = shutil.which("sandbox-exec")
         if sb:
             try:
+                # Create a deterministic "host secret" outside the sandbox allowlist so the smoke
+                # test proves a permission denial (not just FileNotFoundError).
+                secret_path = Path.home() / f".mirage_capsule_secret_test_{secrets.token_hex(4)}"
+                try:
+                    secret_path.write_text("capsule-host-secret\n", encoding="utf-8")
+                    try:
+                        os.chmod(secret_path, 0o600)
+                    except Exception:
+                        pass
+                except Exception:
+                    # If we can't create the file for any reason, fall back to a likely-host-secret path.
+                    secret_path = Path.home() / ".ssh" / "id_rsa"
+
                 capsule_workspace = out_dir / "capsule_workspace"
                 capsule_state = out_dir / "capsule_state"
                 capsule_workspace.mkdir(parents=True, exist_ok=True)
@@ -444,6 +457,7 @@ def main() -> None:
                 env_capsule["MIRAGE_GATEWAY_HTTP_URL"] = gw_http_url
                 env_capsule["MIRAGE_HTTP_TOKEN"] = gw_http_token
                 env_capsule["MIRAGE_SESSION_ID"] = gw_http_session
+                env_capsule["MIRAGE_CAPSULE_SECRET_PATH"] = str(secret_path)
 
                 rr = subprocess.run(
                     cmd,
@@ -465,6 +479,12 @@ def main() -> None:
                     capsule_smoke["status"] = "OK"
             except Exception as e:
                 capsule_smoke = {"status": "ERROR", "reason": str(e)[:200]}
+            finally:
+                try:
+                    if secret_path and str(secret_path).startswith(str(Path.home())) and secret_path.exists():
+                        secret_path.unlink()
+                except Exception:
+                    pass
 
         report = {
             "ts": int(time.time()),
