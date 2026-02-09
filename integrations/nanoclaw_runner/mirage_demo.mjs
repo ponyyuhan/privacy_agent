@@ -89,7 +89,14 @@ async function runOnce(prompt) {
     DLP_MODE: process.env.DLP_MODE || 'dfa',
     SIGNED_PIR: process.env.SIGNED_PIR || '1',
     PYTHONPATH: root,
+    MIRAGE_GATEWAY_HTTP_URL: process.env.MIRAGE_GATEWAY_HTTP_URL || '',
+    MIRAGE_HTTP_TOKEN: process.env.MIRAGE_HTTP_TOKEN || '',
+    MIRAGE_SESSION_ID: process.env.MIRAGE_SESSION_ID || '',
   };
+
+  const mcpArgs = process.env.MIRAGE_GATEWAY_HTTP_URL
+    ? ['-m', 'capsule.mcp_proxy']
+    : ['-m', 'gateway.mcp_server'];
 
   let finalResult = null;
   for await (const message of query({
@@ -103,7 +110,7 @@ async function runOnce(prompt) {
       settingSources: ['project'],
       mcpServers: {
         // Spawn the MIRAGE gateway as an MCP stdio server.
-        mirage: { command: 'python', args: ['-m', 'gateway.mcp_server'], env: mcpEnv },
+        mirage: { command: 'python', args: mcpArgs, env: mcpEnv },
       },
     },
   })) {

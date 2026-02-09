@@ -107,6 +107,30 @@ class ExecutorClient:
         r.raise_for_status()
         return r.json()
 
+    def install_skill(
+        self,
+        *,
+        action_id: str,
+        skill_id: str,
+        skill_digest: str,
+        commit: dict[str, Any] | None = None,
+        caller: str = "",
+        session: str = "",
+        user_confirm: bool = False,
+    ) -> Dict[str, Any]:
+        payload = {
+            "action_id": action_id,
+            "skill_id": skill_id,
+            "skill_digest": skill_digest,
+            "commit": commit or {},
+            "caller": caller,
+            "session": session,
+            "user_confirm": bool(user_confirm),
+        }
+        r = requests.post(f"{self.base_url}/exec/skill_install", json=payload, timeout=10)
+        r.raise_for_status()
+        return r.json()
+
 
 def get_executor_client() -> Optional[ExecutorClient]:
     url = os.getenv("EXECUTOR_URL", "").strip()

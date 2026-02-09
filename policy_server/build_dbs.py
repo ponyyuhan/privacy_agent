@@ -1,9 +1,11 @@
 """Build policy DB bitsets for the 2-server FSS-PIR guardrails demo.
 
-We store 3 bitset databases (same on both servers):
+We store bitset databases (same on both servers):
 - banned_tokens: hashed 4-gram tokens representing DLP patterns
 - allow_recipients: hashed recipient identifiers allowed for egress
 - allow_domains: hashed domain identifiers allowed for network access
+- ioc_domains: hashed domains/IPs for known-bad skill ingress infrastructure (supply-chain IOCs)
+- banned_install_tokens: hashed 4-gram tokens for suspicious install semantics (curl|bash, base64 decode, etc)
 
 The gateway queries these bitsets via FSS-PIR so that each policy server learns nothing about
 the specific token/domain/recipient being checked.
@@ -13,6 +15,7 @@ NOTE: We use a *stable* SHA256-based hash -> index mapping (do NOT use Python's 
 
 import os
 import hashlib
+import re
 from pathlib import Path
 import json
 
@@ -37,6 +40,25 @@ def add_fourgrams(buf: bytearray, pattern: str, domain_size: int):
     for i in range(0, max(0, len(p) - 3)):
         g = p[i:i+4]
         set_bit(buf, stable_idx(g, domain_size))
+
+def normalize_install_token(s: str) -> str:
+    """Canonicalize install semantics tokens for skill ingress checks.
+
+    We keep this intentionally simple and deterministic so both DB build and
+    gateway-side feature extraction can agree on the same token strings.
+    """
+    t = str(s or "").strip().lower()
+    if not t:
+        return ""
+    t = t.replace("\n", " ")
+    t = re.sub(r"\s+", " ", t)
+    # Normalize pipe spacing: "curl | bash" => "curl|bash"
+    t = re.sub(r"\s*\|\s*", "|", t)
+    # Normalize common variants.
+    t = re.sub(r"\binvoke-expression\b", "invoke-expression", t)
+    t = re.sub(r"\bchmod\s*\+\s*x\b", "chmod +x", t)
+    t = re.sub(r"\bbase64\s+-\s*d\b", "base64 -d", t)
+    return t
 
 def _write_dfa_transitions(*, patterns: list[str], out_dir: Path, domain_size: int) -> dict:
     # Normalize patterns to reduce alphabet and improve match rate.
@@ -121,6 +143,39 @@ def main():
     for pat in patterns:
         add_fourgrams(banned, pat, domain_size)
 
+    # --- Skill ingress IOCs / install semantics (demo) ---
+    # These are used by the Skill Ingress PREVIEW->COMMIT flow to block or require confirmation
+    # when importing/enabling untrusted skills.
+    ioc_domains = list(cfg.get("ioc_domains") or [
+        # Example IOCs from public reports of malicious agent skill supply-chain attacks.
+        "socifiapp.com",
+        "rentry.co",
+        "install.app-distribution.net",
+        "91.92.242.30",
+    ])
+    install_patterns = list(cfg.get("install_patterns") or cfg.get("ingress_install_patterns") or [
+        "curl | bash",
+        "curl|bash",
+        "wget | sh",
+        "base64 -d",
+        "| sh",
+        "| bash",
+        "chmod +x",
+        "powershell",
+        "Invoke-Expression",
+    ])
+
+    ioc = bytearray(b"\x00" * nbytes)
+    for d in ioc_domains:
+        set_bit(ioc, stable_idx(str(d), domain_size))
+
+    banned_install = bytearray(b"\x00" * nbytes)
+    for pat in install_patterns:
+        tok = normalize_install_token(pat)
+        if not tok:
+            continue
+        set_bit(banned_install, stable_idx(tok, domain_size))
+
     bundle_meta = {}
     bundles_cfg = cfg.get("bundles")
     if isinstance(bundles_cfg, dict) and bundles_cfg:
@@ -150,9 +205,11 @@ def main():
     (DATA_DIR / "banned_tokens.bitset").write_bytes(bytes(banned))
     (DATA_DIR / "allow_recipients.bitset").write_bytes(bytes(allow_recipients0))
     (DATA_DIR / "allow_domains.bitset").write_bytes(bytes(allow_domains0))
+    (DATA_DIR / "ioc_domains.bitset").write_bytes(bytes(ioc))
+    (DATA_DIR / "banned_install_tokens.bitset").write_bytes(bytes(banned_install))
 
     if bool(cfg.get("bundle_enabled", False)) or bool(int(os.getenv("POLICY_BUNDLE_ENABLE", "0"))):
-        logical = ["banned_tokens", "allow_recipients", "allow_domains"]
+        logical = ["banned_tokens", "allow_recipients", "allow_domains", "ioc_domains", "banned_install_tokens"]
         nbundles = len(bundles)
         needed = domain_size * len(logical) * nbundles
         bundle_domain_size = 1
@@ -178,6 +235,8 @@ def main():
             bundle[base_off : base_off + base_stride_bytes] = bytes(banned)
             bundle[base_off + base_stride_bytes : base_off + 2 * base_stride_bytes] = bytes(allow_recipients_b)
             bundle[base_off + 2 * base_stride_bytes : base_off + 3 * base_stride_bytes] = bytes(allow_domains_b)
+            bundle[base_off + 3 * base_stride_bytes : base_off + 4 * base_stride_bytes] = bytes(ioc)
+            bundle[base_off + 4 * base_stride_bytes : base_off + 5 * base_stride_bytes] = bytes(banned_install)
 
         (DATA_DIR / "policy_bundle.bitset").write_bytes(bytes(bundle))
         bundle_meta = {
@@ -193,6 +252,8 @@ def main():
                     "banned_tokens": 0,
                     "allow_recipients": domain_size * 1,
                     "allow_domains": domain_size * 2,
+                    "ioc_domains": domain_size * 3,
+                    "banned_install_tokens": domain_size * 4,
                 },
             }
         }
@@ -206,8 +267,11 @@ def main():
         "patterns": patterns,
         "allow_recipients": recipients0,
         "allow_domains": domains0,
+        "ioc_domains": ioc_domains,
+        "install_patterns": [normalize_install_token(p) for p in install_patterns if normalize_install_token(p)],
         "hash": "sha256[:4] % domain_size",
         "tokenization": "char-4gram",
+        "install_tokenization": "normalized-exact-token",
     }
     meta.update(bundle_meta)
     meta.update(dfa_meta)

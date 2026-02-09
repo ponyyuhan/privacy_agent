@@ -2,7 +2,7 @@
   "id": "mirage_ogpp",
   "name": "MIRAGE-OG++ Gateway Bridge",
   "version": "0.1.0",
-  "description": "Expose a single tool (mirage_act) that forwards to the local Python MIRAGE MCP gateway (gateway.mcp_server).",
+  "description": "Expose a single tool (mirage_act) that forwards to the local Python MIRAGE MCP gateway (gateway.mcp_server), or to a remote MIRAGE HTTP gateway via capsule.mcp_proxy.",
   "configSchema": {
     "type": "object",
     "additionalProperties": false,
@@ -14,8 +14,15 @@
       "session_id": {
         "type": "string",
         "description": "Optional MIRAGE_SESSION_ID to bind sealed handles to this OpenClaw run."
+      },
+      "gateway_http_url": {
+        "type": "string",
+        "description": "Optional MIRAGE_GATEWAY_HTTP_URL. If set, the plugin spawns capsule.mcp_proxy instead of the local gateway.mcp_server."
+      },
+      "http_token": {
+        "type": "string",
+        "description": "Optional MIRAGE_HTTP_TOKEN for the remote HTTP gateway (Authorization: Bearer ...)."
       }
     }
   }
 }
-

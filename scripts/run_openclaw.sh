@@ -124,6 +124,7 @@ OC_WS_URL="ws://127.0.0.1:${OC_PORT}"
 OPENCLAW_CONFIG_PATH="${OPENCLAW_CONFIG_PATH:-$ROOT/artifact_out/openclaw.demo.json5}"
 
 PLUGIN_FILE="$ROOT/integrations/openclaw_plugin/mirage_ogpp.ts"
+PROVIDER_PLUGIN_DIR="$ROOT/integrations/openclaw_runner/extensions/openai-codex-auth"
 WORKSPACE_DIR="$ROOT/integrations/openclaw_workspace"
 MODEL_PRIMARY="${OPENCLAW_MODEL_PRIMARY:-openai-codex/gpt-5.2}"
 
@@ -137,9 +138,10 @@ cat >"$OPENCLAW_CONFIG_PATH" <<JSON5
   },
   plugins: {
     enabled: true,
-    load: { paths: ["${PLUGIN_FILE}"] },
+    load: { paths: ["${PLUGIN_FILE}", "${PROVIDER_PLUGIN_DIR}"] },
     entries: {
-      mirage_ogpp: { enabled: true }
+      mirage_ogpp: { enabled: true },
+      "openai-codex-auth": { enabled: true }
     }
   },
   tools: {
@@ -183,7 +185,10 @@ if ! wait_gateway_ok 160; then
 fi
 
 echo "[run_openclaw] NOTE: This run requires OpenClaw to be authenticated for provider: openai-codex."
-echo "[run_openclaw] If this fails with auth errors, run (once):"
+echo "[run_openclaw] Recommended (real OpenClaw OAuth):"
+echo "  OPENCLAW_STATE_DIR=\"${OPENCLAW_STATE_DIR}\" bash scripts/setup_openclaw_state.sh"
+echo "  OPENCLAW_STATE_DIR=\"${OPENCLAW_STATE_DIR}\" \"$OPENCLAW_BIN\" models auth login --provider openai-codex"
+echo "[run_openclaw] Fallback (non-interactive, uses Codex CLI tokens if available):"
 echo "  OPENCLAW_STATE_DIR=\"${OPENCLAW_STATE_DIR}\" python scripts/import_codex_oauth_to_openclaw.py"
 
 BENIGN_PROMPT="$(cat integrations/openclaw_runner/prompts/benign.txt)"

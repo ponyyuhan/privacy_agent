@@ -8,6 +8,8 @@ This repo is a runnable research demo for **MIRAGE-OG++**. It implements a minim
 - **PREVIEW→COMMIT + MPC policy engine (GMW + Beaver)**. High-level policy programs (DSL in `policy_server/policy.yaml`) are compiled to a **boolean circuit** and evaluated by the two policy servers over XOR-shared inputs. The output includes `allow_pre`, `need_confirm`, and a `sanitize_patch` ID; each policy server returns a **MAC-signed commit proof**. The executor verifies both commit proofs and enforces sanitize at commit time (fail-closed).
 - **Capability projection + intent shadowing**. Per-caller capabilities are configured in `gateway/capabilities.yaml`. Egress policy evaluation uses **secret-shared one-hot intent bits** plus fixed-shape PIR queries to reduce leakage of `intent_id` / intent class to any single policy server.
 - **Executor dual authorization**. Side effects are executed by a separate executor service that requires **MAC-backed proofs from both policy servers** and fails closed if missing/invalid.
+- **Skill Capsule (OS-level mediation, MVP)**. Runs untrusted agent/skill code inside a capsule that cannot directly read host secrets / reach the public Internet, and must talk to the gateway via a constrained transport.
+- **Skill ingress (PREVIEW→COMMIT for supply-chain)**. Skill install/enable becomes a guarded side effect: `ImportSkill` (stage only) → `CheckSkillInstallPolicy` (PREVIEW) → `CommitSkillInstall` (COMMIT, executor-enforced).
 - **MCP**. The gateway is exposed as an MCP stdio server (tool: `act`, alias: `mirage.act`).
 
 This is a demo, not a hardened production system. The goal is to make the core mechanisms executable and inspectable.
@@ -18,10 +20,12 @@ This is a demo, not a hardened production system. The goal is to make the core m
 - 读取“敏感文件”只会得到 `handle`，明文保留在网关可信边界内。
 - 外发/外联前，网关用 2-server PIR（DPF/FSS）去查 allowlist/DLP，任意单个 policy server 看不到具体被查的 recipient/domain/token。
 - PREVIEW→COMMIT：`CheckMessagePolicy` / `CheckWebhookPolicy` 返回 `tx_id` + `sanitize_patch`；`SendMessage` / `PostWebhook` 可携带 `tx_id` 进行 commit，executor 验证两台 policy server 的 commit proof，并在 executor 内强制应用 sanitize。
+- Capsule（MVP）：把不可信 runtime/skills 放到 OS 沙箱里运行，无法直接读宿主机敏感文件、无法直连公网，唯一出口是 `act`（通过 HTTP->Gateway）。
+- Skill ingress（MVP）：skill 的 install/enable 也走 PREVIEW→COMMIT；必须先 dry-run 拿到 `tx_id`，再由 executor 校验双证明后启用。
 - Capability/投影：按 `caller` 载入 `gateway/capabilities.yaml`，将 “允许哪些 intents/哪些外发能力” 投影为 MPC 输入位，避免通过早拒绝暴露过多意图信息。
 - 真正执行外发由 executor 完成，必须同时验证两台 policy server 的 MAC 证明，缺一不可（fail-closed）。
 - 已经接入真实 agent runtime 验证：
-- OpenClaw + OpenAI OAuth（`openai-codex` provider），单工具 `mirage_act`。
+- OpenClaw + OpenAI OAuth（`openai-codex` provider），单工具 `mirage_act`（并修复了 `No provider plugins found` 的 provider 插件缺失问题）。
 - NanoClaw 形态（Claude Agent SDK 运行时）通过 MCP 调用同一网关。
 
 ## Quickstart
@@ -35,6 +39,7 @@ python main.py demo
 
 - Scripted demo (no external model calls): `python main.py demo`
 - Paper artifact workload (tests + benches + report): `python main.py artifact`
+- Capsule smoke (macOS sandbox-exec; also run by `python main.py artifact`): `bash capsule/run_smoke.sh`
 - Real agent runtime (Claude Agent SDK / NanoClaw style): `bash scripts/run_nanoclaw.sh`
 - Real agent runtime (OpenClaw + OpenAI OAuth): `bash scripts/run_openclaw.sh`
 
@@ -50,29 +55,29 @@ Threat model (demo scope):
 High-level data flow:
 
 ```text
--------------------------------+        +-----------------------------------+
-| Untrusted agent runtime      |        | MIRAGE gateway (trusted TCB)      |
-| - OpenClaw / NanoClaw / demo |--MCP-->| - intent router                  |
-| - only tool: mirage_act      |        | - sealed handle store             |
-+-------------------------------+        | - guardrails client (2-server PIR)|
-                                         | - MPC coordinator (PREVIEW->COMMIT)|
-                                         +------------------+----------------+
-                                                            |
-                                                            | signed PIR (DPF/FSS) + MPC gate traffic
-                                                            v
-                                          +-----------------+-----------------+
-                                          | PolicyServer0 (HBC)  PolicyServer1|
-                                          | - bitset DBs         - bitset DBs |
-                                          | - O(N) eval per query - non-collude|
-                                          +-----------------+-----------------+
-                                                            |
-                                                            | MAC commit proofs from BOTH
-                                                            v
-                                         +-----------------------------------+
-                                         | Executor (dual auth enforcement)  |
-                                         | - verify both proofs              |
-                                         | - perform side effect or deny     |
-                                         +-----------------------------------+
++------------------------------+       +------------------------------+       +-----------------------------------+
+| Untrusted agent runtime      |  MCP  | Capsule MCP proxy (optional) |  HTTP  | MIRAGE gateway (trusted TCB)      |
+| - OpenClaw / NanoClaw / demo +------>| - stdio MCP server           +------>| - intent router                  |
+| - only tool: mirage_act      |       | - forwards only `act`        |       | - sealed handle store            |
++------------------------------+       +------------------------------+       | - guardrails client (2-server PIR)|
+                                                                                | - MPC coordinator (PREVIEW->COMMIT)|
+                                                                                +------------------+----------------+
+                                                                                                   |
+                                                                                                   | signed PIR (DPF/FSS) + MPC gate traffic
+                                                                                                   v
+                                                                                 +-----------------+-----------------+
+                                                                                 | PolicyServer0 (HBC)  PolicyServer1|
+                                                                                 | - bitset DBs         - bitset DBs |
+                                                                                 | - O(N) eval per query - non-collude|
+                                                                                 +-----------------+-----------------+
+                                                                                                   |
+                                                                                                   | MAC commit proofs from BOTH
+                                                                                                   v
+                                                                                +-----------------------------------+
+                                                                                | Executor (dual auth enforcement)  |
+                                                                                | - verify both proofs              |
+                                                                                | - perform side effect or deny     |
+                                                                                +-----------------------------------+
 ```
 
 ## Repo Layout (File Map)
@@ -95,6 +100,9 @@ Core code:
 - `policy_server_rust/`: optional compiled backend for policy server PIR evaluation (faster O(N) inner product).
 - `executor_server/`: executor that verifies dual MAC proofs and executes side effects (or denies).
 - `common/`: shared canonicalization + sanitize helpers used by gateway and executor.
+- `capsule/`: Skill Capsule (MVP). A macOS `sandbox-exec` profile + an MCP->HTTP proxy + a smoke test runner.
+- `gateway/http_server.py`: HTTP transport for `act` (for capsule / remote runtimes). Optional bearer auth.
+- `capsule/mcp_proxy.py`: MCP stdio server that forwards tool calls to `gateway/http_server.py:/act`.
 
 Agent integrations:
 
@@ -102,6 +110,7 @@ Agent integrations:
 - `integrations/nanoclaw_runner/`: Node runner using Claude Agent SDK (NanoClaw-style) to call the MCP gateway.
 - `integrations/openclaw_plugin/mirage_ogpp.ts`: OpenClaw plugin exposing exactly one tool `mirage_act` which forwards to MCP `act`.
 - `integrations/openclaw_runner/`: pinned OpenClaw CLI + gateway runner (local install under this repo).
+- `integrations/openclaw_runner/extensions/openai-codex-auth/`: OpenClaw provider plugin that implements OpenAI OAuth for `openai-codex`.
 - `integrations/openclaw_runner/prompts/`: benign/malicious prompts used by `scripts/run_openclaw.sh`.
 
 Orchestration:
@@ -110,6 +119,7 @@ Orchestration:
 - `scripts/run_artifact.sh`: unit tests + microbench + report + throughput bench.
 - `scripts/run_openclaw.sh`: start policy servers + executor + OpenClaw gateway, run benign+malicious turns via OpenAI OAuth.
 - `scripts/import_codex_oauth_to_openclaw.py`: import `~/.codex/auth.json` into OpenClaw state dir.
+- `scripts/setup_openclaw_state.sh`: writes `$OPENCLAW_STATE_DIR/openclaw.json` to make provider plugins discoverable for `openclaw models auth login`.
 
 ## Core Mechanisms (How The Code Works)
 
@@ -132,6 +142,54 @@ The gateway exports exactly one “action surface”:
 - `DescribeHandle`, `RevokeHandle`, `RevokeSession`
 
 There is no “run arbitrary command” intent. The agent can only express a bounded set of high-level intents.
+
+### Capsule (MVP): OS-Level Mediation for Untrusted Skills
+
+Why: in a real supply-chain attack, a malicious skill may try to bypass MCP and directly `exec`, `curl`, or read host files. The capsule makes “`act` is the only exit” enforceable at the OS boundary.
+
+This repo implements an MVP capsule suitable for artifact validation:
+
+- macOS: `capsule/capsule.sb` (used by `sandbox-exec`)
+  - denies default, allows only loopback network, restricts file reads to the repo, restricts writes to `artifact_out/capsule_*`
+  - allows only explicit runtimes to exec (the Python/Node binaries passed in via profile params)
+- Transport:
+  - `gateway/http_server.py` exposes `POST /act` (same semantics as MCP tool `act`)
+  - `capsule/mcp_proxy.py` is an MCP stdio server that only implements tool `act` and forwards to `/act`
+
+Validation:
+
+- `python main.py artifact` runs a capsule smoke test and writes results into `artifact_out/report.json:capsule_smoke`
+- Or run directly: `bash capsule/run_smoke.sh`
+
+Expected properties from the smoke test:
+
+- direct host secret read fails (e.g., `~/.ssh/id_rsa`)
+- direct Internet access fails
+- `act` succeeds via HTTP and via MCP proxy
+
+### Skill Ingress (MVP): PREVIEW→COMMIT for Skill Install/Enable
+
+Why: “skill marketplaces” are a real attack surface. You want skill install/enable to be a **guarded side effect** under the same non-bypassable enforcement as egress.
+
+Flow:
+
+1. `ImportSkill` (staging only, no code execution)
+   - stages a local directory/zip into the gateway skill store
+   - returns a `SKILL_PACKAGE` **HIGH handle**, so the agent cannot read raw `SKILL.md` directly
+2. `DescribeSkill`
+   - returns a sanitized summary of `SKILL.md` (links redacted, code blocks redacted)
+3. `CheckSkillInstallPolicy` (PREVIEW)
+   - extracts ingress features from `SKILL.md`
+     - domains/IPs (for IOC membership via PIR)
+     - install semantics markers (for `banned_install_tokens` membership via PIR)
+     - base64/obfuscation markers (local boolean input to MPC)
+   - runs a fixed-shape PIR surface + MPC program `policy_programs.skill_ingress_v1`
+   - returns `tx_id` + patch info and “REQUIRE_CONFIRM” if needed
+4. `CommitSkillInstall` (COMMIT)
+   - executor verifies dual commit proofs (fail-closed)
+   - enables the skill in a registry (demo: JSON under `artifact_out/enabled_skills.json`)
+
+You can inspect the exact policy in `policy_server/policy.yaml:policy_programs.skill_ingress_v1`.
 
 ### Level 1: Sealed Handles (Secret Myopia)
 
@@ -208,8 +266,23 @@ This runs:
 
 What to look at:
 
-- `artifact_out/report.json` includes executor bypass attempts (fail closed), a benign ALLOW case, and malicious deny cases (handles + deny codes).
+- `artifact_out/report.json` includes:
+  - executor bypass attempts (fail closed)
+  - benign + malicious egress flows (handles + deny codes)
+  - capsule smoke results (`capsule_smoke`)
+  - skill ingress results (`skill_ingress`)
 - `artifact_out/audit.jsonl` records every `act_request` / `act_result` at the gateway boundary.
+
+Example outcomes from an artifact run on **2026-02-09** (local macOS dev machine):
+
+- Capsule smoke (`report.json:capsule_smoke`):
+  - `direct_fs_read.ok == false` (host secret path is not accessible)
+  - `direct_internet.ok == false` (public Internet blocked)
+  - `gateway_http_act.ok == true` and `gateway_mcp_act.ok == true`
+- Skill ingress (`report.json:skill_ingress`):
+  - benign skill: `CheckSkillInstallPolicy.status == OK` and `CommitSkillInstall.status == OK`
+  - suspicious skill: `CheckSkillInstallPolicy.reason_code == REQUIRE_CONFIRM`, commit succeeds only with `user_confirm=true`
+  - IOC skill: `CheckSkillInstallPolicy.reason_code == IOC_BLOCKED`
 
 ### 2) Real agent validation: OpenClaw + OpenAI OAuth (openai-codex)
 
@@ -220,21 +293,25 @@ Setup + run:
 ```bash
 bash scripts/setup_openclaw.sh
 
-# Make sure Codex CLI is logged in (creates ~/.codex/auth.json)
-codex login
-
-# Import OAuth tokens into the OpenClaw state dir used by this demo
+# Make the OpenClaw OAuth provider plugin discoverable under the state dir
 OPENCLAW_STATE_DIR="artifact_out/openclaw_state" \
-  python scripts/import_codex_oauth_to_openclaw.py
+  bash scripts/setup_openclaw_state.sh
+
+# Log in via OpenClaw's OAuth flow (creates $OPENCLAW_STATE_DIR/.../auth-profiles.json)
+OPENCLAW_STATE_DIR="artifact_out/openclaw_state" \
+  integrations/openclaw_runner/node_modules/.bin/openclaw models auth login --provider openai-codex
 
 # Run benign + malicious turns via OpenClaw (outputs in artifact_out/)
 bash scripts/run_openclaw.sh
 ```
 
-Why the import step exists:
+Fallback: import from Codex CLI auth (if you already use `codex login`)
 
-- `openclaw models auth login --provider openai-codex` requires provider plugins and can fail with “No provider plugins found”.
-- Importing from `~/.codex/auth.json` is deterministic for this artifact.
+```bash
+codex login
+OPENCLAW_STATE_DIR="artifact_out/openclaw_state" \
+  python scripts/import_codex_oauth_to_openclaw.py
+```
 
 What we observed (example run; outputs in `artifact_out/`):
 
@@ -272,10 +349,10 @@ python scripts/bench_fss.py
 BENCH_ITERS=10 BENCH_CONCURRENCY=2 python scripts/bench_e2e_throughput.py
 ```
 
-Example results from `python main.py artifact` on 2026-02-08 (local macOS dev machine):
+Example results from `python main.py artifact` on 2026-02-09 (local macOS dev machine):
 
-- FSS/DPF microbench (`artifact_out/bench_fss.txt`): `domain_size=4096`, `dpf_key_bytes=235`, `eval_pir_share_avg_s=0.013766`.
-- E2E throughput (`artifact_out/bench_e2e.json`): `throughput_ops_s=0.895` at `concurrency=2`, `iters=10` (includes PREVIEW→COMMIT MPC commit proof verification).
+- FSS/DPF microbench (`artifact_out/bench_fss.txt`): `domain_size=4096`, `dpf_key_bytes=235`, `eval_pir_share_avg_s=0.009652` (includes keygen + 2 evals).
+- E2E throughput (`artifact_out/bench_e2e.json`): `throughput_ops_s=0.726` at `concurrency=2`, `iters=10` (includes PREVIEW→COMMIT MPC commit proof verification).
 
 ## Configuration Knobs (Selected)
 
@@ -294,6 +371,11 @@ Example results from `python main.py artifact` on 2026-02-08 (local macOS dev ma
 - `TX_TTL_S=120`: tx lifetime.
 - `MPC_SESSION_TTL_S=30`: policy-server MPC session TTL (per action_id).
 - `AUDIT_LOG_PATH=/path/to/audit.jsonl`: gateway audit log path.
+- `MIRAGE_HTTP_BIND=127.0.0.1`: HTTP gateway bind address (capsule transport).
+- `MIRAGE_HTTP_PORT=...`: HTTP gateway port.
+- `MIRAGE_HTTP_TOKEN=...`: bearer token for HTTP `/act` (optional).
+- `MIRAGE_SESSION_ID=...`: fallback session binding for HTTP transport (can also be provided via `X-Mirage-Session` header).
+- `MIRAGE_GATEWAY_HTTP_URL=http://127.0.0.1:...`: when set, integrations will spawn `capsule/mcp_proxy.py` to call the gateway over HTTP.
 
 ## Tests
 

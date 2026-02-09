@@ -14,26 +14,48 @@
     "example.com",
     "api.github.com"
   ],
+  "ioc_domains": [
+    "socifiapp.com",
+    "rentry.co",
+    "install.app-distribution.net",
+    "91.92.242.30"
+  ],
+  "install_patterns": [
+    "curl|bash",
+    "curl|bash",
+    "wget|sh",
+    "base64 -d",
+    "|sh",
+    "|bash",
+    "chmod +x",
+    "powershell",
+    "invoke-expression"
+  ],
   "hash": "sha256[:4] % domain_size",
   "tokenization": "char-4gram",
+  "install_tokenization": "normalized-exact-token",
   "bundle": {
     "enabled": true,
     "db": "policy_bundle",
     "base_domain_size": 4096,
-    "bundle_domain_size": 16384,
+    "bundle_domain_size": 32768,
     "logical_dbs": [
       "banned_tokens",
       "allow_recipients",
-      "allow_domains"
+      "allow_domains",
+      "ioc_domains",
+      "banned_install_tokens"
     ],
     "bundles": {
       "default": 0
     },
-    "bundle_stride": 12288,
+    "bundle_stride": 20480,
     "logical_offsets": {
       "banned_tokens": 0,
       "allow_recipients": 4096,
-      "allow_domains": 8192
+      "allow_domains": 8192,
+      "ioc_domains": 12288,
+      "banned_install_tokens": 16384
     }
   },
   "dfa": {

@@ -23,10 +23,16 @@ default:
     - SendMessage
     - FetchResource
     - PostWebhook
+    - ImportSkill
+    - DescribeSkill
+    - CheckSkillInstallPolicy
+    - CommitSkillInstall
+    - ListEnabledSkills
   egress:
     send_message: true
     fetch_resource: true
     post_webhook: true
+    skill_install: false
 
 callers:
   # OpenClaw validation uses FetchResource + CheckMessagePolicy; real "SendMessage" can be
@@ -40,10 +46,15 @@ callers:
       - DescribeHandle
       - FetchResource
       - CheckMessagePolicy
+      - ImportSkill
+      - DescribeSkill
+      - CheckSkillInstallPolicy
+      - ListEnabledSkills
     egress:
       send_message: false
       fetch_resource: true
       post_webhook: false
+      skill_install: false
 
   nanoclaw:
     allow_intents:
@@ -61,10 +72,16 @@ callers:
       - SendMessage
       - FetchResource
       - PostWebhook
+      - ImportSkill
+      - DescribeSkill
+      - CheckSkillInstallPolicy
+      - CommitSkillInstall
+      - ListEnabledSkills
     egress:
       send_message: true
       fetch_resource: true
       post_webhook: true
+      skill_install: false
 
   artifact:
     allow_intents:
@@ -82,8 +99,13 @@ callers:
       - SendMessage
       - FetchResource
       - PostWebhook
+      - ImportSkill
+      - DescribeSkill
+      - CheckSkillInstallPolicy
+      - CommitSkillInstall
+      - ListEnabledSkills
     egress:
       send_message: true
       fetch_resource: true
       post_webhook: true
-
+      skill_install: true

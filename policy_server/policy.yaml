@@ -20,6 +20,25 @@ dlp_patterns:
   - OPENSSH PRIVATE KEY
   - BEGIN PRIVATE KEY
 
+# Skill ingress IOC / install markers (demo).
+# These are used by the Skill Ingress PREVIEW->COMMIT path to block/confirm suspicious skill packages.
+ioc_domains:
+  - socifiapp.com
+  - rentry.co
+  - install.app-distribution.net
+  - 91.92.242.30
+
+install_patterns:
+  - "curl | bash"
+  - "curl|bash"
+  - "wget | sh"
+  - "base64 -d"
+  - "| sh"
+  - "| bash"
+  - "chmod +x"
+  - "powershell"
+  - "Invoke-Expression"
+
 # DFA confirm is built from the same patterns. (Gateway controls whether it is used.)
 dfa_enabled: true
 
@@ -52,3 +71,16 @@ policy_programs:
         need_confirm: "dlp_hit"
         patch0: "dlp_hit"
         patch1: "0"
+
+  # Skill ingress "install/enable" policy.
+  # Inputs:
+  # - cap_skill_install: caller capability bit
+  # - ioc_hit: 1 if the skill references known-bad domains/IPs (IOC membership via PIR)
+  # - install_hit: 1 if install semantics look like download-and-execute (PIR token hits)
+  # - base64_obf: 1 if text contains suspicious base64-like payload blocks (local feature)
+  skill_ingress_v1:
+    outputs:
+      allow_pre: "cap_skill_install & ~ioc_hit"
+      need_confirm: "install_hit | base64_obf"
+      patch0: "install_hit | base64_obf"   # patch_id bit0 (1 => REDACT)
+      patch1: "0"

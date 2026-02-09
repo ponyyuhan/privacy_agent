@@ -6,8 +6,11 @@ from .executors.msgexec import MsgExec
 from .executors.cryptoexec import CryptoExec
 from .executors.netexec import NetExec
 from .executors.webhookexec import WebhookExec
+from .executors.skillexec import SkillExec
 from .guardrails import ObliviousGuardrails
 from .egress_policy import EgressPolicyEngine
+from .skill_policy import SkillIngressPolicyEngine
+from .skill_store import SkillStore
 from .tx_store import TxStore
 from .capabilities import get_capabilities
 from .audit import AuditEvent, get_audit_logger, now_ts
@@ -18,11 +21,14 @@ class IntentRouter:
         self.guardrails = guardrails
         self.tx_store = TxStore()
         self.policy = EgressPolicyEngine(pir=guardrails.pir, handles=handles, tx_store=self.tx_store, domain_size=guardrails.domain_size, max_tokens=guardrails.max_tokens)
+        self.skill_policy = SkillIngressPolicyEngine(pir=guardrails.pir, tx_store=self.tx_store, domain_size=guardrails.domain_size, max_tokens=guardrails.max_tokens)
+        self.skill_store = SkillStore()
         self.fs = FSExec(handles)
         self.msg = MsgExec(handles, self.policy)
         self.crypto = CryptoExec(handles)
         self.net = NetExec(handles, self.policy)
         self.webhook = WebhookExec(handles, self.policy)
+        self.skill = SkillExec(handles, self.skill_policy, self.skill_store)
 
     def act(self, intent_id: str, inputs: Dict[str, Any], constraints: Dict[str, Any], caller: str, session: str) -> Dict[str, Any]:
         audit = get_audit_logger()
@@ -108,6 +114,26 @@ class IntentRouter:
             return obs
         if intent_id == "ReadWorkspaceFile":
             obs = self.fs.read_workspace_file(inputs, session=session, caller=caller)
+            audit.log(AuditEvent(ts=now_ts(), event="act_result", session=session, caller=caller, intent_id=intent_id, status=str(obs.get("status", "")), reason_code=str(obs.get("reason_code", ""))))
+            return obs
+        if intent_id == "ImportSkill":
+            obs = self.skill.import_skill(inputs, session=session, caller=caller)
+            audit.log(AuditEvent(ts=now_ts(), event="act_result", session=session, caller=caller, intent_id=intent_id, status=str(obs.get("status", "")), reason_code=str(obs.get("reason_code", ""))))
+            return obs
+        if intent_id == "DescribeSkill":
+            obs = self.skill.describe_skill(inputs, session=session, caller=caller)
+            audit.log(AuditEvent(ts=now_ts(), event="act_result", session=session, caller=caller, intent_id=intent_id, status=str(obs.get("status", "")), reason_code=str(obs.get("reason_code", ""))))
+            return obs
+        if intent_id == "CheckSkillInstallPolicy":
+            obs = self.skill.check_skill_install_policy(inputs, session=session, caller=caller)
+            audit.log(AuditEvent(ts=now_ts(), event="act_result", session=session, caller=caller, intent_id=intent_id, status=str(obs.get("status", "")), reason_code=str(obs.get("reason_code", ""))))
+            return obs
+        if intent_id == "CommitSkillInstall":
+            obs = self.skill.commit_skill_install(inputs, constraints, session=session, caller=caller)
+            audit.log(AuditEvent(ts=now_ts(), event="act_result", session=session, caller=caller, intent_id=intent_id, status=str(obs.get("status", "")), reason_code=str(obs.get("reason_code", ""))))
+            return obs
+        if intent_id == "ListEnabledSkills":
+            obs = self.skill.list_enabled_skills(inputs, session=session, caller=caller)
             audit.log(AuditEvent(ts=now_ts(), event="act_result", session=session, caller=caller, intent_id=intent_id, status=str(obs.get("status", "")), reason_code=str(obs.get("reason_code", ""))))
             return obs
         return {

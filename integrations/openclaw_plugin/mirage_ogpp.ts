@@ -36,7 +36,7 @@ class McpStdioClient {
   async _start() {
     await this._shutdown();
 
-    const args = ["-m", "gateway.mcp_server"];
+    const args = ["-m", (this._env.MIRAGE_GATEWAY_HTTP_URL ? "capsule.mcp_proxy" : "gateway.mcp_server")];
     this._proc = spawn(this._python, args, {
       cwd: this._repoRoot,
       env: this._env,
@@ -148,6 +148,8 @@ export default function (api) {
   const pluginCfg = api?.config?.plugins?.entries?.mirage_ogpp?.config ?? {};
   const python = (pluginCfg.python || process.env.MIRAGE_PYTHON || "python").trim();
   const sessionId = (pluginCfg.session_id || process.env.MIRAGE_SESSION_ID || "openclaw-session").trim();
+  const gatewayHttpUrl = String(pluginCfg.gateway_http_url || process.env.MIRAGE_GATEWAY_HTTP_URL || "").trim();
+  const httpToken = String(pluginCfg.http_token || process.env.MIRAGE_HTTP_TOKEN || "").trim();
 
   const env = {
     ...process.env,
@@ -155,6 +157,8 @@ export default function (api) {
     PYTHONPATH: repoRoot,
     // Bind sealed handles to this session so exfiltrated handles are useless elsewhere.
     MIRAGE_SESSION_ID: sessionId,
+    ...(gatewayHttpUrl ? { MIRAGE_GATEWAY_HTTP_URL: gatewayHttpUrl } : {}),
+    ...(httpToken ? { MIRAGE_HTTP_TOKEN: httpToken } : {}),
   };
 
   const mcp = new McpStdioClient({ python, repoRoot, env, logger });

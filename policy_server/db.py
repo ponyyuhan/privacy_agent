@@ -14,22 +14,20 @@ class BitsetDB:
         self._blocks: Dict[str, Tuple[bytes, int]] = {}  # name -> (data, block_size)
 
     def load(self) -> None:
-        for name in ["banned_tokens", "allow_recipients", "allow_domains"]:
-            p = self.data_dir / f"{name}.bitset"
-            if not p.exists():
-                raise FileNotFoundError(f"Missing DB file: {p}")
+        # Load all bitset DBs present on disk (keeps the server generic as we add new DBs).
+        bitset_paths = sorted(self.data_dir.glob("*.bitset"))
+        if not bitset_paths:
+            raise FileNotFoundError(f"No .bitset DB files found under: {self.data_dir}")
+        for p in bitset_paths:
+            name = p.stem
             self._bitsets[name] = p.read_bytes()
 
-        # Optional "bundled" DB (concatenated bitsets) to hide db_name from policy servers.
-        bundle = self.data_dir / "policy_bundle.bitset"
-        if bundle.exists():
-            self._bitsets["policy_bundle"] = bundle.read_bytes()
-
-        # Optional block DBs (fixed-size blocks).
-        blk = self.data_dir / "dfa_transitions.blk"
-        if blk.exists():
-            # Build script uses block_size=4; keep metadata simple for demo.
-            self._blocks["dfa_transitions"] = (blk.read_bytes(), 4)
+        # Optional block DBs (fixed-size blocks). Currently only DFA transitions are used by the demo,
+        # but we load any *.blk for extensibility.
+        for p in sorted(self.data_dir.glob("*.blk")):
+            name = p.stem
+            # Build script uses block_size=4; if you add more block DBs, encode block_size in meta.json.
+            self._blocks[name] = (p.read_bytes(), 4)
 
     def query_one(self, db_name: str, dpf_key_b64: str, *, party: int) -> int:
         if db_name not in self._bitsets:

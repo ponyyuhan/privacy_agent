@@ -363,6 +363,15 @@ class ExecWebhookReq(BaseModel):
     recipient: str = ""
     text: str = ""
 
+class ExecSkillInstallReq(BaseModel):
+    action_id: str
+    skill_id: str
+    skill_digest: str
+    commit: dict[str, Any] = Field(default_factory=dict)
+    caller: str = ""
+    session: str = ""
+    user_confirm: bool = False
+
 
 app = FastAPI(title="MIRAGE-OG++ Executor", version="0.1")
 
@@ -523,6 +532,61 @@ def exec_webhook(req: ExecWebhookReq):
             "reason_code": "ALLOW",
             "data": {"domain": out_domain, "path": req.path, "sent_chars": len(out_body), "commit_tag_b64": base64.b64encode(tag or b"").decode("ascii")},
         }
+    return {"status": "DENY", "reason_code": "MISSING_EVIDENCE"}
+
+@app.post("/exec/skill_install")
+def exec_skill_install(req: ExecSkillInstallReq):
+    action_id = req.action_id
+    if isinstance(req.commit, dict) and req.commit.get("policy0") and req.commit.get("policy1"):
+        request_sha = request_sha256_v1(
+            intent_id="CommitSkillInstall",
+            caller=str(req.caller or ""),
+            session=str(req.session or ""),
+            inputs={"skill_id": str(req.skill_id), "skill_digest": str(req.skill_digest)},
+        )
+        outs, tag, code = _verify_commit_evidence(req.commit, action_id=action_id, program_id="skill_ingress_v1", request_sha256=request_sha)
+        if outs is None:
+            return {"status": "DENY", "reason_code": "BAD_COMMIT_PROOF", "details": code}
+        allow_pre = int(outs.get("allow_pre", 0)) & 1
+        need_confirm = int(outs.get("need_confirm", 0)) & 1
+        if allow_pre != 1:
+            return {"status": "DENY", "reason_code": "POLICY_DENY"}
+        if need_confirm == 1 and not bool(req.user_confirm):
+            return {"status": "DENY", "reason_code": "REQUIRE_CONFIRM"}
+
+        # Side effect: record enabled skill into a local registry (demo).
+        # This is intentionally outside the gateway so "enable" is tied to dual proofs.
+        import json
+        from pathlib import Path
+
+        repo_root = Path(__file__).resolve().parents[1]
+        reg_path = Path(os.getenv("SKILL_ENABLED_PATH", "") or (repo_root / "artifact_out" / "enabled_skills.json")).expanduser()
+        reg_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            data = json.loads(reg_path.read_text(encoding="utf-8")) if reg_path.exists() else {"skills": []}
+        except Exception:
+            data = {"skills": []}
+        if not isinstance(data, dict):
+            data = {"skills": []}
+        if not isinstance(data.get("skills"), list):
+            data["skills"] = []
+        entry = {
+            "ts": int(time.time()),
+            "skill_id": str(req.skill_id),
+            "skill_digest": str(req.skill_digest),
+            "caller": str(req.caller or ""),
+            "session": str(req.session or ""),
+            "commit_tag_b64": base64.b64encode(tag or b"").decode("ascii"),
+        }
+        data["skills"].append(entry)
+        reg_path.write_text(json.dumps(data, indent=2, ensure_ascii=True) + "\n", encoding="utf-8")
+
+        return {
+            "status": "OK",
+            "reason_code": "ALLOW",
+            "data": {"skill_id": req.skill_id, "skill_digest": req.skill_digest, "commit_tag_b64": base64.b64encode(tag or b"").decode("ascii")},
+        }
+
     return {"status": "DENY", "reason_code": "MISSING_EVIDENCE"}
 
 
