@@ -14,6 +14,8 @@ from pydantic import BaseModel, Field
 from common.canonical import request_sha256_v1
 from common.sanitize import SanitizePatch, apply_patch_to_domain, apply_patch_to_message
 
+EXECUTOR_INSECURE_ALLOW = bool(int(os.getenv("EXECUTOR_INSECURE_ALLOW", "0")))
+
 def _sha256_hex(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
@@ -386,6 +388,10 @@ def exec_send_message(req: ExecSendMessageReq):
     action_id = req.action_id
     ev = req.evidence or {}
 
+    if EXECUTOR_INSECURE_ALLOW:
+        # Baseline / ablation: executor that does not enforce dual authorization.
+        return {"status": "OK", "reason_code": "ALLOW_INSECURE", "data": {"recipient": req.recipient, "sent_chars": len(req.text)}}
+
     # Hard-stop: never allow exporting handles as artifacts in this demo executor.
     if req.artifacts:
         return {"status": "DENY", "reason_code": "ARTIFACTS_NOT_ALLOWED"}
@@ -461,6 +467,9 @@ def exec_fetch(req: ExecFetchReq):
     action_id = req.action_id
     ev = req.evidence or {}
 
+    if EXECUTOR_INSECURE_ALLOW:
+        return {"status": "OK", "reason_code": "ALLOW_INSECURE", "data": {"resource_id": req.resource_id, "domain": req.domain, "content_preview": "<html>...</html>"}}
+
     if isinstance(req.commit, dict) and req.commit.get("policy0") and req.commit.get("policy1"):
         request_sha = request_sha256_v1(
             intent_id="FetchResource",
@@ -503,6 +512,8 @@ def exec_fetch(req: ExecFetchReq):
 @app.post("/exec/webhook")
 def exec_webhook(req: ExecWebhookReq):
     action_id = req.action_id
+    if EXECUTOR_INSECURE_ALLOW:
+        return {"status": "OK", "reason_code": "ALLOW_INSECURE", "data": {"domain": req.domain, "path": req.path, "sent_chars": len(req.body)}}
     if isinstance(req.commit, dict) and req.commit.get("policy0") and req.commit.get("policy1"):
         request_sha = request_sha256_v1(
             intent_id="PostWebhook",
@@ -581,10 +592,44 @@ def exec_skill_install(req: ExecSkillInstallReq):
         data["skills"].append(entry)
         reg_path.write_text(json.dumps(data, indent=2, ensure_ascii=True) + "\n", encoding="utf-8")
 
+        # Mint a short-lived workload token for per-skill identity (skill digest bound + session bound).
+        # This lets the gateway override the untrusted `caller` string with a least-privilege workload identity.
+        workload_token = ""
+        workload_exp_ms = 0
+        key_hex = os.getenv("WORKLOAD_TOKEN_KEY", "").strip()
+        if key_hex:
+            try:
+                from common.workload_token import mint_workload_token
+
+                ttl_s = int(os.getenv("WORKLOAD_TOKEN_TTL_S", "3600"))
+                if ttl_s < 60:
+                    ttl_s = 60
+                if ttl_s > 7 * 24 * 3600:
+                    ttl_s = 7 * 24 * 3600
+                now_ms = int(time.time() * 1000)
+                workload_token = mint_workload_token(
+                    key_hex=key_hex,
+                    skill_digest=str(req.skill_digest),
+                    session=str(req.session or ""),
+                    ttl_s=ttl_s,
+                    now_ms=now_ms,
+                )
+                workload_exp_ms = now_ms + (ttl_s * 1000)
+            except Exception:
+                workload_token = ""
+                workload_exp_ms = 0
+
         return {
             "status": "OK",
             "reason_code": "ALLOW",
-            "data": {"skill_id": req.skill_id, "skill_digest": req.skill_digest, "commit_tag_b64": base64.b64encode(tag or b"").decode("ascii")},
+            "data": {
+                "skill_id": req.skill_id,
+                "skill_digest": req.skill_digest,
+                "commit_tag_b64": base64.b64encode(tag or b"").decode("ascii"),
+                "workload_caller": f"skill:{req.skill_digest}",
+                "workload_token": workload_token,
+                "workload_exp_ms": int(workload_exp_ms),
+            },
         }
 
     return {"status": "DENY", "reason_code": "MISSING_EVIDENCE"}

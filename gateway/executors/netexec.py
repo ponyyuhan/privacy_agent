@@ -9,6 +9,41 @@ class NetExec:
         self.handles = handles
         self.policy = policy
 
+    def check_fetch_policy(self, inputs: Dict[str, Any], session: str, caller: str = "unknown") -> Dict[str, Any]:
+        """Dry-run network policy without performing the fetch."""
+        resource_id = str(inputs.get("resource_id", "example"))
+        domain = str(inputs.get("domain", "example.com"))
+        pv = self.policy.preview(
+            intent_id="CheckFetchPolicy",
+            inputs={"resource_id": resource_id, "domain": domain, "recipient": str(inputs.get("recipient", "")), "text": str(inputs.get("text", ""))},
+            constraints={},
+            session=session,
+            caller=caller,
+        )
+        if not pv.get("allow_pre", False):
+            return {
+                "status": "DENY",
+                "summary": "Network fetch would be blocked by policy (dry-run).",
+                "data": {"domain": domain, "resource_id": resource_id, "tx_id": pv.get("tx_id"), "patch": pv.get("patch"), "evidence": pv.get("evidence")},
+                "artifacts": [],
+                "reason_code": str(pv.get("reason_code") or "POLICY_DENY"),
+            }
+        if pv.get("need_confirm", False):
+            return {
+                "status": "DENY",
+                "summary": "Network fetch requires explicit user confirmation (dry-run).",
+                "data": {"domain": domain, "resource_id": resource_id, "tx_id": pv.get("tx_id"), "patch": pv.get("patch"), "evidence": pv.get("evidence")},
+                "artifacts": [],
+                "reason_code": "REQUIRE_CONFIRM",
+            }
+        return {
+            "status": "OK",
+            "summary": "Network fetch would be allowed by policy (dry-run).",
+            "data": {"domain": domain, "resource_id": resource_id, "tx_id": pv.get("tx_id"), "patch": pv.get("patch"), "evidence": pv.get("evidence")},
+            "artifacts": [],
+            "reason_code": "ALLOW",
+        }
+
     def fetch(self, inputs: Dict[str, Any], constraints: Dict[str, Any], session: str, caller: str = "unknown") -> Dict[str, Any]:
         # Demo: only allow fetching a resource_id that maps to a domain.
         resource_id = str(inputs.get("resource_id", "example"))

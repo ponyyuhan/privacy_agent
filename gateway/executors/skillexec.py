@@ -7,7 +7,7 @@ from common.sanitize import PATCH_NOOP, SanitizePatch
 
 from ..executor_client import get_executor_client
 from ..handles import HandleStore
-from ..skill_ingress import extract_skill_ingress_features, sanitize_skill_markdown
+from ..skill_ingress import extract_install_tokens, extract_skill_ingress_features, sanitize_skill_markdown
 from ..skill_policy import SkillIngressPolicyEngine
 from ..skill_store import SkillStore
 
@@ -74,11 +74,39 @@ class SkillExec:
         v = rec.value if isinstance(rec.value, dict) else {}
         skill_md = str(v.get("skill_md") or "")
         feats = extract_skill_ingress_features(text=skill_md, max_domains=int(os.getenv("MAX_SKILL_DOMAINS", "16")))
+        install_tokens = extract_install_tokens(text=skill_md, max_tokens=16)
         safe = sanitize_skill_markdown(text=skill_md, max_chars=int(os.getenv("SKILL_MD_MAX_CHARS", "2000")))
+        risk: list[str] = []
+        if install_tokens:
+            risk.append("download_execute")
+        if feats.has_base64_obf:
+            risk.append("obfuscation")
+        if feats.domains:
+            risk.append("external_network_refs")
+        expl = []
+        if "download_execute" in risk:
+            expl.append("Doc suggests download-and-execute install patterns (e.g., curl|bash / wget|sh).")
+        if "obfuscation" in risk:
+            expl.append("Doc contains base64-like payloads or decode instructions (often used to hide staged loaders).")
+        if "external_network_refs" in risk:
+            expl.append("Doc references external domains/IPs (potential staged download infrastructure).")
+        if not expl:
+            expl.append("No high-risk install/obfuscation markers detected in the doc (best-effort heuristic).")
         return {
             "status": "OK",
             "summary": "Sanitized skill description (raw SKILL.md withheld).",
-            "data": {"skill_id": str(v.get("skill_id") or ""), "skill_digest": str(v.get("skill_digest") or ""), "domains": feats.domains, "has_exec_marker": feats.has_exec_marker, "has_base64_obf": feats.has_base64_obf, "skill_md_sanitized": safe},
+            "data": {
+                "skill_id": str(v.get("skill_id") or ""),
+                "skill_digest": str(v.get("skill_digest") or ""),
+                "domains": feats.domains,
+                "install_tokens_present": bool(install_tokens),
+                "has_exec_marker": feats.has_exec_marker,
+                "has_base64_obf": feats.has_base64_obf,
+                "risk_categories": risk,
+                # Do not leak exact IOC rules; this is a human-facing template.
+                "risk_explanation": " ".join(expl),
+                "skill_md_sanitized": safe,
+            },
             "artifacts": [],
             "reason_code": "ALLOW",
         }
@@ -102,6 +130,7 @@ class SkillExec:
         skill_digest = str(v.get("skill_digest") or "")
         skill_md = str(v.get("skill_md") or "")
         feats = extract_skill_ingress_features(text=skill_md, max_domains=int(os.getenv("MAX_SKILL_DOMAINS", "16")))
+        install_tokens = extract_install_tokens(text=skill_md, max_tokens=16)
 
         pv = self.policy.preview(
             skill_id=skill_id,
@@ -113,11 +142,36 @@ class SkillExec:
             caller=caller,
         )
 
+        risk: list[str] = []
+        if install_tokens:
+            risk.append("download_execute")
+        if feats.has_base64_obf:
+            risk.append("obfuscation")
+        if str(pv.get("reason_code") or "") == "IOC_BLOCKED":
+            risk.append("ioc_match")
+        expl = []
+        if "ioc_match" in risk:
+            expl.append("Known-bad infrastructure match (IOC). Exact indicator is withheld.")
+        if "download_execute" in risk:
+            expl.append("Suspicious install semantics markers found (download-and-execute).")
+        if "obfuscation" in risk:
+            expl.append("Obfuscation markers found (base64-like content).")
+        if not expl:
+            expl.append("No high-risk markers found by ingress checks (best-effort).")
+
         if not pv.get("allow_pre", False):
             return {
                 "status": "DENY",
                 "summary": "Skill install blocked by policy (dry-run).",
-                "data": {"skill_id": skill_id, "skill_digest": skill_digest, "tx_id": pv.get("tx_id"), "patch": pv.get("patch"), "evidence": pv.get("evidence")},
+                "data": {
+                    "skill_id": skill_id,
+                    "skill_digest": skill_digest,
+                    "tx_id": pv.get("tx_id"),
+                    "patch": pv.get("patch"),
+                    "evidence": pv.get("evidence"),
+                    "risk_categories": risk,
+                    "risk_explanation": " ".join(expl),
+                },
                 "artifacts": [],
                 "reason_code": str(pv.get("reason_code") or "POLICY_DENY"),
             }
@@ -125,14 +179,30 @@ class SkillExec:
             return {
                 "status": "DENY",
                 "summary": "Skill install requires explicit user confirmation (dry-run).",
-                "data": {"skill_id": skill_id, "skill_digest": skill_digest, "tx_id": pv.get("tx_id"), "patch": pv.get("patch"), "evidence": pv.get("evidence")},
+                "data": {
+                    "skill_id": skill_id,
+                    "skill_digest": skill_digest,
+                    "tx_id": pv.get("tx_id"),
+                    "patch": pv.get("patch"),
+                    "evidence": pv.get("evidence"),
+                    "risk_categories": risk,
+                    "risk_explanation": " ".join(expl),
+                },
                 "artifacts": [],
                 "reason_code": "REQUIRE_CONFIRM",
             }
         return {
             "status": "OK",
             "summary": "Skill would be allowed by policy (dry-run).",
-            "data": {"skill_id": skill_id, "skill_digest": skill_digest, "tx_id": pv.get("tx_id"), "patch": pv.get("patch"), "evidence": pv.get("evidence")},
+            "data": {
+                "skill_id": skill_id,
+                "skill_digest": skill_digest,
+                "tx_id": pv.get("tx_id"),
+                "patch": pv.get("patch"),
+                "evidence": pv.get("evidence"),
+                "risk_categories": risk,
+                "risk_explanation": " ".join(expl),
+            },
             "artifacts": [],
             "reason_code": "ALLOW",
         }
@@ -187,4 +257,3 @@ class SkillExec:
         _ = caller
         skills = self.store.list_enabled()
         return {"status": "OK", "summary": "Enabled skills.", "data": {"skills": skills}, "artifacts": [], "reason_code": "ALLOW"}
-

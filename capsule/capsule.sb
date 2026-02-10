@@ -19,8 +19,15 @@
 ;; Network: allow only loopback traffic (blocks direct Internet + LAN exfil).
 (system-network)
 (allow system-socket)
+;; For UDS transport we can disable network entirely. If you use HTTP loopback transport,
+;; pass ALLOW_LOOPBACK_NET=1 to allow only localhost traffic.
+(if (string=? (param "ALLOW_LOOPBACK_NET") "1")
+  (allow network-outbound
+    (remote ip "localhost:*")))
+;; Allow connecting to a specific Unix domain socket for netless gateway transport.
 (allow network-outbound
-  (remote ip "localhost:*"))
+  (remote unix-socket (path-literal "/tmp/mirage_ogpp_gateway.sock"))
+  (remote unix-socket (path-literal "/private/tmp/mirage_ogpp_gateway.sock")))
 
 ;; Process execution: allow only explicitly provided runtimes.
 (allow process-fork)

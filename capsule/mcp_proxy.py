@@ -8,6 +8,8 @@ from typing import Any, Dict
 import requests
 from pydantic import BaseModel, Field, ValidationError
 
+from common.uds_http import uds_post_json
+
 
 MCP_PROTOCOL_VERSION = "2024-11-05"
 
@@ -48,7 +50,7 @@ def _tools_list() -> dict[str, Any]:
         "tools": [
             {
                 "name": "act",
-                "description": "Proxy a high-level intent to the MIRAGE gateway over HTTP (capsule transport).",
+                "description": "Proxy a high-level intent to the MIRAGE gateway (UDS netless transport preferred; legacy loopback HTTP supported).",
                 "inputSchema": {
                     "type": "object",
                     "required": ["intent_id", "inputs", "constraints", "caller"],
@@ -63,7 +65,7 @@ def _tools_list() -> dict[str, Any]:
             },
             {
                 "name": "mirage.act",
-                "description": "Proxy a high-level intent to the MIRAGE gateway over HTTP (capsule transport).",
+                "description": "Proxy a high-level intent to the MIRAGE gateway (UDS netless transport preferred; legacy loopback HTTP supported).",
                 "inputSchema": {
                     "type": "object",
                     "required": ["intent_id", "inputs", "constraints", "caller"],
@@ -83,6 +85,7 @@ def _tools_list() -> dict[str, Any]:
 class MirageMcpProxy:
     def __init__(self) -> None:
         self._initialized = False
+        self._uds_path = (os.getenv("MIRAGE_GATEWAY_UDS_PATH") or "").strip()
         base = (os.getenv("MIRAGE_GATEWAY_HTTP_URL") or "http://127.0.0.1:8765").rstrip("/")
         self._act_url = f"{base}/act"
         self._timeout_s = float(os.getenv("MIRAGE_PROXY_TIMEOUT_S") or "30")
@@ -173,6 +176,23 @@ class MirageMcpProxy:
         if self._token:
             headers["Authorization"] = f"Bearer {self._token}"
 
+        if self._uds_path:
+            try:
+                st, _hdrs, data = uds_post_json(
+                    uds_path=self._uds_path,
+                    path="/act",
+                    obj={"intent_id": act.intent_id, "inputs": act.inputs, "constraints": act.constraints, "caller": act.caller},
+                    headers=headers,
+                    timeout_s=self._timeout_s,
+                )
+            except Exception as e:
+                return {"status": "DENY", "reason_code": "GATEWAY_UNREACHABLE", "details": str(e)}
+            if int(st) != 200:
+                return {"status": "DENY", "reason_code": "GATEWAY_HTTP_ERROR", "http_status": int(st), "details": data}
+            if not isinstance(data, dict):
+                return {"status": "DENY", "reason_code": "GATEWAY_BAD_RESPONSE", "details": "non-object response"}
+            return data
+
         try:
             r = requests.post(
                 self._act_url,
@@ -208,4 +228,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

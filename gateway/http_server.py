@@ -92,9 +92,19 @@ def act(
 def main() -> None:
     host = (os.getenv("MIRAGE_HTTP_BIND") or "127.0.0.1").strip() or "127.0.0.1"
     port = int(os.getenv("MIRAGE_HTTP_PORT") or os.getenv("PORT") or "8765")
+    uds = (os.getenv("MIRAGE_HTTP_UDS") or "").strip()
+    if uds:
+        # UDS transport lets the capsule run with network fully disabled.
+        # Ensure we can (re)bind deterministically.
+        try:
+            if os.path.exists(uds):
+                os.unlink(uds)
+        except Exception:
+            pass
+        uvicorn.run(app, uds=uds, log_level=os.getenv("LOG_LEVEL", "info"))
+        return
     uvicorn.run(app, host=host, port=port, log_level=os.getenv("LOG_LEVEL", "info"))
 
 
 if __name__ == "__main__":
     main()
-

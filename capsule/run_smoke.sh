@@ -11,6 +11,8 @@ if [[ -z "${SB}" ]]; then
   exit 2
 fi
 
+CAPSULE_TRANSPORT="${CAPSULE_TRANSPORT:-uds}"  # uds (recommended) | http (legacy)
+
 pick_port () {
   python - <<'PY'
 import socket
@@ -41,11 +43,23 @@ sys.exit(1)
 PY
 }
 
+wait_uds_ok () {
+  local sock="$1"
+  local tries="${2:-120}"
+  python - <<PY
+import sys
+from common.uds_http import wait_uds_http_ok
+wait_uds_http_ok(uds_path="${sock}", path="/health", tries=int("${tries}"))
+print("ok")
+PY
+}
+
 cleanup () {
   if [[ -n "${GW:-}" ]]; then kill "$GW" 2>/dev/null || true; fi
   if [[ -n "${EX:-}" ]]; then kill "$EX" 2>/dev/null || true; fi
   if [[ -n "${P0:-}" ]]; then kill "$P0" 2>/dev/null || true; fi
   if [[ -n "${P1:-}" ]]; then kill "$P1" 2>/dev/null || true; fi
+  if [[ -n "${EXFIL:-}" ]]; then kill "$EXFIL" 2>/dev/null || true; fi
   if [[ -n "${CAPSULE_SECRET_PATH:-}" ]]; then rm -f "$CAPSULE_SECRET_PATH" 2>/dev/null || true; fi
 }
 trap cleanup EXIT
@@ -62,8 +76,6 @@ export POLICY1_URL="http://127.0.0.1:${P1_PORT}"
 export EXECUTOR_URL="http://127.0.0.1:${EX_PORT}"
 export SIGNED_PIR="${SIGNED_PIR:-1}"
 export DLP_MODE="${DLP_MODE:-dfa}"
-export MIRAGE_HTTP_BIND="127.0.0.1"
-export MIRAGE_HTTP_PORT="${GW_PORT}"
 export MIRAGE_HTTP_TOKEN="${MIRAGE_HTTP_TOKEN:-$(python -c 'import secrets; print(secrets.token_hex(16))')}"
 export MIRAGE_SESSION_ID="${MIRAGE_SESSION_ID:-capsule-smoke}"
 export POLICY0_MAC_KEY="${POLICY0_MAC_KEY:-$(python -c 'import secrets; print(secrets.token_hex(32))')}"
@@ -75,13 +87,10 @@ SERVER_ID=1 PORT="${P1_PORT}" POLICY_MAC_KEY="${POLICY1_MAC_KEY}" python -m poli
 P1=$!
 EXECUTOR_PORT="${EX_PORT}" POLICY0_MAC_KEY="${POLICY0_MAC_KEY}" POLICY1_MAC_KEY="${POLICY1_MAC_KEY}" python -m executor_server.server &
 EX=$!
-python -m gateway.http_server &
-GW=$!
 
 wait_http_ok "${POLICY0_URL}/health" 120
 wait_http_ok "${POLICY1_URL}/health" 120
 wait_http_ok "${EXECUTOR_URL}/health" 120
-wait_http_ok "http://127.0.0.1:${GW_PORT}/health" 120
 
 OUT_DIR="${OUT_DIR:-$ROOT/artifact_out}"
 mkdir -p "$OUT_DIR"
@@ -89,6 +98,31 @@ mkdir -p "$OUT_DIR"
 CAPSULE_WORKSPACE="$OUT_DIR/capsule_workspace"
 CAPSULE_STATE="$OUT_DIR/capsule_state"
 mkdir -p "$CAPSULE_WORKSPACE" "$CAPSULE_STATE"
+
+# Start a deterministic local "exfil server" on loopback. In legacy HTTP transport mode the capsule
+# can reach localhost (so this would be a bypass); in UDS netless mode it must fail.
+EXFIL_PORT="${EXFIL_PORT:-$(pick_port)}"
+python -m http.server "${EXFIL_PORT}" --bind 127.0.0.1 >/dev/null 2>&1 &
+EXFIL=$!
+export MIRAGE_EXFIL_URL="http://127.0.0.1:${EXFIL_PORT}/exfil"
+
+if [[ "${CAPSULE_TRANSPORT}" == "uds" ]]; then
+  GW_SOCK="${GW_SOCK:-/tmp/mirage_ogpp_gateway.sock}"
+  export MIRAGE_HTTP_UDS="$GW_SOCK"
+  python -m gateway.http_server &
+  GW=$!
+  wait_uds_ok "$GW_SOCK" 180
+  unset MIRAGE_GATEWAY_HTTP_URL || true
+  export MIRAGE_GATEWAY_UDS_PATH="$GW_SOCK"
+else
+  export MIRAGE_HTTP_BIND="127.0.0.1"
+  export MIRAGE_HTTP_PORT="${GW_PORT}"
+  python -m gateway.http_server &
+  GW=$!
+  wait_http_ok "http://127.0.0.1:${GW_PORT}/health" 120
+  export MIRAGE_GATEWAY_HTTP_URL="http://127.0.0.1:${GW_PORT}"
+  unset MIRAGE_GATEWAY_UDS_PATH || true
+fi
 
 # Create a deterministic "host secret" outside the sandbox allowlist, so the smoke test
 # proves we get a permission denial (not just FileNotFoundError).
@@ -98,7 +132,6 @@ chmod 600 "$CAPSULE_SECRET_PATH" 2>/dev/null || true
 export MIRAGE_CAPSULE_SECRET_PATH="$CAPSULE_SECRET_PATH"
 
 TMPDIR="${TMPDIR:-/tmp}"
-export MIRAGE_GATEWAY_HTTP_URL="http://127.0.0.1:${GW_PORT}"
 
 PY_BIN="$(python -c 'import sys; print(sys.executable)')"
 PY_REAL_BIN="$(python -c 'import os, sys; print(os.path.realpath(sys.executable))')"
@@ -116,6 +149,7 @@ echo "[capsule] running sandboxed smoke..."
   -D "REPO_ROOT=$ROOT" \
   -D "CAPSULE_WORKSPACE=$CAPSULE_WORKSPACE" \
   -D "STATE_DIR=$CAPSULE_STATE" \
+  -D "ALLOW_LOOPBACK_NET=$([[ \"${CAPSULE_TRANSPORT}\" == \"http\" ]] && echo 1 || echo 0)" \
   -D "PY_BIN=$PY_BIN" \
   -D "PY_REAL_BIN=$PY_REAL_BIN" \
   -D "PY_PREFIX=$PY_PREFIX" \

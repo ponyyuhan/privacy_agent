@@ -448,14 +448,14 @@ class EgressPolicyEngine:
         """Run PREVIEW for a side-effect intent and return a tx_id to commit later."""
         _ = constraints  # reserved for future policy fields (rate limits, budgets, etc)
         intent = str(intent_id)
-        if intent not in ("SendMessage", "FetchResource", "PostWebhook", "CheckMessagePolicy", "CheckWebhookPolicy"):
+        if intent not in ("SendMessage", "FetchResource", "PostWebhook", "CheckMessagePolicy", "CheckWebhookPolicy", "CheckFetchPolicy"):
             raise ValueError("unsupported intent for egress policy preview")
 
         # Normalize all egress-like intents into a unified policy request surface.
         # This lets us hide intent_id from policy servers by always issuing a fixed-shape set of PIR queries
         # and evaluating a fixed circuit (intent shadowing).
         is_send = 1 if intent in ("SendMessage", "CheckMessagePolicy") else 0
-        is_fetch = 1 if intent == "FetchResource" else 0
+        is_fetch = 1 if intent in ("FetchResource", "CheckFetchPolicy") else 0
         is_webhook = 1 if intent in ("PostWebhook", "CheckWebhookPolicy") else 0
 
         recipient_real = str(inputs.get("recipient", ""))
@@ -512,40 +512,59 @@ class EgressPolicyEngine:
 
         request_sha = request_sha256_v1(intent_id=canonical_intent, caller=caller, session=session, inputs=sha_inputs)
 
-        # 1) Recipient allowlist bit (oblivious)
-        ridx_raw = stable_idx(recipient, self.domain_size)
-        db_rec, ridx, dom_rec = self._bundle_idx(logical="allow_recipients", raw_idx=ridx_raw, bundle_env="POLICY_BUNDLE_EGRESS")
+        # Shaping/ablation knob for leakage evaluation:
+        # - fixed-shape (default): always issue recipient + domain + token queries (dummy-filled when irrelevant)
+        # - unshaped: issue only the minimal queries needed for the selected intent (leaks intent class via transcript)
+        fixed_shape = bool(int(os.getenv("SHAPE_EGRESS_FIXED", "1")))
+        do_rec = fixed_shape or bool(is_send)
+        do_dom = fixed_shape or bool(is_fetch or is_webhook)
+        do_tok = fixed_shape or bool(is_send or is_webhook)
+
         if not self.signed_pir:
             raise RuntimeError("FULL policy engine requires SIGNED_PIR=1 (demo)")
-        rbits, ev_rec = self.pir.query_bits_signed(db_rec, [ridx], action_id=action_id, domain_size=dom_rec)
+
+        # 1) Recipient allowlist bit (oblivious)
+        rbits: list[int] = [1]
+        ev_rec: dict[str, Any] | None = None
+        if do_rec:
+            ridx_raw = stable_idx(recipient, self.domain_size)
+            db_rec, ridx, dom_rec = self._bundle_idx(logical="allow_recipients", raw_idx=ridx_raw, bundle_env="POLICY_BUNDLE_EGRESS")
+            rbits, ev_rec = self.pir.query_bits_signed(db_rec, [ridx], action_id=action_id, domain_size=dom_rec)
 
         # 2) Domain allowlist bit (oblivious)
-        didx_raw = stable_idx(domain, self.domain_size)
-        db_dom, didx, dom_dom = self._bundle_idx(logical="allow_domains", raw_idx=didx_raw, bundle_env="POLICY_BUNDLE_NET")
-        dbits, ev_dom = self.pir.query_bits_signed(db_dom, [didx], action_id=action_id, domain_size=dom_dom)
+        dbits: list[int] = [1]
+        ev_dom: dict[str, Any] | None = None
+        if do_dom:
+            didx_raw = stable_idx(domain, self.domain_size)
+            db_dom, didx, dom_dom = self._bundle_idx(logical="allow_domains", raw_idx=didx_raw, bundle_env="POLICY_BUNDLE_NET")
+            dbits, ev_dom = self.pir.query_bits_signed(db_dom, [didx], action_id=action_id, domain_size=dom_dom)
 
         # 3) DLP token hits (oblivious). We only feed an aggregated hit bit into MPC for now.
-        idxs_raw = fourgram_indices(text, self.domain_size, self.max_tokens)
-        db_tok, idxs, dom_tok = self._bundle_idx(logical="banned_tokens", raw_idx=0, bundle_env="POLICY_BUNDLE_EGRESS")
-        if db_tok == "banned_tokens":
-            idxs2 = idxs_raw
-            dom2 = None
-        else:
-            # bundle idx shift per token
-            b = self._load_bundle() or {}
-            base_ds = int(b.get("base_domain_size") or self.domain_size)
-            bundles = b.get("bundles") or {"default": 0}
-            if not isinstance(bundles, dict):
-                bundles = {"default": 0}
-            bundle_name = (os.getenv("POLICY_BUNDLE_EGRESS", "default") or "default").strip()
-            bid = int(bundles.get(bundle_name, 0))
-            stride = int(b.get("bundle_stride") or 0)
-            offs = b.get("logical_offsets") or {}
-            loff = int((offs or {}).get("banned_tokens", 0))
-            idxs2 = [(bid * stride) + loff + (int(x) % base_ds) for x in idxs_raw]
-            dom2 = int(b.get("bundle_domain_size") or 0) or None
-        hits, ev_tok = self.pir.query_bits_signed(db_tok, idxs2, action_id=action_id, domain_size=dom2)
-        coarse_hit = 1 if any(int(h) == 1 for h in hits) else 0
+        hits: list[int] = []
+        ev_tok: dict[str, Any] | None = None
+        coarse_hit = 0
+        if do_tok:
+            idxs_raw = fourgram_indices(text, self.domain_size, self.max_tokens)
+            db_tok, _idx0, _dom_tok = self._bundle_idx(logical="banned_tokens", raw_idx=0, bundle_env="POLICY_BUNDLE_EGRESS")
+            if db_tok == "banned_tokens":
+                idxs2 = idxs_raw
+                dom2 = None
+            else:
+                # bundle idx shift per token
+                b = self._load_bundle() or {}
+                base_ds = int(b.get("base_domain_size") or self.domain_size)
+                bundles = b.get("bundles") or {"default": 0}
+                if not isinstance(bundles, dict):
+                    bundles = {"default": 0}
+                bundle_name = (os.getenv("POLICY_BUNDLE_EGRESS", "default") or "default").strip()
+                bid = int(bundles.get(bundle_name, 0))
+                stride = int(b.get("bundle_stride") or 0)
+                offs = b.get("logical_offsets") or {}
+                loff = int((offs or {}).get("banned_tokens", 0))
+                idxs2 = [(bid * stride) + loff + (int(x) % base_ds) for x in idxs_raw]
+                dom2 = int(b.get("bundle_domain_size") or 0) or None
+            hits, ev_tok = self.pir.query_bits_signed(db_tok, idxs2, action_id=action_id, domain_size=dom2)
+            coarse_hit = 1 if any(int(h) == 1 for h in hits) else 0
 
         # Optional confirm stage: keep existing dfa knob semantics.
         confirmed = coarse_hit

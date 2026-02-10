@@ -1,0 +1,413 @@
+\documentclass{article}
+
+% if you need to pass options to natbib, use, e.g.:
+%     \PassOptionsToPackage{numbers, compress}{natbib}
+% before loading neurips_2025
+
+% The authors should use one of these tracks.
+% Before accepting by the NeurIPS conference, select one of the options below.
+% 0. "default" for submission
+ \usepackage{neurips_2025}
+% the "default" option is equal to the "main" option, which is used for the Main Track with double-blind reviewing.
+% 1. "main" option is used for the Main Track
+%  \usepackage[main]{neurips_2025}
+% 2. "position" option is used for the Position Paper Track
+%  \usepackage[position]{neurips_2025}
+% 3. "dandb" option is used for the Datasets & Benchmarks Track
+ % \usepackage[dandb]{neurips_2025}
+% 4. "creativeai" option is used for the Creative AI Track
+%  \usepackage[creativeai]{neurips_2025}
+% 5. "sglblindworkshop" option is used for the Workshop with single-blind reviewing
+ % \usepackage[sglblindworkshop]{neurips_2025}
+% 6. "dblblindworkshop" option is used for the Workshop with double-blind reviewing
+%  \usepackage[dblblindworkshop]{neurips_2025}
+
+% After being accepted, the authors should add "final" behind the track to compile a camera-ready version.
+% 1. Main Track
+ % \usepackage[main, final]{neurips_2025}
+% 2. Position Paper Track
+%  \usepackage[position, final]{neurips_2025}
+% 3. Datasets & Benchmarks Track
+ % \usepackage[dandb, final]{neurips_2025}
+% 4. Creative AI Track
+%  \usepackage[creativeai, final]{neurips_2025}
+% 5. Workshop with single-blind reviewing
+%  \usepackage[sglblindworkshop, final]{neurips_2025}
+% 6. Workshop with double-blind reviewing
+%  \usepackage[dblblindworkshop, final]{neurips_2025}
+% Note. For the workshop paper template, both \title{} and \workshoptitle{} are required, with the former indicating the paper title shown in the title and the latter indicating the workshop title displayed in the footnote.
+% For workshops (5., 6.), the authors should add the name of the workshop, "\workshoptitle" command is used to set the workshop title.
+% \workshoptitle{WORKSHOP TITLE}
+
+% "preprint" option is used for arXiv or other preprint submissions
+ % \usepackage[preprint]{neurips_2025}
+
+% to avoid loading the natbib package, add option nonatbib:
+%    \usepackage[nonatbib]{neurips_2025}
+
+\usepackage[utf8]{inputenc} % allow utf-8 input
+\usepackage[T1]{fontenc}    % use 8-bit T1 fonts
+\usepackage{hyperref}       % hyperlinks
+\usepackage{url}            % simple URL typesetting
+\usepackage{booktabs}       % professional-quality tables
+\usepackage{amsfonts}       % blackboard math symbols
+\usepackage{nicefrac}       % compact symbols for 1/2, etc.
+\usepackage{microtype}      % microtypography
+\usepackage{xcolor}         % colors
+
+% Note. For the workshop paper template, both \title{} and \workshoptitle{} are required, with the former indicating the paper title shown in the title and the latter indicating the workshop title displayed in the footnote. 
+\title{MIRAGE-OG++: Non-Bypassable, Privacy-Preserving Policy Enforcement for Agentic Tool Use and Skill Supply Chains}
+
+
+% The \author macro works with any number of authors. There are two commands
+% used to separate the names and addresses of multiple authors: \And and \AND.
+%
+% Using \And between authors leaves it to LaTeX to determine where to break the
+% lines. Using \AND forces a line break at that point. So, if LaTeX puts 3 of 4
+% authors names on the first line, and the last on the second line, try using
+% \AND instead of \And before the third author name.
+
+
+\author{%
+  Anonymous Authors \\
+  Paper Artifact: MIRAGE-OG++ \\
+}
+
+
+\begin{document}
+
+
+\maketitle
+
+
+\begin{abstract}
+MIRAGE-OG++ is a system-level reference monitor for agentic tool use and skill supply chains.
+It reduces the trusted computing base to a small gateway and an executor, while treating the agent runtime and skills as adversarial.
+To prevent bypass, MIRAGE-OG++ routes all high-level intents through a non-bypassable \textsf{PREVIEW}\,$\rightarrow$\,\textsf{COMMIT} transaction, and a dual-authorization executor that requires commit proofs from two non-colluding policy servers.
+To reconcile centralized policy databases with query privacy, the gateway performs fixed-shape policy checks against two policy servers using 2-server PIR (DPF/FSS) and evaluates policy programs via 2PC over XOR-shared inputs.
+We implement an end-to-end artifact including sealed handles (secret myopia), intent routing, capsule mediation, skill ingress, and real-agent integrations (OpenClaw and Claude Agent SDK runtimes), and we report deterministic evidence for non-bypassable effects, secret myopia, single-auditor privacy under a stated leakage function, and skill-confined safety under an explicit capsule mediation assumption.
+\end{abstract}
+
+
+\section{System and threat model}
+
+This section formalizes the system boundary and the attacker capabilities for MIRAGE OG plus plus.
+The description matches the artifact implementation and the real agent integrations.
+
+\subsection{Entities}
+
+The system consists of five roles.
+
+\begin{itemize}
+\item Untrusted agent runtime $\mathcal{A}$.
+The agent runtime includes any skill code, plugin code, and prompt driven logic.
+The adversary may arbitrarily control $\mathcal{A}$, including its memory and the content of every request it sends.
+
+\item Trusted gateway $\mathcal{G}$.
+The gateway is a small trusted computing base that exports a single tool interface, stores sealed handles, coordinates privacy preserving checks, and issues preview tokens.
+
+\item Policy servers $\mathcal{P}_0$ and $\mathcal{P}_1$.
+Each policy server stores a policy database and participates in privacy preserving policy evaluation.
+Each policy server is honest but curious.
+At least one policy server does not collude with the adversary.
+
+\item Executor $\mathcal{X}$.
+The executor performs external side effects.
+The executor requires dual authorization from $\mathcal{P}_0$ and $\mathcal{P}_1$ and fails closed.
+
+\item User $\mathcal{U}$.
+The user may be required to explicitly confirm certain actions.
+\end{itemize}
+
+\subsection{Action surface}
+
+The gateway exports exactly one action surface to the untrusted agent runtime.
+Each request has the form
+\[
+r = \langle \mathsf{intent\_id},\ \mathsf{inputs},\ \mathsf{constraints},\ \mathsf{caller} \rangle .
+\]
+The gateway routes $r$ through an allowlisted intent router.
+There is no intent that provides direct access to arbitrary process execution, arbitrary network access, or arbitrary host file access.
+This enforces intent level mediation at the gateway boundary.
+
+\subsection{Side effects}
+
+Let $\mathcal{E}$ be the set of side effects that can modify external state.
+Examples include sending a message, posting a webhook, and enabling a skill.
+The system maintains an executor log $\mathsf{EffLog}$ that records every successfully executed $e \in \mathcal{E}$.
+
+The executor is the only component that may produce elements of $\mathsf{EffLog}$.
+The gateway may return previews and transaction identifiers, but it does not directly execute $e$.
+
+\subsection{Secrets and sealed handles}
+
+Let $\mathcal{S}$ be the set of sensitive plaintext values.
+These include private keys, access tokens, and sensitive file contents.
+A sealed handle is an opaque identifier $h$ that refers to a plaintext value stored inside the trusted gateway.
+
+The gateway maintains a handle store mapping $h$ to a record containing plaintext, a label, a time to live, and an allowed sink set.
+The untrusted agent runtime receives only $h$ and metadata.
+The plaintext remains within the gateway boundary unless an explicit declassification path is invoked and permitted.
+
+\subsection{Cryptographic components}
+
+The system uses three cryptographic components.
+
+\paragraph{Message authentication codes}
+Each policy server $\mathcal{P}_\sigma$ holds a MAC key $K_\sigma$.
+The MAC scheme provides unforgeability under chosen message attack.
+
+\paragraph{Distributed point function keys}
+For a domain size $N$, a distributed point function is specified by algorithms $\mathsf{DPFGen}$ and $\mathsf{DPFEval}$.
+Given an index $\alpha \in \{0,1\}^{\log N}$, generation outputs two keys
+\[
+\langle k_0, k_1 \rangle \leftarrow \mathsf{DPFGen}\langle 1^\lambda,\ \alpha \rangle .
+\]
+Evaluation returns a bit share
+\[
+b_\sigma \leftarrow \mathsf{DPFEval}\langle k_\sigma,\ x \rangle
+\]
+for $x \in \{0,1\}^{\log N}$.
+Correctness requires $b_0 \oplus b_1 = 1$ if $x = \alpha$ and $0$ otherwise.
+Security requires that a single key share $k_\sigma$ does not reveal $\alpha$ beyond a stated leakage function.
+
+\paragraph{Two party computation for policy programs}
+Policy programs are compiled to a Boolean circuit.
+The two policy servers evaluate the circuit over XOR shared inputs using a secure two party computation protocol.
+The protocol provides privacy of each party view against an honest but curious adversary.
+
+\subsection{Threat model}
+
+The adversary controls the untrusted agent runtime $\mathcal{A}$.
+The adversary may adaptively choose intents, inputs, constraints, and any payload content.
+The adversary may attempt to bypass the gateway by executing local commands, directly accessing host files, or directly reaching the public network.
+
+The adversary may corrupt at most one policy server.
+A corrupted policy server reveals its local database, its local keys, and its full transcript.
+The adversary does not corrupt both policy servers.
+
+The gateway and executor are trusted for the baseline security statements in this section.
+Limitations of this assumption are discussed later.
+
+\section{Security goals}
+
+This section states concrete security goals as properties of the full system.
+
+\subsection{Goal one nonbypassable effects}
+
+The system should ensure that no external side effect is executed without dual authorization from both policy servers.
+We call this property nonbypassable effects and denote it by NBE.
+
+\paragraph{Experiment for NBE}
+Consider an experiment $\mathsf{Exp}^{\mathsf{NBE}}_{\Pi,\mathcal{A}}$.
+
+\begin{itemize}
+\item The challenger initializes $\mathcal{G}$, $\mathcal{P}_0$, $\mathcal{P}_1$, and $\mathcal{X}$ and gives $\mathcal{A}$ control of the untrusted agent runtime.
+The challenger also gives $\mathcal{A}$ the full internal state of at most one of the policy servers.
+
+\item The adversary interacts with the system by issuing arbitrary gateway requests and by attempting to trigger commits and replays.
+The adversary may also attempt to produce side effects by bypassing the gateway.
+
+\item The adversary wins if $\mathsf{EffLog}$ contains an effect $e$ for which the executor did not verify two valid commit proofs that both bind to $e$ and to the same request digest.
+\end{itemize}
+
+The system satisfies NBE if for every probabilistic polynomial time adversary,
+\[
+\Pr\bigl\{\mathsf{Exp}^{\mathsf{NBE}}_{\Pi,\mathcal{A}} = 1\bigr\}
+\]
+is negligible in $\lambda$.
+
+\subsection{Goal two secret myopia}
+
+The system should ensure that the untrusted agent runtime cannot learn sensitive plaintext.
+The agent may receive sealed handles and metadata, but not the plaintext values.
+We call this property secret myopia and denote it by SM.
+
+\paragraph{Leakage for SM}
+Let $\mathcal{L}_{\mathsf{SM}}$ be the permitted leakage to the untrusted agent runtime.
+It includes handle identifiers, handle labels, time to live, policy decision bits, and explicitly declassified outputs after sanitization.
+It excludes any other function of plaintext secrets.
+
+\paragraph{Definition of SM}
+Let $\mathsf{View}_{\mathcal{A}}$ be the full view of the adversary controlling the untrusted agent runtime, including all gateway responses and all local randomness.
+The system satisfies SM if there exists a probabilistic polynomial time simulator $\mathcal{S}$ such that for all adversaries,
+\[
+\mathsf{View}_{\mathcal{A}} \approx_c \mathcal{S}\langle \mathcal{L}_{\mathsf{SM}} \rangle .
+\]
+This means that the adversary view can be simulated from the permitted leakage and does not contain additional information about plaintext secrets.
+
+\subsection{Goal three single auditor privacy}
+
+The system should allow centralized policy databases and centralized policy logic without revealing query contents to a single policy server.
+We call this property single auditor privacy and denote it by SAP.
+
+\paragraph{Leakage for SAP}
+Let $\mathcal{L}_{\mathsf{SAP}}$ be the permitted leakage to a single policy server.
+It includes public system parameters such as domain size and fixed request shapes.
+It may include policy outputs since each policy server participates in producing the authorization decision.
+It excludes the cleartext recipient, domain, token strings, and skill content being checked.
+
+\paragraph{Experiment for SAP}
+Consider an experiment $\mathsf{Exp}^{\mathsf{SAP}}_{\Pi,\mathcal{A}}$.
+
+\begin{itemize}
+\item The adversary chooses two sequences of gateway actions $W_0$ and $W_1$ such that $\mathcal{L}_{\mathsf{SAP}}\langle W_0 \rangle = \mathcal{L}_{\mathsf{SAP}}\langle W_1 \rangle$.
+
+\item The challenger samples a bit $b \leftarrow \{0,1\}$ and executes the system on $W_b$.
+The challenger then reveals to the adversary the full internal view of one policy server, including its local transcript.
+
+\item The adversary outputs a guess $b'$.
+\end{itemize}
+
+The system satisfies SAP if for every probabilistic polynomial time adversary,
+\[
+\bigl|\Pr\{b' = b\} - \tfrac{1}{2}\bigr|
+\]
+is negligible in $\lambda$.
+
+\subsection{Goal four skill confined safety}
+
+The system should ensure that malicious skills cannot bypass the gateway to perform host file access, arbitrary command execution, or public network access.
+We call this property skill confined safety and denote it by SCS.
+
+SCS is stated under a system assumption about an operating system capsule.
+The capsule places the untrusted agent runtime in an environment that does not permit direct host secret reads, direct public network access, or arbitrary process execution.
+The capsule permits only a constrained transport from the agent runtime to the gateway.
+
+Under this capsule mediation assumption, any attempt to bypass the gateway reduces to an operating system denial and does not produce a side effect.
+Therefore all successful side effects must flow through the executor authorization path and are covered by NBE and SM.
+
+\section{Security claims and proof sketches}
+
+This section states the main security claims.
+Full proofs can be provided in an appendix.
+
+\paragraph{Theorem one nonbypassable effects}
+Assume the MAC scheme used by the policy servers is unforgeable under chosen message attack.
+Assume the executor verifies two valid commit proofs from distinct policy servers and fails closed.
+Then the system satisfies NBE.
+
+\paragraph{Proof sketch}
+If an effect appears in $\mathsf{EffLog}$, then the executor accepted and verified two commit proofs.
+If the adversary corrupts at most one policy server, it can produce at most one valid MAC.
+Producing the second valid MAC implies a MAC forgery, which occurs with negligible probability.
+Binding the proof to a request digest and to the effect description prevents proof reuse for a different effect.
+
+\paragraph{Theorem two secret myopia}
+Assume the gateway never returns plaintext secret values in responses to the untrusted agent runtime except through explicit declassification logic that enforces user confirmation and sanitization.
+Then the system satisfies SM with leakage $\mathcal{L}_{\mathsf{SM}}$.
+
+\paragraph{Proof sketch}
+The simulator samples fresh random handle identifiers and produces metadata consistent with the leakage.
+Since handles are opaque and the gateway stores the mapping from handle to plaintext, the adversary view can be simulated without access to plaintext.
+Any declassified output is already included in the leakage by definition.
+
+\paragraph{Theorem three single auditor privacy}
+Assume the distributed point function construction is secure against a single key share adversary.
+Assume the two party computation protocol used by the policy servers is secure in the honest but curious model.
+Assume the gateway uses fixed request shapes and padding rules that make $\mathcal{L}_{\mathsf{SAP}}$ identical across the compared action sequences.
+Then the system satisfies SAP.
+
+\paragraph{Proof sketch}
+A single policy server receives only one distributed point function key share per query, so its view of the PIR query is computationally independent of the query index beyond leakage.
+The two party computation protocol reveals no additional information about the other party input shares beyond the circuit output and leakage.
+Composition yields indistinguishability of transcripts for any two action sequences with the same leakage.
+
+\paragraph{Theorem four skill confined safety}
+Assume the capsule mediation assumption holds.
+Assume NBE and SM hold for the gateway and executor path.
+Then the system satisfies SCS.
+
+\paragraph{Proof sketch}
+All bypass attempts that do not traverse the gateway are denied by the capsule and cannot reach external sinks.
+Any effect that does reach an external sink must have been produced by the executor, and the executor enforces NBE.
+Any sensitive plaintext that could be used for exfiltration remains protected by SM unless explicitly declassified.
+
+\section{Implementation changes for capsule and skill ingress}
+
+This section describes minimal engineering changes needed to integrate a capsule and skill ingress into an existing agent stack while preserving the security model.
+
+\subsection{Capsule integration}
+
+The capsule has two responsibilities.
+It constrains the untrusted agent runtime capabilities and it preserves a single gateway mediated action surface.
+
+A minimal capsule integration requires the following changes.
+
+\begin{enumerate}
+\item Add a constrained gateway transport that the capsule can reach.
+A minimal choice is an HTTP endpoint on the gateway that exposes the same \texttt{act} semantics.
+A stronger choice is a Unix domain socket endpoint that permits the capsule to run with no network access.
+
+\item Add a minimal proxy inside the capsule.
+The proxy presents the same tool interface expected by the agent runtime and forwards each request to the gateway transport.
+The proxy implements only the \texttt{act} tool and rejects all other tool calls.
+
+\item Add an operating system policy for the capsule.
+The policy denies host secret file reads, denies public network access, and denies arbitrary process execution.
+The policy allows reads from the agent code and a write only workspace directory.
+The policy allows only the constrained transport to the gateway.
+
+\item Add a deterministic capsule smoke test.
+The test attempts direct host secret reads, direct public network access, and direct process execution and asserts denial.
+The test then invokes the gateway transport through the proxy and asserts success.
+\end{enumerate}
+
+\subsection{Skill ingress integration}
+
+Skill ingress turns skill installation and skill enabling into a guarded side effect protected by the same preview and commit mechanism used for egress.
+
+A minimal skill ingress integration requires the following changes.
+
+\begin{enumerate}
+\item Add a staging intent \texttt{ImportSkill} that ingests a skill package without executing any code.
+The intent returns a sealed handle representing the staged package.
+
+\item Add an introspection intent \texttt{DescribeSkill} that returns a sanitized summary of the staged skill documentation.
+Raw documentation remains sealed unless explicitly declassified with user confirmation.
+
+\item Add a preview intent \texttt{CheckSkillInstallPolicy}.
+This intent extracts ingress features from the staged package.
+The gateway then performs privacy preserving membership checks against centralized databases hosted by the two policy servers using distributed point function PIR.
+The gateway also secret shares local Boolean features and invokes two party computation for a skill ingress policy circuit.
+The gateway returns a transaction identifier and any required confirmation signal.
+
+\item Add a commit intent \texttt{CommitSkillInstall}.
+This intent is executed by the executor.
+The executor verifies dual commit proofs from both policy servers and fails closed.
+If verified, the executor enables the skill in a local registry.
+
+\item Extend policy databases and policy programs.
+Policy servers host bitset databases for known bad infrastructure indicators and known bad install markers.
+Policy programs combine these membership results with local obfuscation features to output allow, deny, or require user confirmation.
+\end{enumerate}
+
+\section{Limitations and planned extensions}
+
+The current system design provides strong reference monitor properties under explicit trust and operating system assumptions.
+Several extensions would strengthen the system and improve evaluation.
+
+\subsection{Vectorized FSS backends}
+
+The artifact demonstrates the DPF/FSS protocol skeleton and provides both Python and Rust policy server implementations.
+The policy server computation is still $O(N)$ per query and is the dominant cost for large domains.
+Production deployments should use optimized PRGs (AES/CTR) and SIMD/vectorized inner-product kernels, and should benchmark end-to-end throughput at realistic query rates.
+
+\subsection{Cross platform capsule}
+
+A production capsule should be implemented for multiple operating systems using native isolation mechanisms.
+The artifact includes a macOS \texttt{sandbox-exec} profile and a Linux minimal capsule built on \texttt{bubblewrap} (\texttt{bwrap}) with a network namespace.
+A more complete capsule would add seccomp filters, stronger filesystem policies, and hardening against sandbox escapes.
+
+\subsection{Leakage measurement}
+
+Single auditor privacy is stated relative to a leakage function.
+The artifact includes an empirical leakage evaluation that trains a classifier on a single policy server transcript (metadata only) to quantify intent leakage with and without shaping and bundling.
+More complete evaluations should include active timing attacks, batching effects, and multi-tenant workloads.
+
+\subsection{Skill documentation benchmark}
+
+A benchmark of skill documentation and skill installation artifacts would enable standardized evaluation of doc based skill supply chain attacks.
+The artifact includes SkillDocBench v1, a small JSONL dataset of benign, confirm-worthy, and blocked skill documentation samples with deterministic labels.
+Future work should scale the benchmark and include real-world corpora plus controlled synthetic variants that isolate obfuscation and staged loader features.
+\end{document}

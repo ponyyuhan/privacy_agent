@@ -2,6 +2,19 @@
 
 本文档是本仓库可运行 demo 的“证明/证据”配套材料，用于论文/报告中的有效性与安全性说明。
 
+## 术语与性质（与 `neurips_2025.tex` 对齐）
+
+本 repo 的“可验证有效性”主要围绕 4 个性质（缩写用于论文表述）：
+
+1. **NBE（Non‑Bypassable Effects，不可绕过副作用）**  
+   任意外部副作用（发送消息/外联/启用技能等）必须在 executor 端验证来自两台 policy server 的有效 commit 证明（MAC 绑定 `action_id` + `request_sha256` + `program_id`），否则 fail‑closed。
+2. **SM（Secret Myopia，秘密近视）**  
+   不可信 agent/skill 永远拿不到敏感明文，只得到 sealed handle（不透明句柄），且 handle 绑定 session/caller 并可撤销。
+3. **SAP（Single‑Auditor Privacy，单审计方隐私）**  
+   任意单个 policy server 的观测 transcript 在计算上不泄露被检查的 recipient/domain/token/IOC（在允许的 leakage function 边界内）。实现上使用 2‑server PIR（DPF/FSS）+ 2PC/MPC（GMW+Beaver）并配合 shaping/bundling。
+4. **SCS（Skill‑Confined Safety，技能受限安全）**  
+   在 capsule mediation 假设成立时（不可信 runtime 无 direct host secret / direct network / 任意 exec），恶意 skill 不能绕过 `act` 直接外联/偷钥/执行二阶段 payload。
+
 ## 我们证明什么（Demo 范围内）
 
 1. **Level 1（Secret Myopia）**：不可信 agent/skill 永远拿不到敏感明文（密钥/token/敏感文件内容），只能拿到 sealed handle（不透明句柄）。
@@ -14,6 +27,8 @@
 - Agent + skills：**不可信**（可恶意/可被注入/可被供应链投毒）。
 - Gateway：**可信最小 TCB**。
 - PolicyServer0 / PolicyServer1：**诚实但好奇**（honest-but-curious）且**不合谋**（至少一方不与另一方合谋）。
+- Executor：**可信**且执行副作用时**严格验证双证明**（否则 fail‑closed）。
+- Capsule：作为 OS 级 reference monitor；SCS 在 capsule contract 成立时给出（见 README “Capsule Mediation Assumption”）。
 
 ## 端到端复现实验
 
@@ -68,6 +83,29 @@ bash scripts/run_openclaw.sh
   - `Declassify(handle)` 未提供 `user_confirm` 时被拒绝（`REQUIRE_CONFIRM`）。
   - `CheckMessagePolicy(..., artifacts=[handle], recipient=evil@attacker.invalid)` 被拒绝（`HIGH_HANDLE_BLOCKED`）。
   - `CheckMessagePolicy(recipient=alice@example.com, text contains "AKIA...")` 返回 `REQUIRE_CONFIRM` + `sanitize_patch=REDACT` + `tx_id`（PREVIEW token）。
+
+## 每条性质在 artifact 中的“证据点”（对应 report 字段/代码路径）
+
+- **NBE**（不可绕过副作用）：
+  - `artifact_out/report.json:executor_bypass_attempts`：直接调用 executor（无证据/单方证据）必须失败
+  - `artifact_out/report.json:baselines.no_nbe_insecure_executor`：对照组（不要求双证明）会被直接绕过（`ALLOW_INSECURE`）
+  - 执行器验证逻辑：`executor_server/server.py`
+- **SM**（秘密近视）：
+  - `artifact_out/report.json:malicious.read_file`：读取 `~/.ssh/id_rsa` 返回 `handle` 而非明文
+  - `artifact_out/report.json:malicious.declassify`：未确认的 `Declassify(handle)` 必须 `REQUIRE_CONFIRM`
+  - 句柄与会话绑定/撤销：`gateway/handles.py`
+  - 文件 executor：`gateway/executors/fsexec.py`
+- **SAP**（单审计方隐私）：
+  - 2‑server PIR：`gateway/fss_pir.py` + `fss/dpf.py` + `policy_server/server.py`
+  - transcript 实证评估（shaped vs unshaped）：`artifact_out/report.json:leakage_eval`
+  - 本地规则 vs 外包规则对比：`artifact_out/report.json:outsourcing_comparison`
+  - `USE_POLICY_BUNDLE=1` 隐藏 db_name：`policy_server/build_dbs.py` + `gateway/egress_policy.py` / `gateway/skill_policy.py`
+- **SCS**（技能受限安全）：
+  - capsule smoke：`artifact_out/report.json:capsule_smoke`
+  - “无 capsule 则可绕过 act 直连外联”的对照：`artifact_out/report.json:baselines.no_capsule_direct_exfil`
+  - “允许 loopback + loopback HTTP transport 会产生 exfil 绕过”的对照：`artifact_out/report.json:baselines.capsule_loopback_http_exfil.direct_exfil_post`
+  - macOS capsule：`capsule/capsule.sb`（UDS netless + 限制文件/exec）
+  - Linux capsule（最小）：`bwrap` 模式（CI 运行；见 `scripts/artifact_report.py` 中的 bwrap 分支）
 
 ## Level 1：为什么 Sealed Handles 能阻止“明文泄露给 Agent”
 

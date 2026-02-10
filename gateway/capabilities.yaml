@@ -22,6 +22,7 @@ default:
     - CheckMessagePolicy
     - SendMessage
     - FetchResource
+    - CheckFetchPolicy
     - PostWebhook
     - ImportSkill
     - DescribeSkill
@@ -35,6 +36,24 @@ default:
     skill_install: false
 
 callers:
+  # Per-skill workload identities minted by the executor (workload_token -> caller override).
+  # Default to least privilege: skills can fetch resources and run dry-run policy checks,
+  # but cannot perform side effects directly.
+  "skill:*":
+    allow_intents:
+      - FetchResource
+      - CheckFetchPolicy
+      - CheckMessagePolicy
+      - ReadWorkspaceFile
+      - WriteWorkspaceFile
+      - ListWorkspaceFiles
+      - DescribeHandle
+    egress:
+      send_message: false
+      fetch_resource: true
+      post_webhook: false
+      skill_install: false
+
   # OpenClaw validation uses FetchResource + CheckMessagePolicy; real "SendMessage" can be
   # blocked in capability to avoid depending on provider side-effect allowances.
   openclaw:
@@ -45,6 +64,7 @@ callers:
       - Declassify
       - DescribeHandle
       - FetchResource
+      - CheckFetchPolicy
       - CheckMessagePolicy
       - ImportSkill
       - DescribeSkill
@@ -71,6 +91,7 @@ callers:
       - CheckMessagePolicy
       - SendMessage
       - FetchResource
+      - CheckFetchPolicy
       - PostWebhook
       - ImportSkill
       - DescribeSkill
@@ -98,6 +119,7 @@ callers:
       - CheckMessagePolicy
       - SendMessage
       - FetchResource
+      - CheckFetchPolicy
       - PostWebhook
       - ImportSkill
       - DescribeSkill

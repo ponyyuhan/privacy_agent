@@ -1,3 +1,4 @@
+import os
 from typing import Dict, Any
 
 from .handles import HandleStore
@@ -14,6 +15,7 @@ from .skill_store import SkillStore
 from .tx_store import TxStore
 from .capabilities import get_capabilities
 from .audit import AuditEvent, get_audit_logger, now_ts
+from common.workload_token import verify_workload_token
 
 class IntentRouter:
     def __init__(self, handles: HandleStore, guardrails: ObliviousGuardrails):
@@ -32,6 +34,27 @@ class IntentRouter:
 
     def act(self, intent_id: str, inputs: Dict[str, Any], constraints: Dict[str, Any], caller: str, session: str) -> Dict[str, Any]:
         audit = get_audit_logger()
+        orig_caller = caller
+        # Optional per-skill workload identity: if present and valid, override the untrusted caller string.
+        wt = None
+        token = None
+        if isinstance(constraints, dict):
+            token = constraints.get("workload_token") or constraints.get("workload_token_b64")
+        if isinstance(token, str) and token.strip():
+            key_hex = os.getenv("WORKLOAD_TOKEN_KEY", "").strip()
+            wt = verify_workload_token(key_hex=key_hex, token=token.strip(), session=session)
+            if wt is None:
+                obs = {
+                    "status": "DENY",
+                    "summary": "Invalid workload token.",
+                    "data": {"caller": str(orig_caller), "intent_id": str(intent_id)},
+                    "artifacts": [],
+                    "reason_code": "WORKLOAD_TOKEN_INVALID",
+                }
+                audit.log(AuditEvent(ts=now_ts(), event="act_result", session=session, caller=str(orig_caller), intent_id=intent_id, status=str(obs.get("status", "")), reason_code=str(obs.get("reason_code", ""))))
+                return obs
+            caller = f"skill:{wt.skill_digest}"
+
         audit.log(
             AuditEvent(
                 ts=now_ts(),
@@ -39,7 +62,11 @@ class IntentRouter:
                 session=session,
                 caller=caller,
                 intent_id=intent_id,
-                data={"input_keys": sorted(list((inputs or {}).keys()))},
+                data={
+                    "input_keys": sorted(list((inputs or {}).keys())),
+                    "orig_caller": str(orig_caller),
+                    "workload_skill_digest": (wt.skill_digest if wt else ""),
+                },
             )
         )
 
@@ -90,6 +117,10 @@ class IntentRouter:
             return obs
         if intent_id == "FetchResource":
             obs = self.net.fetch(inputs, constraints, session=session, caller=caller)
+            audit.log(AuditEvent(ts=now_ts(), event="act_result", session=session, caller=caller, intent_id=intent_id, status=str(obs.get("status", "")), reason_code=str(obs.get("reason_code", ""))))
+            return obs
+        if intent_id == "CheckFetchPolicy":
+            obs = self.net.check_fetch_policy(inputs, session=session, caller=caller)
             audit.log(AuditEvent(ts=now_ts(), event="act_result", session=session, caller=caller, intent_id=intent_id, status=str(obs.get("status", "")), reason_code=str(obs.get("reason_code", ""))))
             return obs
         if intent_id == "WriteWorkspaceFile":

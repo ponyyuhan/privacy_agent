@@ -44,7 +44,25 @@ def get_capabilities(caller: str) -> Capabilities:
     cfg = _load_cfg()
     default = cfg.get("default") if isinstance(cfg.get("default"), dict) else {}
     callers = cfg.get("callers") if isinstance(cfg.get("callers"), dict) else {}
-    c = callers.get(str(caller)) if isinstance(callers, dict) else None
+    caller_s = str(caller)
+    c = callers.get(caller_s) if isinstance(callers, dict) else None
+    if not isinstance(c, dict) and isinstance(callers, dict):
+        # Optional wildcard match: keys ending with "*" are treated as prefix rules.
+        best_key = ""
+        best_cfg = None
+        for k, v in callers.items():
+            ks = str(k)
+            if not ks.endswith("*"):
+                continue
+            prefix = ks[:-1]
+            if not prefix:
+                continue
+            if caller_s.startswith(prefix) and len(prefix) > len(best_key):
+                if isinstance(v, dict):
+                    best_key = prefix
+                    best_cfg = v
+        if best_cfg is not None:
+            c = best_cfg
     if not isinstance(c, dict):
         c = {}
 
@@ -62,4 +80,3 @@ def get_capabilities(caller: str) -> Capabilities:
         egress[str(k)] = bool(v)
 
     return Capabilities(allowed_intents=allowed_set, egress=egress)
-

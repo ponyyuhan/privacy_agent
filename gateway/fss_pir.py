@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import base64
+import json
 import math
+import os
+import threading
+import time
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Tuple
 from concurrent.futures import ThreadPoolExecutor
@@ -17,6 +21,46 @@ def _domain_bits(domain_size: int) -> int:
     return int(math.log2(domain_size))
 
 _HTTP_POOL = ThreadPoolExecutor(max_workers=8)
+_TRACE_LOCK = threading.Lock()
+
+
+def _trace_pir(
+    *,
+    server_id: int,
+    endpoint: str,
+    db: str,
+    n_keys: int,
+    domain_size: int,
+    action_id: str | None,
+    block_size: int | None = None,
+    signed: bool = False,
+) -> None:
+    """
+    Optional "single policy server transcript" logging for leakage evaluation.
+
+    This logs only metadata visible to the policy server (endpoint, db, batch size),
+    not the PIR index itself.
+    """
+    path = (os.getenv("MIRAGE_TRANSCRIPT_PATH") or os.getenv("PIR_TRANSCRIPT_PATH") or "").strip()
+    if not path:
+        return
+    ev = {
+        "ts": int(time.time() * 1000),
+        "server_id": int(server_id),
+        "endpoint": str(endpoint),
+        "db": str(db),
+        "n_keys": int(n_keys),
+        "domain_size": int(domain_size),
+        "signed": bool(signed),
+    }
+    if action_id:
+        ev["action_id"] = str(action_id)
+    if block_size is not None:
+        ev["block_size"] = int(block_size)
+    line = json.dumps(ev, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
+    with _TRACE_LOCK:
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(line + "\n")
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,6 +99,9 @@ class PirClient:
         payload0 = {"db": db_name, "dpf_keys_b64": keys0}
         payload1 = {"db": db_name, "dpf_keys_b64": keys1}
 
+        _trace_pir(server_id=0, endpoint="/pir/query_batch", db=db_name, n_keys=len(keys0), domain_size=ds, action_id=None, signed=False)
+        _trace_pir(server_id=1, endpoint="/pir/query_batch", db=db_name, n_keys=len(keys1), domain_size=ds, action_id=None, signed=False)
+
         f0 = _HTTP_POOL.submit(requests.post, f"{self.policy0_url}/pir/query_batch", json=payload0, timeout=timeout_s)
         f1 = _HTTP_POOL.submit(requests.post, f"{self.policy1_url}/pir/query_batch", json=payload1, timeout=timeout_s)
         r0 = f0.result()
@@ -90,6 +137,9 @@ class PirClient:
 
         payload0 = {"db": db_name, "dpf_keys_b64": keys0}
         payload1 = {"db": db_name, "dpf_keys_b64": keys1}
+
+        _trace_pir(server_id=0, endpoint="/pir/query_block_batch", db=db_name, n_keys=len(keys0), domain_size=ds, action_id=None, block_size=block_size, signed=False)
+        _trace_pir(server_id=1, endpoint="/pir/query_block_batch", db=db_name, n_keys=len(keys1), domain_size=ds, action_id=None, block_size=block_size, signed=False)
 
         f0 = _HTTP_POOL.submit(requests.post, f"{self.policy0_url}/pir/query_block_batch", json=payload0, timeout=timeout_s)
         f1 = _HTTP_POOL.submit(requests.post, f"{self.policy1_url}/pir/query_block_batch", json=payload1, timeout=timeout_s)
@@ -132,6 +182,9 @@ class PirClient:
         payload0 = {"db": db_name, "dpf_keys_b64": keys0, "action_id": action_id}
         payload1 = {"db": db_name, "dpf_keys_b64": keys1, "action_id": action_id}
 
+        _trace_pir(server_id=0, endpoint="/pir/query_batch_signed", db=db_name, n_keys=len(keys0), domain_size=ds, action_id=action_id, signed=True)
+        _trace_pir(server_id=1, endpoint="/pir/query_batch_signed", db=db_name, n_keys=len(keys1), domain_size=ds, action_id=action_id, signed=True)
+
         f0 = _HTTP_POOL.submit(requests.post, f"{self.policy0_url}/pir/query_batch_signed", json=payload0, timeout=timeout_s)
         f1 = _HTTP_POOL.submit(requests.post, f"{self.policy1_url}/pir/query_batch_signed", json=payload1, timeout=timeout_s)
         r0 = f0.result()
@@ -169,6 +222,9 @@ class PirClient:
 
         payload0 = {"db": db_name, "dpf_keys_b64": keys0, "action_id": action_id}
         payload1 = {"db": db_name, "dpf_keys_b64": keys1, "action_id": action_id}
+
+        _trace_pir(server_id=0, endpoint="/pir/query_block_batch_signed", db=db_name, n_keys=len(keys0), domain_size=ds, action_id=action_id, block_size=block_size, signed=True)
+        _trace_pir(server_id=1, endpoint="/pir/query_block_batch_signed", db=db_name, n_keys=len(keys1), domain_size=ds, action_id=action_id, block_size=block_size, signed=True)
 
         f0 = _HTTP_POOL.submit(requests.post, f"{self.policy0_url}/pir/query_block_batch_signed", json=payload0, timeout=timeout_s)
         f1 = _HTTP_POOL.submit(requests.post, f"{self.policy1_url}/pir/query_block_batch_signed", json=payload1, timeout=timeout_s)

@@ -8,7 +8,7 @@ This repo is a runnable research demo for **MIRAGE-OG++**. It implements a minim
 - **PREVIEW→COMMIT + MPC policy engine (GMW + Beaver)**. High-level policy programs (DSL in `policy_server/policy.yaml`) are compiled to a **boolean circuit** and evaluated by the two policy servers over XOR-shared inputs. The output includes `allow_pre`, `need_confirm`, and a `sanitize_patch` ID; each policy server returns a **MAC-signed commit proof**. The executor verifies both commit proofs and enforces sanitize at commit time (fail-closed).
 - **Capability projection + intent shadowing**. Per-caller capabilities are configured in `gateway/capabilities.yaml`. Egress policy evaluation uses **secret-shared one-hot intent bits** plus fixed-shape PIR queries to reduce leakage of `intent_id` / intent class to any single policy server.
 - **Executor dual authorization**. Side effects are executed by a separate executor service that requires **MAC-backed proofs from both policy servers** and fails closed if missing/invalid.
-- **Skill Capsule (OS-level mediation, MVP)**. Runs untrusted agent/skill code inside a capsule that cannot directly read host secrets / reach the public Internet, and must talk to the gateway via a constrained transport.
+- **Skill Capsule (OS-level mediation, MVP)**. Runs untrusted agent/skill code inside a capsule that cannot directly read host secrets / reach the public Internet, and must talk to the gateway via a constrained transport. Recommended transport is **UDS (netless)**; legacy loopback HTTP is supported for debugging.
 - **Skill ingress (PREVIEW→COMMIT for supply-chain)**. Skill install/enable becomes a guarded side effect: `ImportSkill` (stage only) → `CheckSkillInstallPolicy` (PREVIEW) → `CommitSkillInstall` (COMMIT, executor-enforced).
 - **MCP**. The gateway is exposed as an MCP stdio server (tool: `act`, alias: `mirage.act`).
 
@@ -19,14 +19,14 @@ This is a demo, not a hardened production system. The goal is to make the core m
 - 不可信 agent 只能调用 1 个工具：`mirage.act`/`act`，不能直接跑 shell / http / 文件 IO。
 - 读取“敏感文件”只会得到 `handle`，明文保留在网关可信边界内。
 - 外发/外联前，网关用 2-server PIR（DPF/FSS）去查 allowlist/DLP，任意单个 policy server 看不到具体被查的 recipient/domain/token。
-- PREVIEW→COMMIT：`CheckMessagePolicy` / `CheckWebhookPolicy` 返回 `tx_id` + `sanitize_patch`；`SendMessage` / `PostWebhook` 可携带 `tx_id` 进行 commit，executor 验证两台 policy server 的 commit proof，并在 executor 内强制应用 sanitize。
+- PREVIEW→COMMIT：`CheckMessagePolicy` / `CheckFetchPolicy` / `CheckWebhookPolicy` 返回 `tx_id` + `sanitize_patch`；`SendMessage` / `FetchResource` / `PostWebhook` 可携带 `tx_id` 进行 commit，executor 验证两台 policy server 的 commit proof，并在 executor 内强制应用 sanitize。
 - Capsule（MVP）：把不可信 runtime/skills 放到 OS 沙箱里运行，无法直接读宿主机敏感文件、无法直连公网，唯一出口是 `act`（通过 HTTP->Gateway）。
 - Skill ingress（MVP）：skill 的 install/enable 也走 PREVIEW→COMMIT；必须先 dry-run 拿到 `tx_id`，再由 executor 校验双证明后启用。
 - Capability/投影：按 `caller` 载入 `gateway/capabilities.yaml`，将 “允许哪些 intents/哪些外发能力” 投影为 MPC 输入位，避免通过早拒绝暴露过多意图信息。
 - 真正执行外发由 executor 完成，必须同时验证两台 policy server 的 MAC 证明，缺一不可（fail-closed）。
 - 已经接入真实 agent runtime 验证：
-- OpenClaw + OpenAI OAuth（`openai-codex` provider），单工具 `mirage_act`（并修复了 `No provider plugins found` 的 provider 插件缺失问题）。
-- NanoClaw 形态（Claude Agent SDK 运行时）通过 MCP 调用同一网关。
+  - OpenClaw + OpenAI OAuth（`openai-codex` provider），单工具 `mirage_act`（并修复了 `No provider plugins found` 的 provider 插件缺失问题）。
+  - NanoClaw 形态（Claude Agent SDK 运行时）通过 MCP 调用同一网关。
 
 ## Quickstart
 
@@ -101,8 +101,11 @@ Core code:
 - `executor_server/`: executor that verifies dual MAC proofs and executes side effects (or denies).
 - `common/`: shared canonicalization + sanitize helpers used by gateway and executor.
 - `capsule/`: Skill Capsule (MVP). A macOS `sandbox-exec` profile + an MCP->HTTP proxy + a smoke test runner.
-- `gateway/http_server.py`: HTTP transport for `act` (for capsule / remote runtimes). Optional bearer auth.
-- `capsule/mcp_proxy.py`: MCP stdio server that forwards tool calls to `gateway/http_server.py:/act`.
+- `gateway/http_server.py`: transport for `act` (capsule/remote runtimes). Supports loopback HTTP + optional bearer auth, and **UDS mode** via `MIRAGE_HTTP_UDS=/path/to.sock` (lets capsule run with network fully disabled).
+- `capsule/mcp_proxy.py`: MCP stdio server that forwards tool calls to the gateway via **UDS** (`MIRAGE_GATEWAY_UDS_PATH`) or legacy loopback HTTP (`MIRAGE_GATEWAY_HTTP_URL`).
+- `common/uds_http.py`: tiny HTTP-over-UDS client (no external deps) used inside the capsule and artifact scripts.
+- `common/workload_token.py`: per-skill workload token mint/verify (HMAC), used to override untrusted `caller` with `skill:<digest>`.
+- `datasets/skilldocbench/v1/skilldocbench_v1.jsonl`: SkillDocBench v1 (100 doc samples) used by the paper artifact.
 
 Agent integrations:
 
@@ -138,6 +141,7 @@ The gateway exports exactly one “action surface”:
 - `PostWebhook` (demo side effect path via executor)
 - `CheckWebhookPolicy` (dry-run)
 - `FetchResource` (network allowlist path; demo returns stub content)
+- `CheckFetchPolicy` (dry-run; policy evaluation only, no fetch)
 - `ReadSecret`, `UseCredential`, `Declassify`
 - `DescribeHandle`, `RevokeHandle`, `RevokeSession`
 
@@ -147,14 +151,28 @@ There is no “run arbitrary command” intent. The agent can only express a bou
 
 Why: in a real supply-chain attack, a malicious skill may try to bypass MCP and directly `exec`, `curl`, or read host files. The capsule makes “`act` is the only exit” enforceable at the OS boundary.
 
+#### Capsule Mediation Assumption (Explicit)
+
+For the **SCS (Skill‑Confined Safety)** claims, we assume the capsule enforces a simple mediation contract:
+
+- No direct host secret filesystem access (outside the repo/workspace allowlist).
+- No direct outbound network (recommended: **UDS transport + network fully disabled**).
+- No arbitrary `exec` of other programs (macOS `sandbox-exec` profile enforces allowlisted runtimes only).
+
+If this assumption is violated (e.g., you run the agent runtime outside a capsule, or you use loopback HTTP and allow arbitrary network), the gateway+executor still provide **NBE/SM** on the `act` surface, but a malicious skill may bypass `act` by performing side effects directly.
+
 This repo implements an MVP capsule suitable for artifact validation:
 
 - macOS: `capsule/capsule.sb` (used by `sandbox-exec`)
-  - denies default, allows only loopback network, restricts file reads to the repo, restricts writes to `artifact_out/capsule_*`
+  - denies default, **denies network by default**, restricts file reads to the repo, restricts writes to `artifact_out/capsule_*`
   - allows only explicit runtimes to exec (the Python/Node binaries passed in via profile params)
 - Transport:
-  - `gateway/http_server.py` exposes `POST /act` (same semantics as MCP tool `act`)
-  - `capsule/mcp_proxy.py` is an MCP stdio server that only implements tool `act` and forwards to `/act`
+  - **UDS (recommended)**:
+    - gateway listens on a Unix socket via `MIRAGE_HTTP_UDS=/tmp/mirage_ogpp_gateway.sock`
+    - capsule connects via `MIRAGE_GATEWAY_UDS_PATH=/tmp/mirage_ogpp_gateway.sock`
+    - capsule network stays fully disabled (prevents loopback exfil bypasses)
+  - **Legacy loopback HTTP** (debugging only):
+    - gateway listens on `127.0.0.1:$PORT` and capsule profile must set `ALLOW_LOOPBACK_NET=1`
 
 Validation:
 
@@ -164,8 +182,8 @@ Validation:
 Expected properties from the smoke test:
 
 - direct host secret read fails (e.g., `~/.ssh/id_rsa`)
-- direct Internet access fails
-- `act` succeeds via HTTP and via MCP proxy
+- direct exfil attempt via `requests.post` to a loopback “exfil server” fails (netless capsule)
+- `act` succeeds via **UDS** (direct) and via MCP proxy (`capsule/mcp_proxy.py`)
 
 ### Skill Ingress (MVP): PREVIEW→COMMIT for Skill Install/Enable
 
@@ -188,6 +206,8 @@ Flow:
 4. `CommitSkillInstall` (COMMIT)
    - executor verifies dual commit proofs (fail-closed)
    - enables the skill in a registry (demo: JSON under `artifact_out/enabled_skills.json`)
+   - returns a **workload token** (HMAC, session-bound) that can be attached to later calls as `constraints.workload_token`
+     - gateway verifies and overrides `caller` to `skill:<skill_digest>` for least-privilege capability projection (see `gateway/capabilities.yaml:"skill:*"`).
 
 You can inspect the exact policy in `policy_server/policy.yaml:policy_programs.skill_ingress_v1`.
 
@@ -273,19 +293,33 @@ What to look at:
   - benign + malicious egress flows (handles + deny codes)
   - capsule smoke results (`capsule_smoke`)
   - skill ingress results (`skill_ingress`)
+  - local vs outsourced rules comparison (`outsourcing_comparison`)
 - `artifact_out/audit.jsonl` records every `act_request` / `act_result` at the gateway boundary.
 
-Example outcomes from an artifact run on **2026-02-09** (local macOS dev machine):
+Example outcomes from an artifact run on **2026-02-10** (local macOS dev machine):
 
 - Capsule smoke (`report.json:capsule_smoke`):
   - `direct_fs_read.ok == false` (host secret path is not accessible)
   - `direct_exec_true.ok == false` and `direct_exec_sh.ok == false` (direct process exec is blocked)
+  - `direct_exfil_post.ok == false` (direct loopback exfil is blocked in netless/UDS capsule)
   - `direct_internet.ok == false` (public Internet blocked)
-  - `gateway_http_act.ok == true` and `gateway_mcp_act.ok == true`
+  - `gateway_act.ok == true` and `gateway_mcp_act.ok == true`
+- Baselines / ablations (`report.json:baselines`):
+  - `no_capsule_direct_exfil.ok == true` (without capsule, a malicious skill can bypass `act` and reach loopback exfil)
+  - `no_nbe_insecure_executor.reason_code == ALLOW_INSECURE` (if the executor does not require dual proofs, it can be bypassed directly)
+  - `capsule_loopback_http_exfil.direct_exfil_post.ok == true` (if you allow loopback network and use loopback HTTP transport, direct loopback exfil bypasses are possible; this is why UDS netless is recommended)
 - Skill ingress (`report.json:skill_ingress`):
   - benign skill: `CheckSkillInstallPolicy.status == OK` and `CommitSkillInstall.status == OK`
   - suspicious skill: `CheckSkillInstallPolicy.reason_code == REQUIRE_CONFIRM`, commit succeeds only with `user_confirm=true`
   - IOC skill: `CheckSkillInstallPolicy.reason_code == IOC_BLOCKED`
+- SkillDocBench v1 (`report.json:skilldocbench`):
+  - `accuracy == 1.0` at `n == 100` (ALLOW / CONFIRM / BLOCK)
+- Leakage evaluation (`report.json:leakage_eval`):
+  - unshaped: `n_unique_features == 17` (single policy server can often distinguish intent classes from transcript shape)
+  - shaped: `n_unique_features == 1` (fixed-shape surface collapses observable metadata)
+- Local vs outsourced rules (`report.json:outsourcing_comparison`):
+  - naive cleartext outsourcing: `id_accuracy == 1.0` (single auditor trivially identifies the queried recipient)
+  - 2-server PIR outsourcing (single-server transcript only): `n_unique_features == 1` and `id_accuracy == 0.0` in this artifact classifier
 
 ### 2) Real agent validation: OpenClaw + OpenAI OAuth (openai-codex)
 
@@ -353,11 +387,11 @@ BENCH_ITERS=10 BENCH_CONCURRENCY=2 python scripts/bench_e2e_throughput.py
 POLICY_BACKEND=rust BENCH_ITERS=10 BENCH_CONCURRENCY=2 BENCH_OUT_PATH=artifact_out/bench_e2e.rust.json python scripts/bench_e2e_throughput.py
 ```
 
-Example results from `python main.py artifact` on 2026-02-09 (local macOS dev machine):
+Example results from `python main.py artifact` on 2026-02-10 (local macOS dev machine):
 
-- FSS/DPF microbench (`artifact_out/bench_fss.txt`): `domain_size=4096`, `dpf_key_bytes=235`, `eval_pir_share_avg_s=0.009585` (includes keygen + 2 evals).
-- E2E throughput (Python policy server, `artifact_out/bench_e2e.json`): `throughput_ops_s=0.731` at `concurrency=2`, `iters=10` (includes PREVIEW→COMMIT MPC commit proof verification).
-- E2E throughput (Rust policy server, `artifact_out/bench_e2e.rust.json`): `throughput_ops_s=10.929` at `concurrency=2`, `iters=10` (same workload; compiled PIR backend reduces O(N) constant).
+- FSS/DPF microbench (`artifact_out/bench_fss.txt`): `domain_size=4096`, `dpf_key_bytes=235`, `eval_pir_share_avg_s=0.013821` (includes keygen + 2 evals).
+- E2E throughput (Python policy server, `artifact_out/bench_e2e.json`): `throughput_ops_s=0.433` at `concurrency=2`, `iters=10` (fixed-shape PIR + PREVIEW→COMMIT).
+- E2E throughput (Rust policy server, `artifact_out/bench_e2e.rust.json`): `throughput_ops_s=6.863` at `concurrency=2`, `iters=10` (same workload; compiled PIR backend reduces O(N) constant).
 
 ## Threat Coverage: ClawHub-Style Malicious Skills (SKILL.md Supply Chain)
 
