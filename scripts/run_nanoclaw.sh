@@ -100,4 +100,14 @@ if [[ ! -d "integrations/nanoclaw_runner/node_modules" ]]; then
 fi
 
 # Requires ANTHROPIC_API_KEY (recommended) or CLAUDE_CODE_OAUTH_TOKEN.
-node integrations/nanoclaw_runner/mirage_demo.mjs both
+mkdir -p artifact_out
+
+echo "[run_nanoclaw] running benign prompt..."
+node integrations/nanoclaw_runner/mirage_demo.mjs benign | tee artifact_out/nanoclaw_benign.txt >/dev/null
+
+echo "[run_nanoclaw] running malicious prompt..."
+node integrations/nanoclaw_runner/mirage_demo.mjs malicious | tee artifact_out/nanoclaw_malicious.txt >/dev/null
+
+echo "[run_nanoclaw] outputs:"
+echo "  artifact_out/nanoclaw_benign.txt"
+echo "  artifact_out/nanoclaw_malicious.txt"

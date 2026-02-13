@@ -92,6 +92,10 @@ async function runOnce(prompt) {
     MIRAGE_GATEWAY_HTTP_URL: process.env.MIRAGE_GATEWAY_HTTP_URL || '',
     MIRAGE_HTTP_TOKEN: process.env.MIRAGE_HTTP_TOKEN || '',
     MIRAGE_SESSION_ID: process.env.MIRAGE_SESSION_ID || '',
+    // Preserve audit / transcript evidence paths for paper artifacts and campaign runs.
+    AUDIT_LOG_PATH: process.env.AUDIT_LOG_PATH || '',
+    MIRAGE_TRANSCRIPT_PATH: process.env.MIRAGE_TRANSCRIPT_PATH || '',
+    PIR_TRANSCRIPT_PATH: process.env.PIR_TRANSCRIPT_PATH || '',
   };
 
   const mcpArgs = process.env.MIRAGE_GATEWAY_HTTP_URL

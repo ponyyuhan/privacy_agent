@@ -303,10 +303,32 @@ class EgressPolicyEngine:
         self.dlp_mode = (os.getenv("DLP_MODE", "fourgram") or "fourgram").strip().lower()
         self.intent_shadowing = bool(int(os.getenv("INTENT_SHADOWING", "1")))
         self.use_bundle = bool(int(os.getenv("USE_POLICY_BUNDLE", "1")))
+        # Baseline knobs (never enable in full security mode).
+        self.policy_bypass = bool(int(os.getenv("MIRAGE_POLICY_BYPASS", "0")))
+        self.single_server_cleartext = bool(int(os.getenv("SINGLE_SERVER_POLICY", "0")))
+        self.single_server_id = int(os.getenv("SINGLE_SERVER_ID", "0") or "0")
 
         self._bundle_cache: dict[str, Any] | None = None
         cfg = _load_policy_config()
         self._circuit = build_egress_v1_circuit_from_policy(cfg) or build_egress_v1_circuit()
+
+    def _query_bits_signed_or_single_server(
+        self,
+        *,
+        db_name: str,
+        idxs: list[int],
+        action_id: str,
+        domain_size: int | None = None,
+    ) -> tuple[list[int], dict[str, Any]]:
+        if self.single_server_cleartext:
+            return self.pir.query_bits_single_server_cleartext_signed(
+                db_name,
+                idxs,
+                action_id=action_id,
+                server_id=self.single_server_id,
+                domain_size=domain_size,
+            )
+        return self.pir.query_bits_signed(db_name, idxs, action_id=action_id, domain_size=domain_size)
 
     def _load_bundle(self) -> dict[str, Any] | None:
         if self._bundle_cache is not None:
@@ -512,6 +534,42 @@ class EgressPolicyEngine:
 
         request_sha = request_sha256_v1(intent_id=canonical_intent, caller=caller, session=session, inputs=sha_inputs)
 
+        # Baseline-only insecure mode: bypass policy checks and PIR/MPC entirely.
+        # This is used for ablations such as "sandbox-only".
+        if self.policy_bypass:
+            patch = SanitizePatch(PATCH_NOOP, {})
+            preview = {
+                "program_id": "egress_v1",
+                "action_id": action_id,
+                "request_sha256": request_sha,
+                "allow_pre": True,
+                "need_confirm": False,
+                "patch": patch.to_dict(),
+                "pir_evidence": {},
+                "commit_evidence": {},
+                "baseline_mode": "policy_bypass",
+            }
+            tx_rec = self.tx.mint(
+                intent_id=str(intent_id),
+                action_id=action_id,
+                request_sha256=request_sha,
+                caller=caller,
+                session=session,
+                preview=preview,
+                ttl_seconds=int(os.getenv("TX_TTL_S", "120")),
+            )
+            return {
+                "allow_pre": True,
+                "need_confirm": False,
+                "patch": patch.to_dict(),
+                "reason_code": "ALLOW_INSECURE_POLICY_BYPASS",
+                "details": "",
+                "evidence": {"commit": {}, "pir": {}},
+                "tx_id": tx_rec.tx_id,
+                "action_id": action_id,
+                "request_sha256": request_sha,
+            }
+
         # Shaping/ablation knob for leakage evaluation:
         # - fixed-shape (default): always issue recipient + domain + token queries (dummy-filled when irrelevant)
         # - unshaped: issue only the minimal queries needed for the selected intent (leaks intent class via transcript)
@@ -529,7 +587,12 @@ class EgressPolicyEngine:
         if do_rec:
             ridx_raw = stable_idx(recipient, self.domain_size)
             db_rec, ridx, dom_rec = self._bundle_idx(logical="allow_recipients", raw_idx=ridx_raw, bundle_env="POLICY_BUNDLE_EGRESS")
-            rbits, ev_rec = self.pir.query_bits_signed(db_rec, [ridx], action_id=action_id, domain_size=dom_rec)
+            rbits, ev_rec = self._query_bits_signed_or_single_server(
+                db_name=db_rec,
+                idxs=[ridx],
+                action_id=action_id,
+                domain_size=dom_rec,
+            )
 
         # 2) Domain allowlist bit (oblivious)
         dbits: list[int] = [1]
@@ -537,7 +600,12 @@ class EgressPolicyEngine:
         if do_dom:
             didx_raw = stable_idx(domain, self.domain_size)
             db_dom, didx, dom_dom = self._bundle_idx(logical="allow_domains", raw_idx=didx_raw, bundle_env="POLICY_BUNDLE_NET")
-            dbits, ev_dom = self.pir.query_bits_signed(db_dom, [didx], action_id=action_id, domain_size=dom_dom)
+            dbits, ev_dom = self._query_bits_signed_or_single_server(
+                db_name=db_dom,
+                idxs=[didx],
+                action_id=action_id,
+                domain_size=dom_dom,
+            )
 
         # 3) DLP token hits (oblivious). We only feed an aggregated hit bit into MPC for now.
         hits: list[int] = []
@@ -563,7 +631,12 @@ class EgressPolicyEngine:
                 loff = int((offs or {}).get("banned_tokens", 0))
                 idxs2 = [(bid * stride) + loff + (int(x) % base_ds) for x in idxs_raw]
                 dom2 = int(b.get("bundle_domain_size") or 0) or None
-            hits, ev_tok = self.pir.query_bits_signed(db_tok, idxs2, action_id=action_id, domain_size=dom2)
+            hits, ev_tok = self._query_bits_signed_or_single_server(
+                db_name=db_tok,
+                idxs=idxs2,
+                action_id=action_id,
+                domain_size=dom2,
+            )
             coarse_hit = 1 if any(int(h) == 1 for h in hits) else 0
 
         # Optional confirm stage: keep existing dfa knob semantics.

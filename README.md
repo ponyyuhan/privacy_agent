@@ -46,7 +46,7 @@ pip install -r requirements.txt
 python main.py demo
 ```
 
-### 2.2 论文 artifact（推荐）
+### 2.2 Artifact（最小可复现，推荐先跑）
 ```bash
 python main.py artifact
 ```
@@ -56,7 +56,22 @@ python main.py artifact
 - 端到端报告生成（`artifact_out/report.json`）
 - Python/Rust 策略服务吞吐短测
 
-### 2.3 真实 agent（OpenClaw + OpenAI OAuth）
+### 2.3 Paper-grade Artifact（论文级流水线，包含 formal+baselines+plots）
+```bash
+python main.py paper-artifact
+```
+这会在 `artifact_out/` 额外生成：
+- 形式化安全检查输出（`artifact_out/security_game_nbe.json`）
+- 强基线 + 大规模评测（`artifact_out/paper_eval/*`）
+- policy server 吞吐曲线（`artifact_out/policy_perf/*`）
+- native runtime baselines（`artifact_out/native_baselines/*`）
+- real-agent 闭环 campaign（`artifact_out/campaign/*`）
+- 自动产图（`artifact_out/figures/*.svg`）
+- 可复现 manifest（`artifact_out/repro_manifest.json`）
+
+注意：其中 native/real-agent 相关步骤可能需要外部模型/凭据；脚本会尽量 `SKIP/continue`，不把整个流水线跑挂。
+
+### 2.4 真实 agent（OpenClaw + OpenAI OAuth）
 ```bash
 bash scripts/setup_openclaw.sh
 OPENCLAW_STATE_DIR="artifact_out/openclaw_state" bash scripts/setup_openclaw_state.sh
@@ -65,7 +80,7 @@ OPENCLAW_STATE_DIR="artifact_out/openclaw_state" \
 bash scripts/run_openclaw.sh
 ```
 
-### 2.4 真实 agent（NanoClaw 运行时）
+### 2.5 真实 agent（NanoClaw 运行时）
 ```bash
 export ANTHROPIC_API_KEY="..."
 bash scripts/run_nanoclaw.sh
@@ -251,10 +266,18 @@ artifact 证据：
 ### 6.6 脚本
 - `scripts/run_all.sh`: demo 全链路
 - `scripts/run_artifact.sh`: artifact 全链路
+- `scripts/run_paper_artifact.sh`: paper-grade 全流水线（formal + baselines + eval + plots）
 - `scripts/run_openclaw.sh`: OpenClaw 真实 agent 验证
 - `scripts/run_nanoclaw.sh`: NanoClaw 真实 agent 验证
 - `scripts/setup_openclaw_state.sh`: 解决 OpenClaw provider plugin discoverability
 - `scripts/import_codex_oauth_to_openclaw.py`: Codex OAuth 导入 OpenClaw state
+- `scripts/security_game_nbe_check.py`: NBE 安全游戏/定理的可执行检查
+- `scripts/paper_eval.py`: 强基线 + 攻击/良性任务集评测（含置信区间/显著性）
+- `scripts/bench_policy_server_curves.py`: policy server 曲线（batch/padding 对吞吐影响）
+- `scripts/native_guardrail_eval.py`: Codex/Claude/OpenClaw 原生防护强基线
+- `scripts/real_agent_campaign.py`: real-agent 闭环评测与证据链产出
+- `scripts/plot_paper_figures.py`: 产图（SVG，无 matplotlib 依赖）
+- `scripts/write_repro_manifest.py`: 版本/seed/平台 manifest（复现实验工件）
 
 ---
 
@@ -518,6 +541,18 @@ Router 已实现的 intent（是否可用取决于 capability 配置）：
 - 需要 `ANTHROPIC_API_KEY` 或 `CLAUDE_CODE_OAUTH_TOKEN`
 - 执行 NanoClaw 运行时的同类验证
 
+### 14.5 `python main.py paper-artifact`
+等价于 `bash scripts/run_paper_artifact.sh`，用于论文级评测/产图：
+1. 单元测试
+2. NBE 形式化检查（见 `FORMAL_SECURITY.md` 与 `scripts/security_game_nbe_check.py`）
+3. baselines + 大规模评测（`scripts/paper_eval.py`）
+4. policy server 吞吐曲线（`scripts/bench_policy_server_curves.py`）
+5. 端到端吞吐 benches（python + rust，可选）
+6. native runtime baselines（`scripts/native_guardrail_eval.py`）
+7. real-agent campaign（`scripts/real_agent_campaign.py`）
+8. 自动产图（`artifact_out/figures/*.svg`）
+9. 可复现 manifest（`artifact_out/repro_manifest.json`）
+
 ---
 
 ## 15. Artifact 输出字段（逐项解释）
@@ -750,6 +785,108 @@ OPENCLAW_STATE_DIR="artifact_out/openclaw_state" \
 
 - `ARTIFACT.md`: artifact 运行与提交说明
 - `EFFECTIVENESS.md`: 有效性定义与对应证据
+- `FORMAL_SECURITY.md`: NBE/SM/SAP/SCS 的严格定义、安全游戏与可验证命题
+- `MOTIVATION_PAPER.md`: 英文论文级 Motivation/Problem/Goals/Approach（含 baseline 能力矩阵与案例映射）
+- `MOTIVATION_PAPER_CN.md`: 中文对应版本
 - `new.md`: 当前工作包与完成项追踪
 - `neurips_2025.tex`: 论文文本草稿
 
+---
+
+## 24. Paper-grade 评测：基线、指标、输出与样例结果
+
+本节对应你提出的“论文级 6 项必做工作”：
+1. 形式化安全主张（定义/游戏/可验证命题）
+2. 强基线对比（不仅无防护）
+3. 大规模实证（攻击/良性任务集 + 统计）
+4. 性能工程到生产量级（policy server O(N) 路径工程化 + 曲线）
+5. 真实 agent 闭环评测（OpenClaw/NanoClaw/脚本化 MCP）
+6. 可复现实验工件（一键复现 + 固定 seed + 自动产图）
+
+### 24.1 一键运行与固定随机性
+
+```bash
+python main.py paper-artifact
+```
+
+默认固定：
+- `MIRAGE_SEED=7`
+- `PYTHONHASHSEED=0`
+- `EVAL_ATTACKS_PER_CATEGORY=60`
+- `EVAL_BENIGNS_PER_CATEGORY=60`
+
+你可以通过环境变量覆盖（见 `scripts/run_paper_artifact.sh`）。
+
+### 24.2 形式化主张与可执行检查（必须）
+
+- 严格定义与安全游戏：`FORMAL_SECURITY.md`
+- 机器可复核检查：
+  - `scripts/security_game_nbe_check.py` 会产生 `artifact_out/security_game_nbe.json`
+  - `tests/test_security_games.py` 是 executor proof 验证逻辑的单测
+
+你应当在 `artifact_out/security_game_nbe.json` 看到 `status="OK"`。
+
+### 24.3 强基线对比（必须）
+
+`scripts/paper_eval.py` 实现并评测以下模式（输出 `artifact_out/paper_eval/*`）：
+
+- `mirage_full`：完整 MIRAGE-OG++（gateway + 双 policy server + executor 双 proof）。
+- `policy_only`：只做 policy 判定/签发，但不通过 executor 强制（用于证明没有 NBE 时不可绕过性不存在）。
+- `sandbox_only`：网关策略检查被显式旁路（`MIRAGE_POLICY_BYPASS=1`），近似“只有沙箱/只有运行时防护”的 ablation（注意：这不是 OS 级 sandbox 的等价实现，只用于对照）。
+- `single_server_policy`：单 policy server 明文 idx 查询（性能更快但牺牲 SAP；用于隐私对照）。
+
+### 24.4 任务集与指标（必须）
+
+任务集由 `scripts/paper_eval.py` 内置生成并可扩展：
+- 攻击集：提示注入、命令注入风格、路径绕过链、skill 供应链 IOC/安装链
+- 良性集：正常消息/外联/skill 安装路径
+
+指标（逐条 case 记录于 `paper_eval_rows.csv`）：
+- 阻断率（攻击拦截率）
+- 误报率（良性被拒绝率）
+- 延迟（avg/p50/p95）
+- 吞吐（ops/s）
+- 成本代理（本仓库用“PIR 查询数 + MPC 程序数”做可复现 cost_units）
+- 统计：Wilson 95% CI + permutation p-value（相对 `mirage_full`）
+
+### 24.5 性能工程与吞吐曲线（必须）
+
+policy server 的 O(N) 内积计算有两条后端：
+- Python：`policy_server/db.py`
+- Rust：`policy_server_rust/src/main.rs`（64-bit chunk + popcount parity；更接近生产可用实现）
+
+吞吐曲线：
+- `scripts/bench_policy_server_curves.py`
+- 输出：`artifact_out/policy_perf/policy_server_curves.json` 与 `.csv`
+
+目标解释：证明“安全提升不是靠把系统变慢 100 倍”，而是可以通过编译/向量化显著降低常数因子。
+
+### 24.6 真实 agent 闭环与证据链（必须）
+
+real-agent campaign：
+- `scripts/real_agent_campaign.py`
+- 输出：`artifact_out/campaign/real_agent_campaign.json`
+- 同目录会保存：
+  - OpenClaw / NanoClaw 的 benign/malicious 输出副本
+  - `audit_*.jsonl`（审计日志）
+  - SHA256（证据链完整性）
+
+native runtime baselines（无 MIRAGE）：
+- `scripts/native_guardrail_eval.py`
+- 输出：`artifact_out/native_baselines/native_guardrail_eval.json`
+
+### 24.7 自动产图与复现清单（必须）
+
+- Figures（SVG）：`artifact_out/figures/*.svg` 与 `artifact_out/figures/figures_index.json`
+- Repro manifest：`artifact_out/repro_manifest.json`
+  - 平台信息、git 版本、工具版本、固定 seeds
+
+### 24.8 样例结果（来自一次本地运行，需以输出文件为准）
+
+你可以直接查看：
+- `artifact_out/paper_eval/paper_eval_summary.json`
+- `artifact_out/policy_perf/policy_server_curves.json`
+- `artifact_out/native_baselines/native_guardrail_eval.json`
+- `artifact_out/campaign/real_agent_campaign.json`
+
+本 README 的第 16 节仍保留了 demo artifact 的样例数值；paper-grade 结果以第 24 节这些输出为准（可在论文中引用并附上 seed/commit）。

@@ -322,6 +322,24 @@ fn convert_bit_v1(seed: &[u8; SEED_BYTES]) -> u8 {
     d[0] & 1
 }
 
+#[inline]
+fn xor_inplace_u64(dst: &mut [u8], src: &[u8]) {
+    let n = dst.len().min(src.len());
+    let mut i = 0usize;
+    // Word-wise XOR for better compiled/vectorized throughput on O(N) paths.
+    while i + 8 <= n {
+        let a = unsafe { std::ptr::read_unaligned(dst.as_ptr().add(i) as *const u64) };
+        let b = unsafe { std::ptr::read_unaligned(src.as_ptr().add(i) as *const u64) };
+        let x = a ^ b;
+        unsafe { std::ptr::write_unaligned(dst.as_mut_ptr().add(i) as *mut u64, x) };
+        i += 8;
+    }
+    while i < n {
+        dst[i] ^= src[i];
+        i += 1;
+    }
+}
+
 fn eval_parity_share(key_bytes: &[u8], db: &[u8], party: u8) -> Result<u8, String> {
     let key = decode_dpf_key(key_bytes)?;
     let domain_size = 1usize << (key.domain_bits as usize);
@@ -333,7 +351,14 @@ fn eval_parity_share(key_bytes: &[u8], db: &[u8], party: u8) -> Result<u8, Strin
         return Err("party must be 0/1".to_string());
     }
 
+    // When the domain is large enough, compute the bitset inner-product in 64-bit chunks:
+    // pack leaf output bits into a word-wide mask, then use popcount parity on (mask & db_word).
+    // This reduces byte-level loads and branches on the O(N) path.
+    let use_words = domain_size >= 64 && (db.len() % 8 == 0);
+
     let mut ans: u8 = 0;
+    let mut cur_word: usize = 0;
+    let mut mask: u64 = 0;
     let mut stack: Vec<(u8, [u8; SEED_BYTES], u8, u32)> = Vec::with_capacity(domain_size / 2);
     stack.push((0, key.seed0, party, 0));
 
@@ -345,10 +370,26 @@ fn eval_parity_share(key_bytes: &[u8], db: &[u8], party: u8) -> Result<u8, Strin
                 convert_bit_v2(&seed)
             };
             let out_bit = (out ^ (t & key.cw_last)) & 1;
-            if out_bit == 1 {
-                let leaf = node_idx as usize;
+            let leaf = node_idx as usize;
+            if use_words {
+                let word = leaf >> 6;
+                if word != cur_word {
+                    // Flush previous 64-leaf chunk.
+                    let byte_off = cur_word * 8;
+                    if byte_off + 8 <= db.len() {
+                        let db_word = unsafe { std::ptr::read_unaligned(db.as_ptr().add(byte_off) as *const u64) };
+                        let db_word = u64::from_le(db_word);
+                        ans ^= (((mask & db_word).count_ones() & 1) as u8) & 1;
+                    }
+                    cur_word = word;
+                    mask = 0;
+                }
+                let bit = (leaf & 63) as u32;
+                mask |= (out_bit as u64) << bit;
+            } else {
+                // Branchless per-leaf dot-product for small domains.
                 let b = (db[leaf / 8] >> (leaf % 8)) & 1;
-                ans ^= b;
+                ans ^= (b & out_bit) & 1;
             }
             continue;
         }
@@ -369,6 +410,15 @@ fn eval_parity_share(key_bytes: &[u8], db: &[u8], party: u8) -> Result<u8, Strin
         // Right then left (deterministic, like the Python stack DFS).
         stack.push((level + 1, s_r, t_r & 1, (node_idx << 1) | 1));
         stack.push((level + 1, s_l, t_l & 1, (node_idx << 1) | 0));
+    }
+    if use_words {
+        // Flush final chunk.
+        let byte_off = cur_word * 8;
+        if byte_off + 8 <= db.len() {
+            let db_word = unsafe { std::ptr::read_unaligned(db.as_ptr().add(byte_off) as *const u64) };
+            let db_word = u64::from_le(db_word);
+            ans ^= (((mask & db_word).count_ones() & 1) as u8) & 1;
+        }
     }
     Ok(ans & 1)
 }
@@ -402,9 +452,7 @@ fn eval_block_share(key_bytes: &[u8], db: &[u8], block_size: usize, party: u8) -
                 let leaf = node_idx as usize;
                 let off = leaf * block_size;
                 let blk = &db[off..off + block_size];
-                for i in 0..block_size {
-                    acc[i] ^= blk[i];
-                }
+                xor_inplace_u64(&mut acc, blk);
             }
             continue;
         }
@@ -482,6 +530,19 @@ struct PirQueryBatchSigned {
     action_id: String,
 }
 
+#[derive(Deserialize)]
+struct PirIdxBatch {
+    db: String,
+    idxs: Vec<usize>,
+}
+
+#[derive(Deserialize)]
+struct PirIdxBatchSigned {
+    db: String,
+    idxs: Vec<usize>,
+    action_id: String,
+}
+
 #[derive(Serialize)]
 struct PirAnsBatch {
     ans_shares: Vec<u8>,
@@ -490,6 +551,17 @@ struct PirAnsBatch {
 #[derive(Serialize)]
 struct PirAnsBatchSigned {
     ans_shares: Vec<u8>,
+    proof: Value,
+}
+
+#[derive(Serialize)]
+struct PirIdxAns {
+    ans_bits: Vec<u8>,
+}
+
+#[derive(Serialize)]
+struct PirIdxAnsSigned {
+    ans_bits: Vec<u8>,
     proof: Value,
 }
 
@@ -550,6 +622,14 @@ fn get_block_db<'a>(st: &'a AppState, name: &str) -> Result<(Arc<Vec<u8>>, usize
         .ok_or_else(|| format!("unknown block db: {name}"))
 }
 
+#[inline]
+fn bit_at(db: &[u8], idx: usize) -> u8 {
+    if idx >= (db.len() * 8) {
+        return 0;
+    }
+    (db[idx / 8] >> (idx % 8)) & 1
+}
+
 async fn pir_query_batch(State(st): State<AppState>, Json(q): Json<PirQueryBatch>) -> Result<Json<PirAnsBatch>, (StatusCode, String)> {
     let db = get_bitset(&st, &q.db).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
     let party = st.server_id;
@@ -588,6 +668,15 @@ async fn pir_query_block_batch(
     Ok(Json(PirBlockBatch {
         block_shares_b64: out,
     }))
+}
+
+async fn pir_query_idx_batch(
+    State(st): State<AppState>,
+    Json(q): Json<PirIdxBatch>,
+) -> Result<Json<PirIdxAns>, (StatusCode, String)> {
+    let db = get_bitset(&st, &q.db).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    let bits: Vec<u8> = q.idxs.par_iter().map(|idx| bit_at(&db, *idx)).collect();
+    Ok(Json(PirIdxAns { ans_bits: bits }))
 }
 
 async fn pir_query_batch_signed(
@@ -714,6 +803,52 @@ async fn pir_query_block_batch_signed(
 
     Ok(Json(PirBlockBatchSigned {
         block_shares_b64,
+        proof: Value::Object(proof_obj),
+    }))
+}
+
+async fn pir_query_idx_batch_signed(
+    State(st): State<AppState>,
+    Json(q): Json<PirIdxBatchSigned>,
+) -> Result<Json<PirIdxAnsSigned>, (StatusCode, String)> {
+    let db = get_bitset(&st, &q.db).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    let bits: Vec<u8> = q.idxs.par_iter().map(|idx| bit_at(&db, *idx)).collect();
+
+    let idx_json = serde_json::to_vec(&q.idxs).unwrap_or_else(|_| b"[]".to_vec());
+    let idxs_sha256 = sha256_hex(&idx_json);
+    let resp_sha256 = sha256_hex(&bits.iter().map(|x| x & 1).collect::<Vec<u8>>());
+
+    let ts = (std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()) as i64;
+
+    let kid = st.active_kid.clone();
+    let key = st
+        .mac_keys
+        .get(&kid)
+        .ok_or_else(|| (StatusCode::INTERNAL_SERVER_ERROR, "missing mac key".to_string()))?;
+
+    let mut payload: BTreeMap<&str, Value> = BTreeMap::new();
+    payload.insert("v", Value::from(1));
+    payload.insert("kind", Value::from("idx"));
+    payload.insert("server_id", Value::from(st.server_id as i64));
+    payload.insert("kid", Value::from(kid.clone()));
+    payload.insert("ts", Value::from(ts));
+    payload.insert("action_id", Value::from(q.action_id.clone()));
+    payload.insert("db", Value::from(q.db.clone()));
+    payload.insert("idxs_sha256", Value::from(idxs_sha256));
+    payload.insert("resp_sha256", Value::from(resp_sha256));
+
+    let mac_b64 = sign_payload(key, &payload);
+    let mut proof_obj = serde_json::Map::new();
+    for (k, v) in payload.into_iter() {
+        proof_obj.insert(k.to_string(), v);
+    }
+    proof_obj.insert("mac_b64".to_string(), Value::from(mac_b64));
+
+    Ok(Json(PirIdxAnsSigned {
+        ans_bits: bits,
         proof: Value::Object(proof_obj),
     }))
 }
@@ -931,8 +1066,10 @@ async fn main() {
         .route("/meta", get(meta))
         .route("/pir/query_batch", post(pir_query_batch))
         .route("/pir/query_block_batch", post(pir_query_block_batch))
+        .route("/pir/query_idx_batch", post(pir_query_idx_batch))
         .route("/pir/query_batch_signed", post(pir_query_batch_signed))
         .route("/pir/query_block_batch_signed", post(pir_query_block_batch_signed))
+        .route("/pir/query_idx_batch_signed", post(pir_query_idx_batch_signed))
         .route("/mpc/init", post(mpc_init))
         .route("/mpc/and_mask", post(mpc_and_mask))
         .route("/mpc/and_finish", post(mpc_and_finish))

@@ -36,6 +36,15 @@ class PirQueryBatch(BaseModel):
 class PirQueryBatchSigned(PirQueryBatch):
     action_id: str = Field(..., description="Opaque action identifier (bound into the MAC).")
 
+
+class PirIdxBatch(BaseModel):
+    db: str
+    idxs: list[int]
+
+
+class PirIdxBatchSigned(PirIdxBatch):
+    action_id: str = Field(..., description="Opaque action identifier (bound into the MAC).")
+
 class MpcGate(BaseModel):
     op: str
     out: int
@@ -111,6 +120,12 @@ def pir_query_batch(q: PirQueryBatch):
 def pir_query_block_batch(q: PirQueryBatch):
     blocks_b64 = db.query_block_batch(q.db, q.dpf_keys_b64, party=settings.server_id)
     return {"block_shares_b64": blocks_b64}
+
+
+@app.post("/pir/query_idx_batch")
+def pir_query_idx_batch(q: PirIdxBatch):
+    ans = db.query_idx_batch(q.db, q.idxs)
+    return {"ans_bits": ans}
 
 
 def _require_mac_key() -> bytes:
@@ -227,6 +242,40 @@ def pir_query_block_batch_signed(q: PirQueryBatchSigned):
     }
     return {
         "block_shares_b64": blocks_b64,
+        "proof": {
+            **payload,
+            "mac_b64": _mac_b64(key, payload),
+        },
+    }
+
+
+@app.post("/pir/query_idx_batch_signed")
+def pir_query_idx_batch_signed(q: PirIdxBatchSigned):
+    kid, key = _active_mac_key()
+    if not key:
+        raise RuntimeError("POLICY_MAC_KEY not configured")
+    ts = int(time.time())
+    idxs = [int(x) for x in (q.idxs or [])]
+    ans = db.query_idx_batch(q.db, idxs)
+
+    idx_json = json.dumps(idxs, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
+    idxs_sha256 = _sha256_hex(idx_json)
+    resp_bytes = bytes([int(x) & 1 for x in ans])
+    resp_sha256 = _sha256_hex(resp_bytes)
+
+    payload = {
+        "v": 1,
+        "kind": "idx",
+        "server_id": int(settings.server_id),
+        "kid": str(kid),
+        "ts": ts,
+        "action_id": str(q.action_id),
+        "db": str(q.db),
+        "idxs_sha256": idxs_sha256,
+        "resp_sha256": resp_sha256,
+    }
+    return {
+        "ans_bits": ans,
         "proof": {
             **payload,
             "mac_b64": _mac_b64(key, payload),

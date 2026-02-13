@@ -15,6 +15,13 @@ def _cmd_artifact(_args: argparse.Namespace) -> int:
     r = subprocess.run(["bash", str(script)], check=False)
     return int(r.returncode)
 
+
+def _cmd_paper_artifact(_args: argparse.Namespace) -> int:
+    repo_root = Path(__file__).resolve().parent
+    script = repo_root / "scripts" / "run_paper_artifact.sh"
+    r = subprocess.run(["bash", str(script)], check=False)
+    return int(r.returncode)
+
 def _cmd_nanoclaw(_args: argparse.Namespace) -> int:
     repo_root = Path(__file__).resolve().parent
     script = repo_root / "scripts" / "run_nanoclaw.sh"
@@ -45,6 +52,9 @@ def main(argv: list[str] | None = None) -> int:
 
     p_art = sub.add_parser("artifact", help="Run the paper artifact workload (tests + micro-benchmark + end-to-end demo).")
     p_art.set_defaults(fn=_cmd_artifact)
+
+    p_paper = sub.add_parser("paper-artifact", help="Run the full paper-grade pipeline (formal checks + baselines + eval + plots).")
+    p_paper.set_defaults(fn=_cmd_paper_artifact)
 
     p_nc = sub.add_parser("nanoclaw", help="Run the demo via a real agent runtime (Claude Agent SDK / NanoClaw) over MCP.")
     p_nc.set_defaults(fn=_cmd_nanoclaw)

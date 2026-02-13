@@ -56,3 +56,23 @@ class BitsetDB:
             share = eval_dpf_pir_block_share(key_bytes=key, db_blocks=db, block_size=block_size, party=party)
             out.append(base64.b64encode(share).decode("ascii"))
         return out
+
+    def query_idx_batch(self, db_name: str, idxs: List[int]) -> List[int]:
+        """
+        Single-server cleartext baseline query.
+
+        This intentionally leaks query indices to the policy server and is used only
+        for baseline/ablation experiments.
+        """
+        if db_name not in self._bitsets:
+            raise KeyError(f"Unknown db: {db_name}")
+        db = self._bitsets[db_name]
+        nbits = len(db) * 8
+        out: list[int] = []
+        for idx in idxs:
+            i = int(idx)
+            if i < 0 or i >= nbits:
+                out.append(0)
+                continue
+            out.append(int((db[i // 8] >> (i % 8)) & 1))
+        return out

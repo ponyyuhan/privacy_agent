@@ -245,3 +245,110 @@ class PirClient:
             out.append(bytes([x ^ y for x, y in zip(b0, b1)]))
         proof = {"policy0": j0.get("proof"), "policy1": j1.get("proof"), "s0_b64": j0.get("block_shares_b64"), "s1_b64": j1.get("block_shares_b64"), "db": db_name, "action_id": action_id, "block_size": block_size}
         return out, proof
+
+    def query_bits_single_server_cleartext(
+        self,
+        db_name: str,
+        idxs: Iterable[int],
+        *,
+        server_id: int = 0,
+        timeout_s: int = 10,
+        domain_size: int | None = None,
+    ) -> list[int]:
+        """
+        Baseline-only single-server cleartext query.
+
+        WARNING: this leaks plaintext indices to one policy server and should never
+        be used in the full MIRAGE mode.
+        """
+        idx_list = [int(x) for x in idxs]
+        if not idx_list:
+            return []
+        ds = int(domain_size or self.domain_size)
+        for idx in idx_list:
+            if idx < 0 or idx >= ds:
+                raise ValueError("idx out of range")
+        url = self.policy0_url if int(server_id) == 0 else self.policy1_url
+        _trace_pir(
+            server_id=int(server_id),
+            endpoint="/pir/query_idx_batch",
+            db=db_name,
+            n_keys=len(idx_list),
+            domain_size=ds,
+            action_id=None,
+            signed=False,
+        )
+        r = requests.post(
+            f"{url}/pir/query_idx_batch",
+            json={"db": db_name, "idxs": idx_list},
+            timeout=timeout_s,
+        )
+        r.raise_for_status()
+        bits = [int(x) & 1 for x in (r.json().get("ans_bits") or [])]
+        if len(bits) != len(idx_list):
+            raise ValueError("policy server returned wrong batch size")
+        return bits
+
+    def query_bits_single_server_cleartext_signed(
+        self,
+        db_name: str,
+        idxs: Iterable[int],
+        *,
+        action_id: str,
+        server_id: int = 0,
+        timeout_s: int = 10,
+        domain_size: int | None = None,
+    ) -> tuple[list[int], dict[str, Any]]:
+        """
+        Signed variant of the single-server cleartext baseline query.
+        """
+        idx_list = [int(x) for x in idxs]
+        if not idx_list:
+            return [], {"policy0": None, "policy1": None}
+        ds = int(domain_size or self.domain_size)
+        for idx in idx_list:
+            if idx < 0 or idx >= ds:
+                raise ValueError("idx out of range")
+        url = self.policy0_url if int(server_id) == 0 else self.policy1_url
+        sid = int(server_id)
+        _trace_pir(
+            server_id=sid,
+            endpoint="/pir/query_idx_batch_signed",
+            db=db_name,
+            n_keys=len(idx_list),
+            domain_size=ds,
+            action_id=action_id,
+            signed=True,
+        )
+        r = requests.post(
+            f"{url}/pir/query_idx_batch_signed",
+            json={"db": db_name, "idxs": idx_list, "action_id": str(action_id)},
+            timeout=timeout_s,
+        )
+        r.raise_for_status()
+        j = r.json()
+        bits = [int(x) & 1 for x in (j.get("ans_bits") or [])]
+        if len(bits) != len(idx_list):
+            raise ValueError("policy server returned wrong batch size")
+        zeros = [0 for _ in bits]
+        if sid == 0:
+            proof = {
+                "policy0": j.get("proof"),
+                "policy1": None,
+                "a0": bits,
+                "a1": zeros,
+                "db": db_name,
+                "action_id": action_id,
+                "baseline_mode": "single_server_cleartext",
+            }
+        else:
+            proof = {
+                "policy0": None,
+                "policy1": j.get("proof"),
+                "a0": zeros,
+                "a1": bits,
+                "db": db_name,
+                "action_id": action_id,
+                "baseline_mode": "single_server_cleartext",
+            }
+        return bits, proof

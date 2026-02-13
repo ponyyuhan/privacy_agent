@@ -187,10 +187,31 @@ class SkillIngressPolicyEngine:
 
         self.signed_pir = True  # skill ingress always uses signed PIR in this demo.
         self.use_bundle = bool(int(os.getenv("USE_POLICY_BUNDLE", "1")))
+        self.policy_bypass = bool(int(os.getenv("MIRAGE_POLICY_BYPASS", "0")))
+        self.single_server_cleartext = bool(int(os.getenv("SINGLE_SERVER_POLICY", "0")))
+        self.single_server_id = int(os.getenv("SINGLE_SERVER_ID", "0") or "0")
         self._bundle_cache: dict[str, Any] | None = None
 
         cfg = _load_policy_config()
         self._circuit = build_skill_ingress_v1_circuit_from_policy(cfg) or build_skill_ingress_v1_circuit_default()
+
+    def _query_bits_signed_or_single_server(
+        self,
+        *,
+        db_name: str,
+        idxs: list[int],
+        action_id: str,
+        domain_size: int | None = None,
+    ) -> tuple[list[int], dict[str, Any]]:
+        if self.single_server_cleartext:
+            return self.pir.query_bits_single_server_cleartext_signed(
+                db_name,
+                idxs,
+                action_id=action_id,
+                server_id=self.single_server_id,
+                domain_size=domain_size,
+            )
+        return self.pir.query_bits_signed(db_name, idxs, action_id=action_id, domain_size=domain_size)
 
     def _load_bundle(self) -> dict[str, Any] | None:
         if self._bundle_cache is not None:
@@ -320,6 +341,42 @@ class SkillIngressPolicyEngine:
             inputs={"skill_id": str(skill_id), "skill_digest": str(skill_digest)},
         )
 
+        if self.policy_bypass:
+            patch = SanitizePatch(PATCH_NOOP, {})
+            preview = {
+                "program_id": "skill_ingress_v1",
+                "action_id": action_id,
+                "request_sha256": request_sha,
+                "allow_pre": True,
+                "need_confirm": False,
+                "patch": patch.to_dict(),
+                "pir_evidence": {},
+                "commit_evidence": {},
+                "baseline_mode": "policy_bypass",
+            }
+            tx_rec = self.tx.mint(
+                intent_id="CommitSkillInstall",
+                action_id=action_id,
+                request_sha256=request_sha,
+                caller=caller,
+                session=session,
+                preview=preview,
+                ttl_seconds=int(os.getenv("TX_TTL_S", "120")),
+            )
+            return {
+                "allow_pre": True,
+                "need_confirm": False,
+                "patch": patch.to_dict(),
+                "reason_code": "ALLOW_INSECURE_POLICY_BYPASS",
+                "details": "",
+                "evidence": {"commit": {}, "pir": {}},
+                "tx_id": tx_rec.tx_id,
+                "action_id": action_id,
+                "request_sha256": request_sha,
+                "risk_categories": [],
+                "risk_explanation": "Policy bypass mode enabled.",
+            }
+
         max_domains = int(os.getenv("MAX_SKILL_DOMAINS", "8"))
         if max_domains < 1:
             max_domains = 1
@@ -350,7 +407,12 @@ class SkillIngressPolicyEngine:
             loff = int((offs or {}).get("ioc_domains", 0))
             idxs = [(bid * stride) + loff + (int(x) % base_ds) for x in raw]
 
-        bits_ioc, ev_ioc = self.pir.query_bits_signed(db_ioc, idxs, action_id=action_id, domain_size=dom_override)
+        bits_ioc, ev_ioc = self._query_bits_signed_or_single_server(
+            db_name=db_ioc,
+            idxs=idxs,
+            action_id=action_id,
+            domain_size=dom_override,
+        )
         ioc_hit = 1 if any(int(x) == 1 for x in bits_ioc) else 0
 
         # Install semantics token DB (oblivious).
@@ -380,7 +442,12 @@ class SkillIngressPolicyEngine:
             loff = int((offs or {}).get("banned_install_tokens", 0))
             idxs2 = [(bid * stride) + loff + (int(x) % base_ds) for x in tok_raw]
 
-        hits, ev_tok = self.pir.query_bits_signed(db_tok, idxs2, action_id=action_id, domain_size=dom_override2)
+        hits, ev_tok = self._query_bits_signed_or_single_server(
+            db_name=db_tok,
+            idxs=idxs2,
+            action_id=action_id,
+            domain_size=dom_override2,
+        )
         install_hit = 1 if any(int(x) == 1 for x in hits) else 0
 
         # Secret-share MPC inputs.

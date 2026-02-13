@@ -13,10 +13,12 @@ This repo is structured as a **paper artifact**: a runnable end-to-end demo + te
 7. Local vs outsourced rules comparison (why PIR/MPC is needed for centralized DBs without single-auditor query leakage)
 8. Baselines / ablations (no-capsule exfil, insecure executor, loopback-HTTP capsule)
 
-### Run
+### Run (Core Artifact)
 
 ```bash
 pip install -r requirements.txt
+python main.py artifact
+# or:
 bash scripts/run_artifact.sh
 ```
 
@@ -29,6 +31,37 @@ Outputs are written to `artifact_out/`:
 - `artifact_out/bench_e2e.json` (short end-to-end throughput numbers; Python policy server)
 - `artifact_out/bench_e2e.rust.json` (same throughput workload; Rust policy server backend, if `cargo` is available)
 - `artifact_out/audit.jsonl` (gateway audit trail; JSONL)
+
+## Paper-Grade Pipeline (Formal + Baselines + Plots)
+
+The core artifact above is intentionally self-contained. For a paper-grade run
+that adds formal checks, strong baselines, larger evals, throughput curves, and
+auto-generated figures, run:
+
+```bash
+python main.py paper-artifact
+# or:
+bash scripts/run_paper_artifact.sh
+```
+
+Additional outputs (all under `artifact_out/`):
+
+- `artifact_out/security_game_nbe.json` (formal NBE game / theorem harness output)
+- `artifact_out/paper_eval/paper_eval_rows.csv`
+- `artifact_out/paper_eval/paper_eval_summary.json`
+- `artifact_out/policy_perf/policy_server_curves.json`
+- `artifact_out/policy_perf/policy_server_curves.csv`
+- `artifact_out/native_baselines/native_guardrail_eval.json` (Codex/Claude/OpenClaw native baselines)
+- `artifact_out/campaign/real_agent_campaign.json` (real-agent closed-loop evidence chain)
+- `artifact_out/figures/*.svg` + `artifact_out/figures/figures_index.json`
+- `artifact_out/repro_manifest.json` (versions + seed + platform manifest)
+
+Notes:
+
+- Some steps make external model calls (native baselines, OpenClaw/NanoClaw runs). The pipeline
+  is written to `SKIP/continue` when credentials are missing so the overall run remains usable.
+- Paper-grade settings can be overridden via env vars; see `scripts/run_paper_artifact.sh`.
+- Formal definitions live in `FORMAL_SECURITY.md`.
 
 ## “Real Agent” Integration (NanoClaw Runtime)
 
