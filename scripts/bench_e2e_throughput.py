@@ -238,7 +238,16 @@ def main() -> None:
         if out_path_env:
             out_path = Path(out_path_env)
             if not out_path.is_absolute():
-                out_path = out_dir / out_path
+                # Treat BENCH_OUT_PATH as relative to OUT_DIR by default, but avoid
+                # accidentally double-prefixing when the caller already includes OUT_DIR
+                # (common when OUT_DIR itself is a relative path).
+                try:
+                    out_path = out_dir / out_path.relative_to(out_dir)
+                except Exception:
+                    if out_path.parts and out_dir.name and out_path.parts[0] == out_dir.name:
+                        out_path = out_dir / Path(*out_path.parts[1:])
+                    else:
+                        out_path = out_dir / out_path
         else:
             out_path = out_dir / "bench_e2e.json"
         out_path.write_text(json.dumps(row, indent=2, sort_keys=True) + "\n")

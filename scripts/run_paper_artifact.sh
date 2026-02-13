@@ -45,10 +45,17 @@ if command -v cargo >/dev/null 2>&1; then
     python scripts/bench_e2e_throughput.py | tee "$OUT_DIR/bench_e2e_paper_rust_path.txt"
 fi
 
-echo "[paper] 6) native runtime baselines (codex/claude/openclaw)"
+echo "[paper] 6) end-to-end shaping curves (mixing/padding/cover)"
+if command -v cargo >/dev/null 2>&1; then
+  POLICY_BACKEND=rust PYTHONPATH=. python scripts/bench_e2e_shaping_curves.py | tee "$OUT_DIR/bench_e2e_shaping_curves_path.txt"
+else
+  POLICY_BACKEND=python PYTHONPATH=. python scripts/bench_e2e_shaping_curves.py | tee "$OUT_DIR/bench_e2e_shaping_curves_path.txt"
+fi
+
+echo "[paper] 7) native runtime baselines (codex/claude/openclaw)"
 PYTHONPATH=. python scripts/native_guardrail_eval.py | tee "$OUT_DIR/native_guardrail_eval_path.txt"
 
-echo "[paper] 7) real-agent closed-loop campaign (openclaw/nanoclaw/scripted)"
+echo "[paper] 8) real-agent closed-loop campaign (openclaw/nanoclaw/scripted)"
 set +e
 PYTHONPATH=. python scripts/real_agent_campaign.py | tee "$OUT_DIR/real_agent_campaign_path.txt"
 RC=$?
@@ -57,13 +64,13 @@ if [[ "$RC" -ne 0 ]]; then
   echo "[paper] real_agent_campaign returned $RC (continuing for reproducibility pipeline)." | tee "$OUT_DIR/real_agent_campaign_warn.txt"
 fi
 
-echo "[paper] 8) verify audit log chaining"
+echo "[paper] 9) verify audit log chaining"
 PYTHONPATH=. python scripts/verify_audit_log.py | tee "$OUT_DIR/audit_verify.json"
 
-echo "[paper] 9) auto plots"
+echo "[paper] 10) auto plots"
 PYTHONPATH=. python scripts/plot_paper_figures.py | tee "$OUT_DIR/figures_path.txt"
 
-echo "[paper] 10) repro manifest"
+echo "[paper] 11) repro manifest"
 PYTHONPATH=. python scripts/write_repro_manifest.py | tee "$OUT_DIR/repro_manifest_path.txt"
 
 echo "[paper] done; outputs in $OUT_DIR"

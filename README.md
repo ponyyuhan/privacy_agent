@@ -64,6 +64,7 @@ python main.py paper-artifact
 - 形式化安全检查输出（`artifact_out/security_game_nbe.json`）
 - 强基线 + 大规模评测（`artifact_out/paper_eval/*`）
 - policy server 吞吐曲线（`artifact_out/policy_perf/*`）
+- shaping 曲线（`artifact_out/shaping_perf/*`）
 - native runtime baselines（`artifact_out/native_baselines/*`）
 - real-agent 闭环 campaign（`artifact_out/campaign/*`）
 - 自动产图（`artifact_out/figures/*.svg`）
@@ -274,8 +275,10 @@ artifact 证据：
 - `scripts/security_game_nbe_check.py`: NBE 安全游戏/定理的可执行检查
 - `scripts/paper_eval.py`: 强基线 + 攻击/良性任务集评测（含置信区间/显著性）
 - `scripts/bench_policy_server_curves.py`: policy server 曲线（batch/padding 对吞吐影响）
+- `scripts/bench_e2e_shaping_curves.py`: 端到端 shaping 曲线（PIR/MPC mixing + cover traffic + pad_to）
 - `scripts/native_guardrail_eval.py`: Codex/Claude/OpenClaw 原生防护强基线
 - `scripts/real_agent_campaign.py`: real-agent 闭环评测与证据链产出
+- `scripts/verify_audit_log.py`: 审计日志 hash-chain 校验（防篡改）
 - `scripts/plot_paper_figures.py`: 产图（SVG，无 matplotlib 依赖）
 - `scripts/write_repro_manifest.py`: 版本/seed/平台 manifest（复现实验工件）
 
@@ -884,6 +887,11 @@ policy server 的 PIR bitset 求值内核有两条实现（共享同一接口与
 吞吐曲线：
 - `scripts/bench_policy_server_curves.py`
 - 输出：`artifact_out/policy_perf/policy_server_curves.json` 与 `.csv`
+
+端到端 shaping 曲线（mixing/padding/cover 的吞吐-延迟权衡）：
+- `scripts/bench_e2e_shaping_curves.py`
+- 输出：`artifact_out/shaping_perf/e2e_shaping_curves.json` 与 `.csv`
+- 自动产图：`artifact_out/figures/e2e_shaping_curves_ops_s.svg`
 
 目标解释：证明“安全提升不是靠把系统变慢 100 倍”，而是可以通过编译/向量化显著降低常数因子。
 

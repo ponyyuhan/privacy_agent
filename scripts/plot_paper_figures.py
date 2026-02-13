@@ -342,6 +342,32 @@ def main() -> None:
             )
             made.append(str(p))
 
+    shaping = _load_json(out_dir / "shaping_perf" / "e2e_shaping_curves.json")
+    if shaping and str(shaping.get("status")) == "OK":
+        rs = [r for r in (shaping.get("rows") or []) if isinstance(r, dict)]
+        # Plot ops/s vs pad_to for constant-shape mode (plus baseline as pad_to=0).
+        base = [r for r in rs if str(r.get("variant")) == "baseline"]
+        mixed = [r for r in rs if str(r.get("variant")) == "mixed_cover"]
+        if base and mixed:
+            # Build a unified x-axis.
+            xs = [0.0] + [float(int(r.get("pad_to") or 0)) for r in sorted(mixed, key=lambda x: int(x.get("pad_to") or 0))]
+            ys_base = [float(base[0].get("throughput_ops_s") or 0.0)] + [float(base[0].get("throughput_ops_s") or 0.0) for _ in xs[1:]]
+            ys_mixed = [float(base[0].get("throughput_ops_s") or 0.0)] + [
+                float(r.get("throughput_ops_s") or 0.0) for r in sorted(mixed, key=lambda x: int(x.get("pad_to") or 0))
+            ]
+            p = fig_dir / "e2e_shaping_curves_ops_s.svg"
+            _svg_line_multi(
+                series=[
+                    ("baseline", xs, ys_base, "#4a5568"),
+                    ("mixed+cover", xs, ys_mixed, "#2b6cb0"),
+                ],
+                title="E2E Throughput vs Shaping (Mixing/Cover)",
+                out_path=p,
+                x_label="pad_to (subrequests per tick; 0=baseline)",
+                y_label="Throughput (ops/s)",
+            )
+            made.append(str(p))
+
     campaign = _load_json(out_dir / "campaign" / "real_agent_campaign.json")
     if campaign and str(campaign.get("status")) == "OK":
         summ = campaign.get("summary") or {}
