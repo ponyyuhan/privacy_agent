@@ -304,8 +304,11 @@ Router 行为：
 #### PREVIEW 阶段（无副作用）
 1. gateway 生成 `action_id`，计算 `request_sha256`（见 `common/canonical.py`）。
 2. 执行 handle-flow 强约束（高敏 handle 不允许外流）。
-3. 发起固定形状 PIR 查询：recipient/domain/token（按配置可 dummy 填充）。
-4. 组装 secret-shared 输入并运行 MPC circuit：
+3. 发起固定形状 PIR 查询（oblivious bundle + 统一查询面）：
+   - 统一查询 `db=policy_bundle`
+   - 单次 PIR 批量内同时覆盖：recipient / domain / DLP tokens / IOC domains / install markers
+   - 可选启用 microbatch mixing + padding/cover traffic（见 `LEAKAGE_MODEL.md`）
+4. 组装 secret-shared 输入并运行统一 MPC circuit（`policy_unified_v1`）：
    - 输出 `allow_pre`, `need_confirm`, `patch0`, `patch1`
 5. 两台 policy server 返回 MAC-signed commit proofs。
 6. gateway 写入 `tx_store`，返回 `tx_id` 和 preview 结果。
@@ -327,7 +330,7 @@ Router 行为：
 3. `CheckSkillInstallPolicy`:
    - 提取域名/IP、install markers、base64 obfuscation
    - IOC/install 走 PIR membership
-   - 与 capability bit 一起进入 `skill_ingress_v1` MPC program
+   - 与 capability bit 一起进入统一 `policy_unified_v1` MPC program（intent shadowing）
    - 返回 `tx_id` / `need_confirm` / reason
 4. `CommitSkillInstall`:
    - executor 校验双 proofs 后启用 skill
@@ -513,6 +516,14 @@ Router 已实现的 intent（是否可用取决于 capability 配置）：
 
 输出同上（allow/confirm/patch）。
 
+### 13.3 unified program（实现侧）
+实现中默认使用统一 program id（`policy_unified_v1`），它会将：
+- `policy_programs.egress_v1` 的三个 intent 公式
+- `policy_programs.skill_ingress_v1` 的输出公式
+组合成单一常量形状的 MPC circuit，并通过 intent one-hot bit 做 secret mux，从而在 policy server 侧隐藏 intent 类别。
+
+代码：`gateway/policy_unified.py`
+
 ---
 
 ## 14. 运行方式与脚本说明
@@ -627,8 +638,8 @@ Router 已实现的 intent（是否可用取决于 capability 配置）：
 - `eval_pir_share_avg_s=0.012477`
 
 ### 16.2 E2E 吞吐（`artifact_out/bench_e2e.json`）
-- Python policy backend: `throughput_ops_s=0.731`
-- Rust policy backend: `throughput_ops_s=10.516`
+- Python policy backend: `throughput_ops_s≈0.3`（示例，取决于形状与机器）
+- Rust policy backend: `throughput_ops_s≈8`（示例，取决于形状与机器）
 
 ### 16.3 关键安全观测（`artifact_out/report.json`）
 - Capsule:
@@ -690,9 +701,15 @@ OPENCLAW_STATE_DIR="artifact_out/openclaw_state" \
 - `FSS_DOMAIN_SIZE`（2 的幂）
 - `MAX_TOKENS_PER_MESSAGE`
 - `PAD_TOKEN_BATCH=1`
-- `SHAPE_EGRESS_FIXED=1`
 - `USE_POLICY_BUNDLE=1`
-- `INTENT_SHADOWING=1`
+- `UNIFIED_POLICY=1`（默认开启：统一 `policy_unified_v1`）
+- `MIRAGE_POLICY_PROGRAM_ID=policy_unified_v1`
+- `POLICY_BUNDLE_NAME=default`
+- PIR microbatch mixing / cover traffic（见 `LEAKAGE_MODEL.md`）：
+  - `PIR_MIX_ENABLED=1`
+  - `PIR_MIX_INTERVAL_MS=50`
+  - `PIR_MIX_PAD_TO=1`（paper pipeline 默认无 padding；生产隐藏建议设为 `>1`）
+  - `PIR_COVER_TRAFFIC=0`（生产隐藏建议设为 `1`，并使用 Rust policy backend）
 
 ### 18.3 凭据与 proof
 - `POLICY0_MAC_KEY`, `POLICY1_MAC_KEY`

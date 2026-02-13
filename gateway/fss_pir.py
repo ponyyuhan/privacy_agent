@@ -9,6 +9,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Tuple
 from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future
 
 import requests
 
@@ -34,6 +35,8 @@ def _trace_pir(
     action_id: str | None,
     block_size: int | None = None,
     signed: bool = False,
+    n_subreq: int | None = None,
+    keys_per_subreq: int | None = None,
 ) -> None:
     """
     Optional "single policy server transcript" logging for leakage evaluation.
@@ -53,6 +56,10 @@ def _trace_pir(
         "domain_size": int(domain_size),
         "signed": bool(signed),
     }
+    if n_subreq is not None:
+        ev["n_subreq"] = int(n_subreq)
+    if keys_per_subreq is not None:
+        ev["keys_per_subreq"] = int(keys_per_subreq)
     if action_id:
         ev["action_id"] = str(action_id)
     if block_size is not None:
@@ -352,3 +359,314 @@ class PirClient:
                 "baseline_mode": "single_server_cleartext",
             }
         return bits, proof
+
+
+@dataclass(frozen=True, slots=True)
+class PirMixConfig:
+    """
+    Gateway-side PIR microbatching / cover-traffic configuration.
+
+    The mixer is intentionally narrow: it batches *signed bitset* PIR queries
+    (`/pir/query_batch_multi_signed`) for a single `db_name` with a fixed
+    number of keys per subrequest (constant-shape).
+    """
+
+    enabled: bool
+    interval_ms: int
+    pad_to: int
+    fixed_n_keys: int
+    db_name: str
+    domain_size: int
+    timeout_s: int = 10
+    cover_traffic: bool = True
+
+
+class _SignedBitBatchMixer:
+    def __init__(self, *, policy0_url: str, policy1_url: str, cfg: PirMixConfig) -> None:
+        self.policy0_url = str(policy0_url)
+        self.policy1_url = str(policy1_url)
+        self.cfg = cfg
+        self._lock = threading.Lock()
+        self._pending: list[tuple[str, list[str], list[str], Future]] = []
+        self._stop = threading.Event()
+        self._t = threading.Thread(target=self._run, name="pir-mixer", daemon=True)
+        self._t.start()
+
+    def close(self) -> None:
+        self._stop.set()
+        try:
+            self._t.join(timeout=1.0)
+        except Exception:
+            pass
+
+    def submit(self, *, action_id: str, keys0_b64: list[str], keys1_b64: list[str]) -> Future:
+        fut: Future = Future()
+        if len(keys0_b64) != len(keys1_b64):
+            fut.set_exception(ValueError("bad_key_share_lengths"))
+            return fut
+        if int(len(keys0_b64)) != int(self.cfg.fixed_n_keys):
+            fut.set_exception(ValueError("bad_fixed_shape_n_keys"))
+            return fut
+        with self._lock:
+            self._pending.append((str(action_id), list(keys0_b64), list(keys1_b64), fut))
+        return fut
+
+    def _mk_dummy_req(self) -> tuple[str, list[str], list[str]]:
+        # Dummy subrequest: random action_id + random index keys. Indistinguishable
+        # from real subrequests under DPF security (keys hide indices).
+        action_id = f"cov_{int(time.time()*1000)}_{os.urandom(4).hex()}"
+        ds = int(self.cfg.domain_size)
+        nbits = _domain_bits(ds)
+        keys0: list[str] = []
+        keys1: list[str] = []
+        for _ in range(int(self.cfg.fixed_n_keys)):
+            idx = int.from_bytes(os.urandom(4), "little") % ds
+            k0, k1 = gen_dpf_keys(alpha=idx, beta=1, domain_bits=nbits)
+            keys0.append(base64.b64encode(k0).decode("ascii"))
+            keys1.append(base64.b64encode(k1).decode("ascii"))
+        return action_id, keys0, keys1
+
+    def _flush_once(self) -> None:
+        cfg = self.cfg
+        batch: list[tuple[str, list[str], list[str], Future]] = []
+        with self._lock:
+            if self._pending:
+                take = min(int(cfg.pad_to), len(self._pending))
+                batch = self._pending[:take]
+                self._pending = self._pending[take:]
+
+        # If there are no real subrequests, still emit cover traffic if enabled.
+        if not batch and not bool(cfg.cover_traffic):
+            return
+
+        # Pad with dummy subrequests up to pad_to.
+        pad_to = int(cfg.pad_to)
+        req0: list[dict[str, Any]] = []
+        req1: list[dict[str, Any]] = []
+
+        real_action_ids: set[str] = set()
+        for action_id, k0s, k1s, _f in batch:
+            real_action_ids.add(str(action_id))
+            req0.append({"action_id": str(action_id), "dpf_keys_b64": list(k0s)})
+            req1.append({"action_id": str(action_id), "dpf_keys_b64": list(k1s)})
+        while len(req0) < pad_to:
+            aid, k0s, k1s = self._mk_dummy_req()
+            req0.append({"action_id": aid, "dpf_keys_b64": k0s})
+            req1.append({"action_id": aid, "dpf_keys_b64": k1s})
+
+        payload0 = {"db": str(cfg.db_name), "requests": req0}
+        payload1 = {"db": str(cfg.db_name), "requests": req1}
+
+        total_keys = int(len(req0)) * int(cfg.fixed_n_keys)
+        _trace_pir(
+            server_id=0,
+            endpoint="/pir/query_batch_multi_signed",
+            db=str(cfg.db_name),
+            n_keys=total_keys,
+            domain_size=int(cfg.domain_size),
+            action_id=None,
+            signed=True,
+            n_subreq=int(len(req0)),
+            keys_per_subreq=int(cfg.fixed_n_keys),
+        )
+        _trace_pir(
+            server_id=1,
+            endpoint="/pir/query_batch_multi_signed",
+            db=str(cfg.db_name),
+            n_keys=total_keys,
+            domain_size=int(cfg.domain_size),
+            action_id=None,
+            signed=True,
+            n_subreq=int(len(req0)),
+            keys_per_subreq=int(cfg.fixed_n_keys),
+        )
+
+        try:
+            f0 = _HTTP_POOL.submit(
+                requests.post,
+                f"{self.policy0_url}/pir/query_batch_multi_signed",
+                json=payload0,
+                timeout=int(cfg.timeout_s),
+            )
+            f1 = _HTTP_POOL.submit(
+                requests.post,
+                f"{self.policy1_url}/pir/query_batch_multi_signed",
+                json=payload1,
+                timeout=int(cfg.timeout_s),
+            )
+            r0 = f0.result()
+            r1 = f1.result()
+            r0.raise_for_status()
+            r1.raise_for_status()
+            j0 = r0.json()
+            j1 = r1.json()
+        except Exception as e:
+            # Fail all *real* futures in this flush.
+            for _aid, _k0, _k1, fut in batch:
+                try:
+                    fut.set_exception(e)
+                except Exception:
+                    pass
+            return
+
+        # Build action_id -> (ans_shares, proof)
+        m0: dict[str, tuple[list[int], dict[str, Any]]] = {}
+        m1: dict[str, tuple[list[int], dict[str, Any]]] = {}
+        for it in (j0.get("responses") or []):
+            if not isinstance(it, dict):
+                continue
+            aid = str(it.get("action_id") or "")
+            if not aid:
+                continue
+            a = [int(x) & 1 for x in (it.get("ans_shares") or [])]
+            pr = it.get("proof")
+            m0[aid] = (a, pr if isinstance(pr, dict) else {})
+        for it in (j1.get("responses") or []):
+            if not isinstance(it, dict):
+                continue
+            aid = str(it.get("action_id") or "")
+            if not aid:
+                continue
+            a = [int(x) & 1 for x in (it.get("ans_shares") or [])]
+            pr = it.get("proof")
+            m1[aid] = (a, pr if isinstance(pr, dict) else {})
+
+        for aid, _k0, _k1, fut in batch:
+            try:
+                a0, p0 = m0.get(str(aid), (None, None))  # type: ignore[assignment]
+                a1, p1 = m1.get(str(aid), (None, None))  # type: ignore[assignment]
+                if not isinstance(a0, list) or not isinstance(a1, list) or len(a0) != len(a1):
+                    raise ValueError("bad_policy_server_batch_response")
+                recon = [(int(x) ^ int(y)) & 1 for x, y in zip(a0, a1)]
+                ev = {
+                    "policy0": p0,
+                    "policy1": p1,
+                    "a0": a0,
+                    "a1": a1,
+                    "db": str(cfg.db_name),
+                    "action_id": str(aid),
+                    "mixed": True,
+                }
+                fut.set_result((recon, ev))
+            except Exception as e:
+                try:
+                    fut.set_exception(e)
+                except Exception:
+                    pass
+
+    def _run(self) -> None:
+        interval_s = max(0.001, float(self.cfg.interval_ms) / 1000.0)
+        while not self._stop.is_set():
+            t0 = time.perf_counter()
+            self._flush_once()
+            dt = time.perf_counter() - t0
+            sleep_s = interval_s - dt
+            if sleep_s > 0:
+                self._stop.wait(timeout=sleep_s)
+
+
+class MixedPirClient:
+    """
+    PirClient wrapper that optionally enables cover-traffic + microbatch mixing for
+    signed bitset queries.
+    """
+
+    def __init__(self, base: PirClient, *, mix: PirMixConfig | None = None) -> None:
+        self._base = base
+        self.domain_size = int(base.domain_size)
+        self._mix_cfg = mix
+        self._mixer: _SignedBitBatchMixer | None = None
+        if mix and mix.enabled:
+            self._mixer = _SignedBitBatchMixer(policy0_url=base.policy0_url, policy1_url=base.policy1_url, cfg=mix)
+
+    @property
+    def policy0_url(self) -> str:
+        return self._base.policy0_url
+
+    @property
+    def policy1_url(self) -> str:
+        return self._base.policy1_url
+
+    def close(self) -> None:
+        if self._mixer:
+            self._mixer.close()
+
+    # Delegate non-mixed APIs.
+    def query_bit(self, db_name: str, idx: int, timeout_s: int = 10, *, domain_size: int | None = None) -> int:
+        return self._base.query_bit(db_name, idx, timeout_s=timeout_s, domain_size=domain_size)
+
+    def query_bits(self, db_name: str, idxs: Iterable[int], timeout_s: int = 10, *, domain_size: int | None = None) -> List[int]:
+        return self._base.query_bits(db_name, idxs, timeout_s=timeout_s, domain_size=domain_size)
+
+    def query_block(self, db_name: str, idx: int, *, block_size: int, timeout_s: int = 10, domain_size: int | None = None) -> bytes:
+        return self._base.query_block(db_name, idx, block_size=block_size, timeout_s=timeout_s, domain_size=domain_size)
+
+    def query_blocks(self, db_name: str, idxs: Iterable[int], *, block_size: int, timeout_s: int = 10, domain_size: int | None = None) -> List[bytes]:
+        return self._base.query_blocks(db_name, idxs, block_size=block_size, timeout_s=timeout_s, domain_size=domain_size)
+
+    def query_blocks_signed(
+        self,
+        db_name: str,
+        idxs: Iterable[int],
+        *,
+        block_size: int,
+        action_id: str,
+        timeout_s: int = 10,
+        domain_size: int | None = None,
+    ) -> Tuple[List[bytes], Dict[str, Any]]:
+        return self._base.query_blocks_signed(db_name, idxs, block_size=block_size, action_id=action_id, timeout_s=timeout_s, domain_size=domain_size)
+
+    def query_bits_single_server_cleartext_signed(
+        self,
+        db_name: str,
+        idxs: Iterable[int],
+        *,
+        action_id: str,
+        server_id: int = 0,
+        timeout_s: int = 10,
+        domain_size: int | None = None,
+    ) -> tuple[list[int], dict[str, Any]]:
+        return self._base.query_bits_single_server_cleartext_signed(
+            db_name,
+            idxs,
+            action_id=action_id,
+            server_id=server_id,
+            timeout_s=timeout_s,
+            domain_size=domain_size,
+        )
+
+    def query_bits_signed(
+        self,
+        db_name: str,
+        idxs: Iterable[int],
+        *,
+        action_id: str,
+        timeout_s: int = 10,
+        domain_size: int | None = None,
+    ) -> Tuple[List[int], Dict[str, Any]]:
+        # If mixing isn't enabled (or db doesn't match), fall back to direct.
+        mix = self._mix_cfg
+        if not self._mixer or not mix or not mix.enabled:
+            return self._base.query_bits_signed(db_name, idxs, action_id=action_id, timeout_s=timeout_s, domain_size=domain_size)
+        if str(db_name) != str(mix.db_name):
+            return self._base.query_bits_signed(db_name, idxs, action_id=action_id, timeout_s=timeout_s, domain_size=domain_size)
+
+        idx_list = list(idxs)
+        if not idx_list:
+            return [], {"policy0": None, "policy1": None}
+        ds = int(domain_size or mix.domain_size)
+        if int(ds) != int(mix.domain_size):
+            raise ValueError("mixed_pir_domain_size_mismatch")
+        nbits = _domain_bits(ds)
+        keys0: list[str] = []
+        keys1: list[str] = []
+        for idx in idx_list:
+            if idx < 0 or idx >= ds:
+                raise ValueError("idx out of range")
+            k0, k1 = gen_dpf_keys(alpha=int(idx), beta=1, domain_bits=nbits)
+            keys0.append(base64.b64encode(k0).decode("ascii"))
+            keys1.append(base64.b64encode(k1).decode("ascii"))
+
+        fut = self._mixer.submit(action_id=str(action_id), keys0_b64=keys0, keys1_b64=keys1)
+        recon, ev = fut.result(timeout=max(1.0, float(timeout_s) + 5.0))
+        return list(recon), dict(ev or {})

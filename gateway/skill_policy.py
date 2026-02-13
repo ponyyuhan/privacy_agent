@@ -19,6 +19,7 @@ from .fss_pir import PirClient
 from .guardrails import stable_idx
 from .skill_ingress import extract_install_tokens
 from .tx_store import TxStore
+from .policy_unified import UnifiedPolicyEngine
 
 
 _HTTP_POOL = ThreadPoolExecutor(max_workers=8)
@@ -185,6 +186,8 @@ class SkillIngressPolicyEngine:
         self.domain_size = int(domain_size)
         self.max_tokens = int(max_tokens)
 
+        self.unified_policy = bool(int(os.getenv("UNIFIED_POLICY", "1")))
+
         self.signed_pir = True  # skill ingress always uses signed PIR in this demo.
         self.use_bundle = bool(int(os.getenv("USE_POLICY_BUNDLE", "1")))
         self.policy_bypass = bool(int(os.getenv("MIRAGE_POLICY_BYPASS", "0")))
@@ -194,6 +197,11 @@ class SkillIngressPolicyEngine:
 
         cfg = _load_policy_config()
         self._circuit = build_skill_ingress_v1_circuit_from_policy(cfg) or build_skill_ingress_v1_circuit_default()
+        self._unified: UnifiedPolicyEngine | None = None
+        if self.unified_policy:
+            # Unified program hides skill-ingress vs egress category at the policy server.
+            # Note: handles store is not needed for skill-only flows.
+            self._unified = UnifiedPolicyEngine(pir=pir, handles=None, tx_store=tx_store, domain_size=domain_size, max_tokens=max_tokens)
 
     def _query_bits_signed_or_single_server(
         self,
@@ -329,6 +337,16 @@ class SkillIngressPolicyEngine:
         session: str,
         caller: str,
     ) -> Dict[str, Any]:
+        if self._unified is not None:
+            return self._unified.preview_skill_install(
+                skill_id=skill_id,
+                skill_digest=skill_digest,
+                skill_md=skill_md,
+                domains=domains,
+                base64_obf=base64_obf,
+                session=session,
+                caller=caller,
+            )
         caps = get_capabilities(caller)
         cap_install = 1 if caps.egress_ok(kind="skill_install") else 0
 

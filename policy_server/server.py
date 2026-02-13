@@ -36,6 +36,15 @@ class PirQueryBatch(BaseModel):
 class PirQueryBatchSigned(PirQueryBatch):
     action_id: str = Field(..., description="Opaque action identifier (bound into the MAC).")
 
+class PirQueryBatchSubReq(BaseModel):
+    action_id: str = Field(..., description="Opaque action identifier (bound into the MAC).")
+    dpf_keys_b64: list[str]
+
+
+class PirQueryBatchMultiSigned(BaseModel):
+    db: str
+    requests: list[PirQueryBatchSubReq] = Field(default_factory=list)
+
 
 class PirIdxBatch(BaseModel):
     db: str
@@ -71,12 +80,33 @@ class MpcAndMaskReq(BaseModel):
     b_share: int
     c_share: int
 
+class MpcTripleShare(BaseModel):
+    gate_index: int
+    a_share: int
+    b_share: int
+    c_share: int
+
+
+class MpcAndMaskBatchReq(BaseModel):
+    action_id: str
+    triples: list[MpcTripleShare] = Field(default_factory=list)
+
 
 class MpcAndFinishReq(BaseModel):
     action_id: str
     gate_index: int
     d: int
     e: int
+
+class MpcAndFinishItem(BaseModel):
+    gate_index: int
+    d: int
+    e: int
+
+
+class MpcAndFinishBatchReq(BaseModel):
+    action_id: str
+    opens: list[MpcAndFinishItem] = Field(default_factory=list)
 
 
 class MpcFinalizeReq(BaseModel):
@@ -216,6 +246,47 @@ def pir_query_batch_signed(q: PirQueryBatchSigned):
     }
 
 
+@app.post("/pir/query_batch_multi_signed")
+def pir_query_batch_multi_signed(q: PirQueryBatchMultiSigned):
+    """
+    Mixed/batched signed PIR endpoint.
+
+    This is used by the gateway-side microbatch mixer to send many action_id subrequests
+    in a single HTTP call per policy server. Each subrequest still receives an individual
+    MAC proof bound to (action_id, db, keys_sha256, resp_sha256).
+    """
+    kid, key = _active_mac_key()
+    if not key:
+        raise RuntimeError("POLICY_MAC_KEY not configured")
+    ts = int(time.time())
+    out: list[dict] = []
+    for sub in (q.requests or []):
+        ans = db.query_batch(q.db, sub.dpf_keys_b64, party=settings.server_id)
+        keys_concat = b"".join(base64.b64decode(k) for k in (sub.dpf_keys_b64 or []))
+        keys_sha256 = _sha256_hex(keys_concat)
+        resp_bytes = bytes([int(x) & 1 for x in ans])
+        resp_sha256 = _sha256_hex(resp_bytes)
+        payload = {
+            "v": 1,
+            "kind": "bit",
+            "server_id": int(settings.server_id),
+            "kid": str(kid),
+            "ts": ts,
+            "action_id": str(sub.action_id),
+            "db": str(q.db),
+            "keys_sha256": keys_sha256,
+            "resp_sha256": resp_sha256,
+        }
+        out.append(
+            {
+                "action_id": str(sub.action_id),
+                "ans_shares": ans,
+                "proof": {**payload, "mac_b64": _mac_b64(key, payload)},
+            }
+        )
+    return {"responses": out}
+
+
 @app.post("/pir/query_block_batch_signed")
 def pir_query_block_batch_signed(q: PirQueryBatchSigned):
     kid, key = _active_mac_key()
@@ -316,12 +387,26 @@ def mpc_and_mask(req: MpcAndMaskReq):
     d_share, e_share = sess.and_mask(gate_index=int(req.gate_index), a_share=int(req.a_share), b_share=int(req.b_share), c_share=int(req.c_share))
     return {"d_share": int(d_share) & 1, "e_share": int(e_share) & 1}
 
+@app.post("/mpc/and_mask_batch")
+def mpc_and_mask_batch(req: MpcAndMaskBatchReq):
+    sess = mpc_store.get(req.action_id)
+    items = [(int(t.gate_index), int(t.a_share), int(t.b_share), int(t.c_share)) for t in (req.triples or [])]
+    d_shares, e_shares = sess.and_mask_batch(items)
+    return {"d_shares": [int(x) & 1 for x in d_shares], "e_shares": [int(x) & 1 for x in e_shares]}
+
 
 @app.post("/mpc/and_finish")
 def mpc_and_finish(req: MpcAndFinishReq):
     sess = mpc_store.get(req.action_id)
     z = sess.and_finish(gate_index=int(req.gate_index), d=int(req.d), e=int(req.e))
     return {"z_share": int(z) & 1}
+
+@app.post("/mpc/and_finish_batch")
+def mpc_and_finish_batch(req: MpcAndFinishBatchReq):
+    sess = mpc_store.get(req.action_id)
+    items = [(int(it.gate_index), int(it.d), int(it.e)) for it in (req.opens or [])]
+    zs = sess.and_finish_batch(items)
+    return {"z_shares": [int(x) & 1 for x in zs], "ok": True}
 
 
 @app.post("/mpc/finalize")

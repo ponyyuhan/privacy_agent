@@ -16,6 +16,8 @@ from common.sanitize import SanitizePatch, apply_patch_to_domain, apply_patch_to
 
 EXECUTOR_INSECURE_ALLOW = bool(int(os.getenv("EXECUTOR_INSECURE_ALLOW", "0")))
 
+POLICY_PROGRAM_ID = (os.getenv("MIRAGE_POLICY_PROGRAM_ID", "policy_unified_v1") or "policy_unified_v1").strip()
+
 def _sha256_hex(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
@@ -404,7 +406,7 @@ def exec_send_message(req: ExecSendMessageReq):
             session=str(req.session or ""),
             inputs={"channel": str(req.channel), "recipient": str(req.recipient), "domain": str(req.domain), "text": str(req.text)},
         )
-        outs, tag, code = _verify_commit_evidence(req.commit, action_id=action_id, program_id="egress_v1", request_sha256=request_sha)
+        outs, tag, code = _verify_commit_evidence(req.commit, action_id=action_id, program_id=POLICY_PROGRAM_ID, request_sha256=request_sha)
         if outs is None:
             return {"status": "DENY", "reason_code": "BAD_COMMIT_PROOF", "details": code}
         allow_pre = int(outs.get("allow_pre", 0)) & 1
@@ -477,7 +479,7 @@ def exec_fetch(req: ExecFetchReq):
             session=str(req.session or ""),
             inputs={"resource_id": str(req.resource_id), "recipient": str(req.recipient), "domain": str(req.domain), "text": str(req.text)},
         )
-        outs, tag, code = _verify_commit_evidence(req.commit, action_id=action_id, program_id="egress_v1", request_sha256=request_sha)
+        outs, tag, code = _verify_commit_evidence(req.commit, action_id=action_id, program_id=POLICY_PROGRAM_ID, request_sha256=request_sha)
         if outs is None:
             return {"status": "DENY", "reason_code": "BAD_COMMIT_PROOF", "details": code}
         allow_pre = int(outs.get("allow_pre", 0)) & 1
@@ -521,7 +523,7 @@ def exec_webhook(req: ExecWebhookReq):
             session=str(req.session or ""),
             inputs={"path": str(req.path), "body": str(req.body), "recipient": str(req.recipient), "domain": str(req.domain), "text": str(req.text)},
         )
-        outs, tag, code = _verify_commit_evidence(req.commit, action_id=action_id, program_id="egress_v1", request_sha256=request_sha)
+        outs, tag, code = _verify_commit_evidence(req.commit, action_id=action_id, program_id=POLICY_PROGRAM_ID, request_sha256=request_sha)
         if outs is None:
             return {"status": "DENY", "reason_code": "BAD_COMMIT_PROOF", "details": code}
         allow_pre = int(outs.get("allow_pre", 0)) & 1
@@ -555,7 +557,7 @@ def exec_skill_install(req: ExecSkillInstallReq):
             session=str(req.session or ""),
             inputs={"skill_id": str(req.skill_id), "skill_digest": str(req.skill_digest)},
         )
-        outs, tag, code = _verify_commit_evidence(req.commit, action_id=action_id, program_id="skill_ingress_v1", request_sha256=request_sha)
+        outs, tag, code = _verify_commit_evidence(req.commit, action_id=action_id, program_id=POLICY_PROGRAM_ID, request_sha256=request_sha)
         if outs is None:
             return {"status": "DENY", "reason_code": "BAD_COMMIT_PROOF", "details": code}
         allow_pre = int(outs.get("allow_pre", 0)) & 1

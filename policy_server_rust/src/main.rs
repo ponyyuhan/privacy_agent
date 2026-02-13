@@ -52,7 +52,6 @@ struct MpcSession {
     gates: Vec<MpcGate>,
     wires: Vec<Option<u8>>,
     outputs: HashMap<String, usize>,
-    pc: usize,
     pending: HashMap<usize, (u8, u8, u8)>, // gate_index -> (a,b,c) shares
 }
 
@@ -77,44 +76,46 @@ impl MpcSession {
         Ok(())
     }
 
-    fn eval_gate(&mut self, party: u8, gi: usize) -> Result<(), String> {
-        let g = self.gates.get(gi).ok_or_else(|| "gate_oob".to_string())?;
-        let op = g.op.to_ascii_uppercase();
-        if op == "XOR" {
-            let a = g.a.ok_or_else(|| "bad_gate".to_string())?;
-            let b = g.b.ok_or_else(|| "bad_gate".to_string())?;
-            let v = self.wire(a)? ^ self.wire(b)?;
-            self.set_wire(g.out, v)?;
-            return Ok(());
-        }
-        if op == "NOT" {
-            let a = g.a.ok_or_else(|| "bad_gate".to_string())?;
-            let v = self.wire(a)? ^ if party == 0 { 1 } else { 0 };
-            self.set_wire(g.out, v)?;
-            return Ok(());
-        }
-        if op == "CONST" {
-            let v = g.value.unwrap_or(0) & 1;
-            self.set_wire(g.out, if party == 0 { v } else { 0 })?;
-            return Ok(());
-        }
-        if op == "AND" {
-            return Err("and_requires_interaction".to_string());
-        }
-        Err("unknown_gate".to_string())
-    }
-
-    fn eval_until(&mut self, party: u8, gate_index: usize) -> Result<(), String> {
-        if gate_index > self.gates.len() {
-            return Err("gate_oob".to_string());
-        }
-        while self.pc < gate_index {
-            let op = self.gates[self.pc].op.to_ascii_uppercase();
-            if op == "AND" {
-                return Err("hit_and_early".to_string());
+    fn eval_local(&mut self, party: u8) -> Result<(), String> {
+        // Best-effort compute XOR/NOT/CONST gates whose inputs are ready.
+        // This intentionally skips AND gates; those are handled via Beaver triples.
+        for gi in 0..self.gates.len() {
+            let g = self.gates[gi].clone();
+            if g.out >= self.wires.len() {
+                return Err("wire_oob".to_string());
             }
-            self.eval_gate(party, self.pc)?;
-            self.pc += 1;
+            if self.wires[g.out].is_some() {
+                continue;
+            }
+            let op = g.op.to_ascii_uppercase();
+            if op == "AND" {
+                continue;
+            }
+            if op == "XOR" {
+                let a = g.a.ok_or_else(|| "bad_gate".to_string())?;
+                let b = g.b.ok_or_else(|| "bad_gate".to_string())?;
+                if self.wires.get(a).and_then(|v| *v).is_none() || self.wires.get(b).and_then(|v| *v).is_none() {
+                    continue;
+                }
+                let v = self.wire(a)? ^ self.wire(b)?;
+                self.set_wire(g.out, v)?;
+                continue;
+            }
+            if op == "NOT" {
+                let a = g.a.ok_or_else(|| "bad_gate".to_string())?;
+                if self.wires.get(a).and_then(|v| *v).is_none() {
+                    continue;
+                }
+                let v = self.wire(a)? ^ if party == 0 { 1 } else { 0 };
+                self.set_wire(g.out, v)?;
+                continue;
+            }
+            if op == "CONST" {
+                let v = g.value.unwrap_or(0) & 1;
+                self.set_wire(g.out, if party == 0 { v } else { 0 })?;
+                continue;
+            }
+            return Err("unknown_gate".to_string());
         }
         Ok(())
     }
@@ -123,16 +124,16 @@ impl MpcSession {
         if gate_index >= self.gates.len() {
             return Err("gate_oob".to_string());
         }
-        self.eval_until(party, gate_index)?;
-        if self.pc != gate_index {
-            return Err("bad_pc".to_string());
-        }
+        self.eval_local(party)?;
         let g = &self.gates[gate_index];
         if g.op.to_ascii_uppercase() != "AND" {
             return Err("not_and_gate".to_string());
         }
         let a = g.a.ok_or_else(|| "bad_gate".to_string())?;
         let b = g.b.ok_or_else(|| "bad_gate".to_string())?;
+        if self.wires.get(a).and_then(|v| *v).is_none() || self.wires.get(b).and_then(|v| *v).is_none() {
+            return Err("and_inputs_not_ready".to_string());
+        }
         self.pending.insert(gate_index, (a_share & 1, b_share & 1, c_share & 1));
         let d_share = self.wire(a)? ^ (a_share & 1);
         let e_share = self.wire(b)? ^ (b_share & 1);
@@ -140,8 +141,8 @@ impl MpcSession {
     }
 
     fn and_finish(&mut self, party: u8, gate_index: usize, d: u8, e: u8) -> Result<u8, String> {
-        if self.pc != gate_index {
-            return Err("bad_pc".to_string());
+        if gate_index >= self.gates.len() {
+            return Err("gate_oob".to_string());
         }
         let g = &self.gates[gate_index];
         if g.op.to_ascii_uppercase() != "AND" {
@@ -155,18 +156,14 @@ impl MpcSession {
             z ^= (dd & ee) & 1;
         }
         self.set_wire(g.out, z)?;
-        self.pc += 1;
+        self.eval_local(party)?;
         Ok(z & 1)
     }
 
     fn finalize(&mut self, party: u8) -> Result<HashMap<String, u8>, String> {
-        while self.pc < self.gates.len() {
-            let op = self.gates[self.pc].op.to_ascii_uppercase();
-            if op == "AND" {
-                return Err("unfinished_and".to_string());
-            }
-            self.eval_gate(party, self.pc)?;
-            self.pc += 1;
+        self.eval_local(party)?;
+        if !self.pending.is_empty() {
+            return Err("unfinished_and".to_string());
         }
         let mut out = HashMap::new();
         for (k, wi) in self.outputs.iter() {
@@ -198,11 +195,38 @@ struct MpcAndMaskReq {
 }
 
 #[derive(Deserialize)]
+struct MpcTripleShare {
+    gate_index: usize,
+    a_share: u8,
+    b_share: u8,
+    c_share: u8,
+}
+
+#[derive(Deserialize)]
+struct MpcAndMaskBatchReq {
+    action_id: String,
+    triples: Vec<MpcTripleShare>,
+}
+
+#[derive(Deserialize)]
 struct MpcAndFinishReq {
     action_id: String,
     gate_index: usize,
     d: u8,
     e: u8,
+}
+
+#[derive(Deserialize)]
+struct MpcAndOpen {
+    gate_index: usize,
+    d: u8,
+    e: u8,
+}
+
+#[derive(Deserialize)]
+struct MpcAndFinishBatchReq {
+    action_id: String,
+    opens: Vec<MpcAndOpen>,
 }
 
 #[derive(Deserialize)]
@@ -531,6 +555,18 @@ struct PirQueryBatchSigned {
 }
 
 #[derive(Deserialize)]
+struct PirQueryBatchSubReq {
+    action_id: String,
+    dpf_keys_b64: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct PirQueryBatchMultiSigned {
+    db: String,
+    requests: Vec<PirQueryBatchSubReq>,
+}
+
+#[derive(Deserialize)]
 struct PirIdxBatch {
     db: String,
     idxs: Vec<usize>,
@@ -552,6 +588,18 @@ struct PirAnsBatch {
 struct PirAnsBatchSigned {
     ans_shares: Vec<u8>,
     proof: Value,
+}
+
+#[derive(Serialize)]
+struct PirSubAnsBatchSigned {
+    action_id: String,
+    ans_shares: Vec<u8>,
+    proof: Value,
+}
+
+#[derive(Serialize)]
+struct PirAnsBatchMultiSigned {
+    responses: Vec<PirSubAnsBatchSigned>,
 }
 
 #[derive(Serialize)]
@@ -740,6 +788,81 @@ async fn pir_query_batch_signed(
     }))
 }
 
+async fn pir_query_batch_multi_signed(
+    State(st): State<AppState>,
+    Json(q): Json<PirQueryBatchMultiSigned>,
+) -> Result<Json<PirAnsBatchMultiSigned>, (StatusCode, String)> {
+    let db = get_bitset(&st, &q.db).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    let party = st.server_id;
+
+    let ts = (std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()) as i64;
+
+    let kid = st.active_kid.clone();
+    let key = st
+        .mac_keys
+        .get(&kid)
+        .ok_or_else(|| (StatusCode::INTERNAL_SERVER_ERROR, "missing mac key".to_string()))?;
+
+    let responses: Result<Vec<PirSubAnsBatchSigned>, (StatusCode, String)> = q
+        .requests
+        .par_iter()
+        .map(|sub| {
+            let decoded_keys: Result<Vec<Vec<u8>>, (StatusCode, String)> = sub
+                .dpf_keys_b64
+                .iter()
+                .map(|k| {
+                    B64.decode(k.as_bytes())
+                        .map_err(|_| (StatusCode::BAD_REQUEST, "bad base64 key".to_string()))
+                })
+                .collect();
+            let decoded_keys = decoded_keys?;
+
+            let ans: Result<Vec<u8>, (StatusCode, String)> = decoded_keys
+                .iter()
+                .map(|kb| eval_parity_share(kb, &db, party).map_err(|e| (StatusCode::BAD_REQUEST, e)))
+                .collect();
+            let ans = ans?;
+
+            let mut keys_concat = Vec::new();
+            for kb in decoded_keys.iter() {
+                keys_concat.extend_from_slice(kb);
+            }
+            let keys_sha256 = sha256_hex(&keys_concat);
+            let resp_sha256 = sha256_hex(&ans.iter().map(|x| x & 1).collect::<Vec<u8>>());
+
+            let mut payload: BTreeMap<&str, Value> = BTreeMap::new();
+            payload.insert("v", Value::from(1));
+            payload.insert("kind", Value::from("bit"));
+            payload.insert("server_id", Value::from(st.server_id as i64));
+            payload.insert("kid", Value::from(kid.clone()));
+            payload.insert("ts", Value::from(ts));
+            payload.insert("action_id", Value::from(sub.action_id.clone()));
+            payload.insert("db", Value::from(q.db.clone()));
+            payload.insert("keys_sha256", Value::from(keys_sha256));
+            payload.insert("resp_sha256", Value::from(resp_sha256));
+
+            let mac_b64 = sign_payload(key, &payload);
+            let mut proof_obj = serde_json::Map::new();
+            for (k, v) in payload.into_iter() {
+                proof_obj.insert(k.to_string(), v);
+            }
+            proof_obj.insert("mac_b64".to_string(), Value::from(mac_b64));
+
+            Ok(PirSubAnsBatchSigned {
+                action_id: sub.action_id.clone(),
+                ans_shares: ans,
+                proof: Value::Object(proof_obj),
+            })
+        })
+        .collect();
+
+    let responses = responses?;
+    Ok(Json(PirAnsBatchMultiSigned { responses }))
+}
+
 async fn pir_query_block_batch_signed(
     State(st): State<AppState>,
     Json(q): Json<PirQueryBatchSigned>,
@@ -883,7 +1006,6 @@ async fn mpc_init(State(st): State<AppState>, Json(req): Json<MpcInitReq>) -> Re
         gates: req.gates.clone(),
         wires,
         outputs: req.outputs.clone(),
-        pc: 0,
         pending: HashMap::new(),
     };
 
@@ -903,6 +1025,52 @@ async fn mpc_and_mask(State(st): State<AppState>, Json(req): Json<MpcAndMaskReq>
     Ok(Json(json!({"d_share": d & 1, "e_share": e & 1})))
 }
 
+async fn mpc_and_mask_batch(
+    State(st): State<AppState>,
+    Json(req): Json<MpcAndMaskBatchReq>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let mut map = st.mpc_sessions.lock().unwrap();
+    cleanup_mpc_sessions(&mut map);
+    let sess = map
+        .get_mut(&req.action_id)
+        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing_session".to_string()))?;
+
+    sess.eval_local(st.server_id)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+
+    let mut d_shares: Vec<u8> = Vec::with_capacity(req.triples.len());
+    let mut e_shares: Vec<u8> = Vec::with_capacity(req.triples.len());
+    for t in req.triples.iter() {
+        if t.gate_index >= sess.gates.len() {
+            return Err((StatusCode::BAD_REQUEST, "gate_oob".to_string()));
+        }
+        let g = &sess.gates[t.gate_index];
+        if g.op.to_ascii_uppercase() != "AND" {
+            return Err((StatusCode::BAD_REQUEST, "not_and_gate".to_string()));
+        }
+        let a = g.a.ok_or_else(|| (StatusCode::BAD_REQUEST, "bad_gate".to_string()))?;
+        let b = g.b.ok_or_else(|| (StatusCode::BAD_REQUEST, "bad_gate".to_string()))?;
+        // Require inputs ready.
+        let _ = sess
+            .wire(a)
+            .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+        let _ = sess
+            .wire(b)
+            .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+
+        sess.pending.insert(
+            t.gate_index,
+            (t.a_share & 1, t.b_share & 1, t.c_share & 1),
+        );
+        let d_share = (sess.wire(a).unwrap() ^ (t.a_share & 1)) & 1;
+        let e_share = (sess.wire(b).unwrap() ^ (t.b_share & 1)) & 1;
+        d_shares.push(d_share);
+        e_shares.push(e_share);
+    }
+
+    Ok(Json(json!({"d_shares": d_shares, "e_shares": e_shares})))
+}
+
 async fn mpc_and_finish(State(st): State<AppState>, Json(req): Json<MpcAndFinishReq>) -> Result<Json<Value>, (StatusCode, String)> {
     let mut map = st.mpc_sessions.lock().unwrap();
     cleanup_mpc_sessions(&mut map);
@@ -911,6 +1079,45 @@ async fn mpc_and_finish(State(st): State<AppState>, Json(req): Json<MpcAndFinish
         .and_finish(st.server_id, req.gate_index, req.d, req.e)
         .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
     Ok(Json(json!({"z_share": z & 1})))
+}
+
+async fn mpc_and_finish_batch(
+    State(st): State<AppState>,
+    Json(req): Json<MpcAndFinishBatchReq>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let mut map = st.mpc_sessions.lock().unwrap();
+    cleanup_mpc_sessions(&mut map);
+    let sess = map
+        .get_mut(&req.action_id)
+        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing_session".to_string()))?;
+
+    let mut z_shares: Vec<u8> = Vec::with_capacity(req.opens.len());
+    for it in req.opens.iter() {
+        if it.gate_index >= sess.gates.len() {
+            return Err((StatusCode::BAD_REQUEST, "gate_oob".to_string()));
+        }
+        let g = &sess.gates[it.gate_index];
+        if g.op.to_ascii_uppercase() != "AND" {
+            return Err((StatusCode::BAD_REQUEST, "not_and_gate".to_string()));
+        }
+        let (a_share, b_share, c_share) = sess
+            .pending
+            .remove(&it.gate_index)
+            .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing_triple".to_string()))?;
+        let dd = it.d & 1;
+        let ee = it.e & 1;
+        let mut z = (c_share ^ (dd & b_share) ^ (ee & a_share)) & 1;
+        if st.server_id == 0 {
+            z ^= (dd & ee) & 1;
+        }
+        sess.set_wire(g.out, z)
+            .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+        z_shares.push(z & 1);
+    }
+
+    sess.eval_local(st.server_id)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    Ok(Json(json!({"ok": true, "z_shares": z_shares})))
 }
 
 async fn mpc_finalize(State(st): State<AppState>, Json(req): Json<MpcFinalizeReq>) -> Result<Json<Value>, (StatusCode, String)> {
@@ -1068,11 +1275,14 @@ async fn main() {
         .route("/pir/query_block_batch", post(pir_query_block_batch))
         .route("/pir/query_idx_batch", post(pir_query_idx_batch))
         .route("/pir/query_batch_signed", post(pir_query_batch_signed))
+        .route("/pir/query_batch_multi_signed", post(pir_query_batch_multi_signed))
         .route("/pir/query_block_batch_signed", post(pir_query_block_batch_signed))
         .route("/pir/query_idx_batch_signed", post(pir_query_idx_batch_signed))
         .route("/mpc/init", post(mpc_init))
         .route("/mpc/and_mask", post(mpc_and_mask))
+        .route("/mpc/and_mask_batch", post(mpc_and_mask_batch))
         .route("/mpc/and_finish", post(mpc_and_finish))
+        .route("/mpc/and_finish_batch", post(mpc_and_finish_batch))
         .route("/mpc/finalize", post(mpc_finalize))
         .with_state(st);
 

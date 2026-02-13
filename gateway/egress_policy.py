@@ -23,6 +23,7 @@ from .fss_pir import PirClient
 from .guardrails import fourgram_indices, stable_idx
 from .handles import HandleStore
 from .tx_store import TxStore
+from .policy_unified import UnifiedPolicyEngine
 
 
 _HTTP_POOL = ThreadPoolExecutor(max_workers=8)
@@ -298,6 +299,8 @@ class EgressPolicyEngine:
         self.domain_size = int(domain_size)
         self.max_tokens = int(max_tokens)
 
+        self.unified_policy = bool(int(os.getenv("UNIFIED_POLICY", "1")))
+
         # Policy knobs
         self.signed_pir = bool(int(os.getenv("SIGNED_PIR", "1")))
         self.dlp_mode = (os.getenv("DLP_MODE", "fourgram") or "fourgram").strip().lower()
@@ -311,6 +314,11 @@ class EgressPolicyEngine:
         self._bundle_cache: dict[str, Any] | None = None
         cfg = _load_policy_config()
         self._circuit = build_egress_v1_circuit_from_policy(cfg) or build_egress_v1_circuit()
+        self._unified: UnifiedPolicyEngine | None = None
+        if self.unified_policy:
+            # Unified program hides intent category at the policy server by using a
+            # single constant-shape MPC program + a single bundled PIR surface.
+            self._unified = UnifiedPolicyEngine(pir=pir, handles=handles, tx_store=tx_store, domain_size=domain_size, max_tokens=max_tokens)
 
     def _query_bits_signed_or_single_server(
         self,
@@ -468,6 +476,8 @@ class EgressPolicyEngine:
         caller: str,
     ) -> Dict[str, Any]:
         """Run PREVIEW for a side-effect intent and return a tx_id to commit later."""
+        if self._unified is not None:
+            return self._unified.preview_egress(intent_id=intent_id, inputs=inputs, constraints=constraints, session=session, caller=caller)
         _ = constraints  # reserved for future policy fields (rate limits, budgets, etc)
         intent = str(intent_id)
         if intent not in ("SendMessage", "FetchResource", "PostWebhook", "CheckMessagePolicy", "CheckWebhookPolicy", "CheckFetchPolicy"):

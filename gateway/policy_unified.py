@@ -1,0 +1,1033 @@
+from __future__ import annotations
+
+import ast
+import os
+import secrets
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Dict, List, Tuple
+
+import requests
+import yaml
+
+from common.canonical import request_sha256_v1
+from common.sanitize import (
+    PATCH_CLAMP_LEN,
+    PATCH_NOOP,
+    PATCH_REDACT,
+    PATCH_REWRITE_DOMAIN_TO_PROXY,
+    SanitizePatch,
+)
+
+from .capabilities import get_capabilities
+from .fss_pir import MixedPirClient, PirClient
+from .guardrails import fourgram_indices, stable_idx
+from .handles import HandleStore
+from .skill_ingress import extract_install_tokens
+from .tx_store import TxStore
+
+_HTTP_POOL = ThreadPoolExecutor(max_workers=8)
+
+
+@dataclass(frozen=True, slots=True)
+class Gate:
+    op: str
+    out: int
+    a: int | None = None
+    b: int | None = None
+    value: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class Circuit:
+    n_wires: int
+    gates: List[Gate]
+    inputs: Dict[str, int]
+    outputs: Dict[str, int]
+    and_gate_indices: List[int]
+    and_rounds: List[List[int]]
+
+
+class _CircuitBuilder:
+    def __init__(self) -> None:
+        self._w = 0
+        self.inputs: Dict[str, int] = {}
+        self.gates: List[Gate] = []
+        self.and_gate_indices: List[int] = []
+
+    def input(self, name: str) -> int:
+        if name in self.inputs:
+            return int(self.inputs[name])
+        wi = self._w
+        self._w += 1
+        self.inputs[str(name)] = wi
+        return wi
+
+    def const(self, value: int) -> int:
+        wi = self._w
+        self._w += 1
+        self.gates.append(Gate(op="CONST", out=wi, value=int(value) & 1))
+        return wi
+
+    def xor(self, a: int, b: int) -> int:
+        wi = self._w
+        self._w += 1
+        self.gates.append(Gate(op="XOR", out=wi, a=int(a), b=int(b)))
+        return wi
+
+    def not_(self, a: int) -> int:
+        wi = self._w
+        self._w += 1
+        self.gates.append(Gate(op="NOT", out=wi, a=int(a)))
+        return wi
+
+    def and_(self, a: int, b: int) -> int:
+        wi = self._w
+        self._w += 1
+        self.and_gate_indices.append(len(self.gates))
+        self.gates.append(Gate(op="AND", out=wi, a=int(a), b=int(b)))
+        return wi
+
+
+def _share_bit(x: int) -> Tuple[int, int]:
+    r = secrets.randbits(1) & 1
+    return r, (r ^ (int(x) & 1)) & 1
+
+
+def _load_policy_config() -> dict[str, Any]:
+    cfg_path = os.getenv("POLICY_CONFIG_PATH", "").strip()
+    if not cfg_path:
+        repo_root = Path(__file__).resolve().parents[1]
+        p = repo_root / "policy_server" / "policy.yaml"
+        if p.exists():
+            cfg_path = str(p)
+    if not cfg_path:
+        return {}
+    try:
+        cfg = yaml.safe_load(Path(cfg_path).read_text(encoding="utf-8")) or {}
+    except Exception:
+        return {}
+    return cfg if isinstance(cfg, dict) else {}
+
+
+def _compile_expr(b: _CircuitBuilder, expr: str) -> int:
+    s = str(expr or "").strip()
+    if not s:
+        s = "0"
+    node = ast.parse(s, mode="eval").body
+
+    def _c(n: ast.AST) -> int:
+        if isinstance(n, ast.Name):
+            name = str(n.id)
+            if name not in b.inputs:
+                raise ValueError(f"unknown var: {name}")
+            return int(b.inputs[name])
+        if isinstance(n, ast.Constant):
+            if isinstance(n.value, bool):
+                return b.const(1 if n.value else 0)
+            if isinstance(n.value, int):
+                return b.const(int(n.value) & 1)
+            raise ValueError("bad constant")
+        if isinstance(n, ast.UnaryOp) and isinstance(n.op, ast.Invert):
+            return b.not_(_c(n.operand))
+        if isinstance(n, ast.BinOp):
+            if isinstance(n.op, ast.BitAnd):
+                return b.and_(_c(n.left), _c(n.right))
+            if isinstance(n.op, ast.BitXor):
+                return b.xor(_c(n.left), _c(n.right))
+            if isinstance(n.op, ast.BitOr):
+                a = _c(n.left)
+                c = _c(n.right)
+                ax = b.xor(a, c)
+                an = b.and_(a, c)
+                return b.xor(ax, an)
+        raise ValueError("unsupported expression")
+
+    return _c(node)
+
+
+def _xor_reduce(b: _CircuitBuilder, ws: list[int]) -> int:
+    if not ws:
+        return b.const(0)
+    acc = int(ws[0])
+    for w in ws[1:]:
+        acc = b.xor(acc, int(w))
+    return acc
+
+
+def _compute_and_rounds(c: Circuit) -> list[list[int]]:
+    # AND-depth for each wire. XOR/NOT/CONST keep depth; AND increases by 1.
+    wdepth: list[int] = [0 for _ in range(int(c.n_wires))]
+    gate_and_depth: dict[int, int] = {}
+    for gi, g in enumerate(c.gates):
+        op = str(g.op).upper()
+        if op == "CONST":
+            wdepth[int(g.out)] = 0
+            continue
+        if op == "NOT":
+            if g.a is None:
+                raise ValueError("bad NOT gate")
+            wdepth[int(g.out)] = int(wdepth[int(g.a)])
+            continue
+        if op == "XOR":
+            if g.a is None or g.b is None:
+                raise ValueError("bad XOR gate")
+            wdepth[int(g.out)] = max(int(wdepth[int(g.a)]), int(wdepth[int(g.b)]))
+            continue
+        if op == "AND":
+            if g.a is None or g.b is None:
+                raise ValueError("bad AND gate")
+            d = max(int(wdepth[int(g.a)]), int(wdepth[int(g.b)])) + 1
+            wdepth[int(g.out)] = int(d)
+            gate_and_depth[int(gi)] = int(d)
+            continue
+        raise ValueError(f"unknown gate op: {g.op}")
+
+    if not gate_and_depth:
+        return []
+    maxd = max(int(x) for x in gate_and_depth.values())
+    rounds: list[list[int]] = [[] for _ in range(maxd + 1)]
+    for gi, d in gate_and_depth.items():
+        rounds[int(d)].append(int(gi))
+    out: list[list[int]] = []
+    for d in range(1, maxd + 1):
+        if rounds[d]:
+            out.append(sorted(rounds[d]))
+    return out
+
+
+def build_policy_unified_v1_circuit_from_policy(cfg: dict[str, Any]) -> Circuit | None:
+    programs = cfg.get("policy_programs") if isinstance(cfg, dict) else None
+    if not isinstance(programs, dict):
+        return None
+    egress = programs.get("egress_v1")
+    ingress = programs.get("skill_ingress_v1")
+    if not isinstance(egress, dict) or not isinstance(ingress, dict):
+        return None
+    intents = egress.get("intents")
+    if not isinstance(intents, dict):
+        return None
+    ingress_outs = ingress.get("outputs")
+    if not isinstance(ingress_outs, dict):
+        return None
+
+    b = _CircuitBuilder()
+
+    # Fixed inputs for constant-shape program.
+    for nm in [
+        "intent_send",
+        "intent_fetch",
+        "intent_webhook",
+        "intent_skill_install",
+        "cap_send",
+        "cap_fetch",
+        "cap_webhook",
+        "cap_skill_install",
+        "recipient_ok",
+        "domain_ok",
+        "dlp_hit",
+        "high_handle_present",
+        "ioc_hit",
+        "install_hit",
+        "base64_obf",
+    ]:
+        b.input(nm)
+
+    def intent_bit_for(name: str) -> str:
+        if name == "SendMessage":
+            return "intent_send"
+        if name == "FetchResource":
+            return "intent_fetch"
+        if name == "PostWebhook":
+            return "intent_webhook"
+        raise ValueError(f"unsupported egress intent in policy_programs.egress_v1: {name}")
+
+    # Compile egress per-intent outputs from DSL.
+    allow_terms: list[int] = []
+    conf_terms: list[int] = []
+    patch0_terms: list[int] = []
+    patch1_terms: list[int] = []
+    for intent_name, icfg in intents.items():
+        if not isinstance(icfg, dict):
+            continue
+        intent_name = str(intent_name)
+        ib = int(b.inputs[intent_bit_for(intent_name)])
+        allow_i = _compile_expr(b, str(icfg.get("allow_pre") or "0"))
+        conf_i = _compile_expr(b, str(icfg.get("need_confirm") or "0"))
+        patch0_i = _compile_expr(b, str(icfg.get("patch0") or "0"))
+        patch1_i = _compile_expr(b, str(icfg.get("patch1") or "0"))
+        allow_terms.append(b.and_(ib, allow_i))
+        conf_terms.append(b.and_(ib, conf_i))
+        patch0_terms.append(b.and_(ib, patch0_i))
+        patch1_terms.append(b.and_(ib, patch1_i))
+
+    # Skill ingress is treated as a fourth intent.
+    ib_skill = int(b.inputs["intent_skill_install"])
+    allow_skill = _compile_expr(b, str(ingress_outs.get("allow_pre") or "0"))
+    conf_skill = _compile_expr(b, str(ingress_outs.get("need_confirm") or "0"))
+    patch0_skill = _compile_expr(b, str(ingress_outs.get("patch0") or "0"))
+    patch1_skill = _compile_expr(b, str(ingress_outs.get("patch1") or "0"))
+    allow_terms.append(b.and_(ib_skill, allow_skill))
+    conf_terms.append(b.and_(ib_skill, conf_skill))
+    patch0_terms.append(b.and_(ib_skill, patch0_skill))
+    patch1_terms.append(b.and_(ib_skill, patch1_skill))
+
+    allow_pre = _xor_reduce(b, allow_terms)
+    need_confirm = _xor_reduce(b, conf_terms)
+    patch0 = _xor_reduce(b, patch0_terms)
+    patch1 = _xor_reduce(b, patch1_terms)
+
+    outputs = {"allow_pre": allow_pre, "need_confirm": need_confirm, "patch0": patch0, "patch1": patch1}
+    tmp = Circuit(
+        n_wires=b._w,
+        gates=b.gates,
+        inputs=b.inputs,
+        outputs=outputs,
+        and_gate_indices=b.and_gate_indices,
+        and_rounds=[],
+    )
+    rounds = _compute_and_rounds(tmp)
+    return Circuit(
+        n_wires=tmp.n_wires,
+        gates=tmp.gates,
+        inputs=tmp.inputs,
+        outputs=tmp.outputs,
+        and_gate_indices=tmp.and_gate_indices,
+        and_rounds=rounds,
+    )
+
+
+def build_policy_unified_v1_circuit_default() -> Circuit:
+    b = _CircuitBuilder()
+    intent_send = b.input("intent_send")
+    intent_fetch = b.input("intent_fetch")
+    intent_webhook = b.input("intent_webhook")
+    intent_skill = b.input("intent_skill_install")
+
+    cap_send = b.input("cap_send")
+    cap_fetch = b.input("cap_fetch")
+    cap_webhook = b.input("cap_webhook")
+    cap_skill = b.input("cap_skill_install")
+
+    recipient_ok = b.input("recipient_ok")
+    domain_ok = b.input("domain_ok")
+    dlp_hit = b.input("dlp_hit")
+    high_handle = b.input("high_handle_present")
+    ioc_hit = b.input("ioc_hit")
+    install_hit = b.input("install_hit")
+    base64_obf = b.input("base64_obf")
+
+    not_high = b.not_(high_handle)
+    allow_send = b.and_(cap_send, recipient_ok)
+    allow_send = b.and_(allow_send, not_high)
+    allow_fetch = b.and_(cap_fetch, domain_ok)
+    allow_webhook = b.and_(cap_webhook, domain_ok)
+    allow_webhook = b.and_(allow_webhook, not_high)
+
+    allow_skill = b.and_(cap_skill, b.not_(ioc_hit))
+
+    term_send = b.and_(intent_send, allow_send)
+    term_fetch = b.and_(intent_fetch, allow_fetch)
+    term_webhook = b.and_(intent_webhook, allow_webhook)
+    term_skill = b.and_(intent_skill, allow_skill)
+    allow_pre = _xor_reduce(b, [term_send, term_fetch, term_webhook, term_skill])
+
+    conf_send = b.and_(intent_send, dlp_hit)
+    conf_webhook = b.and_(intent_webhook, dlp_hit)
+    # skill_confirm = intent_skill & (install_hit | base64_obf)
+    skill_or = b.xor(install_hit, base64_obf)
+    skill_or = b.xor(skill_or, b.and_(install_hit, base64_obf))
+    conf_skill = b.and_(intent_skill, skill_or)
+    need_confirm = _xor_reduce(b, [conf_send, conf_webhook, conf_skill])
+
+    patch0 = need_confirm
+    patch1 = b.const(0)
+
+    outputs = {"allow_pre": allow_pre, "need_confirm": need_confirm, "patch0": patch0, "patch1": patch1}
+    tmp = Circuit(
+        n_wires=b._w,
+        gates=b.gates,
+        inputs=b.inputs,
+        outputs=outputs,
+        and_gate_indices=b.and_gate_indices,
+        and_rounds=[],
+    )
+    rounds = _compute_and_rounds(tmp)
+    return Circuit(
+        n_wires=tmp.n_wires,
+        gates=tmp.gates,
+        inputs=tmp.inputs,
+        outputs=tmp.outputs,
+        and_gate_indices=tmp.and_gate_indices,
+        and_rounds=rounds,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class BundleConfig:
+    enabled: bool
+    db: str
+    base_domain_size: int
+    bundle_domain_size: int
+    bundle_stride: int
+    bundle_id: int
+    logical_offsets: dict[str, int]
+
+
+def _load_bundle_cfg(pir: PirClient, *, domain_size: int) -> BundleConfig | None:
+    if not bool(int(os.getenv("USE_POLICY_BUNDLE", "1"))):
+        return None
+    try:
+        meta = requests.get(f"{pir.policy0_url}/meta", timeout=2.0).json()
+    except Exception:
+        return None
+    b = (meta.get("bundle") or {}) if isinstance(meta, dict) else {}
+    if not isinstance(b, dict) or not b.get("enabled"):
+        return None
+    base_ds = int(b.get("base_domain_size") or domain_size)
+    bundle_ds = int(b.get("bundle_domain_size") or 0)
+    stride = int(b.get("bundle_stride") or 0)
+    bundles = b.get("bundles") or {"default": 0}
+    if not isinstance(bundles, dict):
+        bundles = {"default": 0}
+    bundle_name = (os.getenv("POLICY_BUNDLE_NAME", "default") or "default").strip()
+    bid = int(bundles.get(bundle_name, 0))
+    offs = b.get("logical_offsets") or {}
+    if not isinstance(offs, dict):
+        offs = {}
+    logical_offsets = {str(k): int(v) for k, v in offs.items()}
+    return BundleConfig(
+        enabled=True,
+        db=str(b.get("db") or "policy_bundle"),
+        base_domain_size=base_ds,
+        bundle_domain_size=bundle_ds,
+        bundle_stride=stride,
+        bundle_id=bid,
+        logical_offsets=logical_offsets,
+    )
+
+
+def _bundle_shift(b: BundleConfig, *, logical: str, raw_idx: int) -> int:
+    loff = int(b.logical_offsets.get(str(logical), 0))
+    base = int(b.bundle_id) * int(b.bundle_stride)
+    return int(base + loff + (int(raw_idx) % int(b.base_domain_size)))
+
+
+def _bool_or(xs: list[int]) -> int:
+    return 1 if any(int(x) & 1 for x in (xs or [])) else 0
+
+
+class UnifiedPolicyEngine:
+    """
+    Unified policy program with constant-shape PIR surface and constant program_id.
+
+    This provides intent shadowing across:
+    - SendMessage / FetchResource / PostWebhook
+    - CommitSkillInstall
+    """
+
+    def __init__(self, *, pir: PirClient | MixedPirClient, handles: HandleStore | None, tx_store: TxStore, domain_size: int, max_tokens: int):
+        self.pir = pir
+        self.handles = handles
+        self.tx = tx_store
+        self.domain_size = int(domain_size)
+        self.max_tokens = int(max_tokens)
+        self.max_skill_domains = int(os.getenv("MAX_SKILL_DOMAINS", "8"))
+        if self.max_skill_domains < 1:
+            self.max_skill_domains = 1
+        if self.max_skill_domains > 64:
+            self.max_skill_domains = 64
+
+        # Knobs
+        self.signed_pir = bool(int(os.getenv("SIGNED_PIR", "1")))
+        self.policy_bypass = bool(int(os.getenv("MIRAGE_POLICY_BYPASS", "0")))
+        self.single_server_cleartext = bool(int(os.getenv("SINGLE_SERVER_POLICY", "0")))
+        self.single_server_id = int(os.getenv("SINGLE_SERVER_ID", "0") or "0")
+
+        self.program_id = (os.getenv("MIRAGE_POLICY_PROGRAM_ID", "policy_unified_v1") or "policy_unified_v1").strip()
+
+        cfg = _load_policy_config()
+        self._circuit = build_policy_unified_v1_circuit_from_policy(cfg) or build_policy_unified_v1_circuit_default()
+        self._bundle: BundleConfig | None = None
+
+    def _query_bits_signed_or_single_server(
+        self,
+        *,
+        db_name: str,
+        idxs: list[int],
+        action_id: str,
+        domain_size: int | None = None,
+    ) -> tuple[list[int], dict[str, Any]]:
+        if self.single_server_cleartext and isinstance(self.pir, PirClient):
+            # If the gateway wrapped the client with mixing, it may not expose the baseline API.
+            # In that case, baselines are disabled (paper eval uses separate configs).
+            return self.pir.query_bits_single_server_cleartext_signed(
+                db_name,
+                idxs,
+                action_id=action_id,
+                server_id=self.single_server_id,
+                domain_size=domain_size,
+            )
+        if self.single_server_cleartext and hasattr(self.pir, "query_bits_single_server_cleartext_signed"):
+            return getattr(self.pir, "query_bits_single_server_cleartext_signed")(
+                db_name,
+                idxs,
+                action_id=action_id,
+                server_id=self.single_server_id,
+                domain_size=domain_size,
+            )
+        return getattr(self.pir, "query_bits_signed")(db_name, idxs, action_id=action_id, domain_size=domain_size)
+
+    def _load_bundle(self) -> BundleConfig:
+        if self._bundle is not None:
+            return self._bundle
+        b = _load_bundle_cfg(self.pir if isinstance(self.pir, PirClient) else self.pir._base, domain_size=self.domain_size)  # type: ignore[attr-defined]
+        if not b:
+            raise RuntimeError("policy_bundle_required_for_unified_mode")
+        self._bundle = b
+        return b
+
+    def _pir_unified_plan(
+        self,
+        *,
+        recipient: str,
+        domain: str,
+        text: str,
+        skill_domains: list[str],
+        skill_md: str,
+        action_id: str,
+    ) -> tuple[dict[str, int], dict[str, Any]]:
+        """
+        Fixed-shape PIR plan (single bundled DB, constant key count).
+
+        Returns:
+        - features (clear bits): recipient_ok, domain_ok, dlp_hit, ioc_hit, install_hit
+        - evidence (per-action signed PIR transcript)
+        """
+        if not self.signed_pir:
+            raise RuntimeError("FULL policy engine requires SIGNED_PIR=1")
+        b = self._load_bundle()
+
+        # Fixed-shape padding.
+        doms = [str(d).strip().lower() for d in (skill_domains or []) if str(d).strip()]
+        doms = doms[: self.max_skill_domains]
+        while len(doms) < self.max_skill_domains:
+            doms.append(os.getenv("DUMMY_SKILL_DOMAIN", "example.com"))
+
+        toks = extract_install_tokens(text=skill_md or "", max_tokens=self.max_tokens)
+        while len(toks) < self.max_tokens:
+            toks.append(f"__pad_install_token_{len(toks)}__")
+
+        # Stable raw indices under the *base* domain.
+        rec_raw = stable_idx(str(recipient or ""), int(b.base_domain_size))
+        dom_raw = stable_idx(str(domain or ""), int(b.base_domain_size))
+        tok_raw = fourgram_indices(str(text or ""), int(b.base_domain_size), int(self.max_tokens))
+        ioc_raw = [stable_idx(d, int(b.base_domain_size)) for d in doms]
+        inst_raw = [stable_idx(t, int(b.base_domain_size)) for t in toks[: self.max_tokens]]
+
+        idxs: list[int] = []
+        idxs.append(_bundle_shift(b, logical="allow_recipients", raw_idx=rec_raw))
+        idxs.append(_bundle_shift(b, logical="allow_domains", raw_idx=dom_raw))
+        idxs.extend([_bundle_shift(b, logical="banned_tokens", raw_idx=int(x)) for x in tok_raw])
+        idxs.extend([_bundle_shift(b, logical="ioc_domains", raw_idx=int(x)) for x in ioc_raw])
+        idxs.extend([_bundle_shift(b, logical="banned_install_tokens", raw_idx=int(x)) for x in inst_raw])
+
+        # One constant-shape signed PIR call.
+        bits, ev = self._query_bits_signed_or_single_server(
+            db_name=str(b.db),
+            idxs=idxs,
+            action_id=action_id,
+            domain_size=int(b.bundle_domain_size),
+        )
+        if len(bits) != len(idxs):
+            raise RuntimeError("policy_server_wrong_batch_size")
+
+        n_tok = int(self.max_tokens)
+        n_dom = int(self.max_skill_domains)
+        rec_ok = int(bits[0]) & 1
+        dom_ok = int(bits[1]) & 1
+        dlp_hit = _bool_or([int(x) & 1 for x in bits[2 : 2 + n_tok]])
+        ioc_hit = _bool_or([int(x) & 1 for x in bits[2 + n_tok : 2 + n_tok + n_dom]])
+        install_hit = _bool_or([int(x) & 1 for x in bits[2 + n_tok + n_dom : 2 + n_tok + n_dom + n_tok]])
+        feats = {
+            "recipient_ok": int(rec_ok),
+            "domain_ok": int(dom_ok),
+            "dlp_hit": int(dlp_hit),
+            "ioc_hit": int(ioc_hit),
+            "install_hit": int(install_hit),
+        }
+        return feats, {"unified_bits": ev}
+
+    def _mpc_init(self, *, action_id: str, request_sha256: str, input0: dict[int, int], input1: dict[int, int]) -> None:
+        gates = [{"op": g.op, "out": int(g.out), "a": g.a, "b": g.b, "value": g.value} for g in self._circuit.gates]
+        payload0 = {
+            "action_id": action_id,
+            "program_id": str(self.program_id),
+            "request_sha256": str(request_sha256),
+            "n_wires": int(self._circuit.n_wires),
+            "gates": gates,
+            "input_shares": {str(k): int(v) & 1 for k, v in (input0 or {}).items()},
+            "outputs": {k: int(v) for k, v in self._circuit.outputs.items()},
+            "ttl_seconds": int(os.getenv("MPC_SESSION_TTL_S", "30")),
+        }
+        payload1 = dict(payload0)
+        payload1["input_shares"] = {str(k): int(v) & 1 for k, v in (input1 or {}).items()}
+
+        f0 = _HTTP_POOL.submit(requests.post, f"{self.pir.policy0_url}/mpc/init", json=payload0, timeout=10)
+        f1 = _HTTP_POOL.submit(requests.post, f"{self.pir.policy1_url}/mpc/init", json=payload1, timeout=10)
+        r0 = f0.result()
+        r1 = f1.result()
+        r0.raise_for_status()
+        r1.raise_for_status()
+        if not r0.json().get("ok") or not r1.json().get("ok"):
+            raise RuntimeError("mpc_init_failed")
+
+    def _mpc_eval_and_rounds(self, *, action_id: str) -> None:
+        for round_gates in self._circuit.and_rounds:
+            triples0: list[dict[str, Any]] = []
+            triples1: list[dict[str, Any]] = []
+            for gi in round_gates:
+                a = secrets.randbits(1) & 1
+                b = secrets.randbits(1) & 1
+                c = (a & b) & 1
+                a0, a1 = _share_bit(a)
+                b0, b1 = _share_bit(b)
+                c0, c1 = _share_bit(c)
+                triples0.append({"gate_index": int(gi), "a_share": int(a0), "b_share": int(b0), "c_share": int(c0)})
+                triples1.append({"gate_index": int(gi), "a_share": int(a1), "b_share": int(b1), "c_share": int(c1)})
+
+            m0 = {"action_id": action_id, "triples": triples0}
+            m1 = {"action_id": action_id, "triples": triples1}
+            f0 = _HTTP_POOL.submit(requests.post, f"{self.pir.policy0_url}/mpc/and_mask_batch", json=m0, timeout=10)
+            f1 = _HTTP_POOL.submit(requests.post, f"{self.pir.policy1_url}/mpc/and_mask_batch", json=m1, timeout=10)
+            r0 = f0.result()
+            r1 = f1.result()
+            r0.raise_for_status()
+            r1.raise_for_status()
+            j0 = r0.json()
+            j1 = r1.json()
+            d0s = j0.get("d_shares") or []
+            e0s = j0.get("e_shares") or []
+            d1s = j1.get("d_shares") or []
+            e1s = j1.get("e_shares") or []
+            if not (isinstance(d0s, list) and isinstance(e0s, list) and isinstance(d1s, list) and isinstance(e1s, list)):
+                raise RuntimeError("mpc_bad_batch_reply")
+            if not (len(d0s) == len(e0s) == len(d1s) == len(e1s) == len(round_gates)):
+                raise RuntimeError("mpc_bad_batch_size")
+
+            opens: list[dict[str, Any]] = []
+            for k, gi in enumerate(round_gates):
+                d = (int(d0s[k]) ^ int(d1s[k])) & 1
+                e = (int(e0s[k]) ^ int(e1s[k])) & 1
+                opens.append({"gate_index": int(gi), "d": int(d), "e": int(e)})
+            fin = {"action_id": action_id, "opens": opens}
+            f0 = _HTTP_POOL.submit(requests.post, f"{self.pir.policy0_url}/mpc/and_finish_batch", json=fin, timeout=10)
+            f1 = _HTTP_POOL.submit(requests.post, f"{self.pir.policy1_url}/mpc/and_finish_batch", json=fin, timeout=10)
+            r0 = f0.result()
+            r1 = f1.result()
+            r0.raise_for_status()
+            r1.raise_for_status()
+
+    def _mpc_finalize(self, *, action_id: str) -> dict[str, Any]:
+        payload = {"action_id": action_id}
+        f0 = _HTTP_POOL.submit(requests.post, f"{self.pir.policy0_url}/mpc/finalize", json=payload, timeout=10)
+        f1 = _HTTP_POOL.submit(requests.post, f"{self.pir.policy1_url}/mpc/finalize", json=payload, timeout=10)
+        r0 = f0.result()
+        r1 = f1.result()
+        r0.raise_for_status()
+        r1.raise_for_status()
+        j0 = r0.json()
+        j1 = r1.json()
+        if not j0.get("ok") or not j1.get("ok"):
+            raise RuntimeError("mpc_finalize_failed")
+        return {"policy0": j0.get("proof"), "policy1": j1.get("proof")}
+
+    def preview_egress(
+        self,
+        *,
+        intent_id: str,
+        inputs: Dict[str, Any],
+        constraints: Dict[str, Any],
+        session: str,
+        caller: str,
+    ) -> Dict[str, Any]:
+        _ = constraints
+        if self.handles is None:
+            raise RuntimeError("unified_egress_requires_handle_store")
+        intent = str(intent_id)
+        if intent not in ("SendMessage", "FetchResource", "PostWebhook", "CheckMessagePolicy", "CheckWebhookPolicy", "CheckFetchPolicy"):
+            raise ValueError("unsupported intent for unified egress preview")
+
+        is_send = 1 if intent in ("SendMessage", "CheckMessagePolicy") else 0
+        is_fetch = 1 if intent in ("FetchResource", "CheckFetchPolicy") else 0
+        is_webhook = 1 if intent in ("PostWebhook", "CheckWebhookPolicy") else 0
+        is_skill = 0
+
+        recipient_real = str(inputs.get("recipient", ""))
+        text_real = str(inputs.get("text", ""))
+        domain_real = str(inputs.get("domain", "example.com"))
+        channel_real = str(inputs.get("channel", "email"))
+        resource_id_real = str(inputs.get("resource_id", "example"))
+        path_real = str(inputs.get("path", "/"))
+
+        dummy_recipient = os.getenv("DUMMY_RECIPIENT", "alice@example.com")
+        dummy_domain = os.getenv("DUMMY_DOMAIN", "example.com")
+        dummy_text = os.getenv("DUMMY_TEXT", "hello world")
+
+        recipient = recipient_real if is_send else str(dummy_recipient)
+        text = text_real if (is_send or is_webhook) else str(dummy_text)
+        domain = domain_real if (is_fetch or is_webhook) else str(dummy_domain)
+
+        artifacts = inputs.get("artifacts", []) or []
+        # Hard-stop: sensitive handles are a gateway-TCB property.
+        for a in artifacts or []:
+            hid = a.get("handle") if isinstance(a, dict) else None
+            if not hid:
+                continue
+            rec = self.handles.get(str(hid))
+            if not rec:
+                continue
+            if rec.session != session or rec.caller != caller or rec.sensitivity.upper() == "HIGH":
+                return {
+                    "allow_pre": False,
+                    "need_confirm": False,
+                    "patch": SanitizePatch(PATCH_NOOP, {}).to_dict(),
+                    "reason_code": "HIGH_HANDLE_BLOCKED",
+                    "details": "Sensitive handle cannot be externalized.",
+                    "evidence": {},
+                    "tx_id": None,
+                }
+
+        action_id = f"a_{secrets.token_urlsafe(12)}"
+
+        canonical_intent = ("SendMessage" if is_send else ("FetchResource" if is_fetch else "PostWebhook"))
+        sha_inputs: dict[str, Any] = {"recipient": recipient, "domain": domain, "text": text}
+        if canonical_intent == "SendMessage":
+            sha_inputs["channel"] = channel_real
+        elif canonical_intent == "FetchResource":
+            sha_inputs["resource_id"] = resource_id_real
+        else:
+            sha_inputs["path"] = path_real
+            sha_inputs["body"] = text
+        request_sha = request_sha256_v1(intent_id=canonical_intent, caller=caller, session=session, inputs=sha_inputs)
+
+        if self.policy_bypass:
+            patch = SanitizePatch(PATCH_NOOP, {})
+            preview = {
+                "program_id": self.program_id,
+                "action_id": action_id,
+                "request_sha256": request_sha,
+                "allow_pre": True,
+                "need_confirm": False,
+                "patch": patch.to_dict(),
+                "pir_evidence": {},
+                "commit_evidence": {},
+                "baseline_mode": "policy_bypass",
+            }
+            tx_rec = self.tx.mint(
+                intent_id=str(intent_id),
+                action_id=action_id,
+                request_sha256=request_sha,
+                caller=caller,
+                session=session,
+                preview=preview,
+                ttl_seconds=int(os.getenv("TX_TTL_S", "120")),
+            )
+            return {
+                "allow_pre": True,
+                "need_confirm": False,
+                "patch": patch.to_dict(),
+                "reason_code": "ALLOW_INSECURE_POLICY_BYPASS",
+                "details": "",
+                "evidence": {"commit": {}, "pir": {}},
+                "tx_id": tx_rec.tx_id,
+                "action_id": action_id,
+                "request_sha256": request_sha,
+            }
+
+        caps = get_capabilities(caller)
+        cap_send = 1 if caps.egress_ok(kind="send_message") else 0
+        cap_fetch = 1 if caps.egress_ok(kind="fetch_resource") else 0
+        cap_webhook = 1 if caps.egress_ok(kind="post_webhook") else 0
+        cap_skill = 0
+
+        feats, pir_ev = self._pir_unified_plan(
+            recipient=recipient,
+            domain=domain,
+            text=text,
+            skill_domains=[],
+            skill_md=os.getenv("DUMMY_SKILL_MD", ""),
+            action_id=action_id,
+        )
+
+        # Optional DFA confirm stage (keeps legacy demo semantics).
+        dlp_mode = (os.getenv("DLP_MODE", "fourgram") or "fourgram").strip().lower()
+        dfa_ev = None
+        if int(feats.get("dlp_hit", 0)) == 1 and dlp_mode == "dfa" and (is_send or is_webhook):
+            from .guardrails import ObliviousGuardrails  # local import to avoid cycles
+
+            tmp = ObliviousGuardrails(
+                pir=self.pir,
+                handles=self.handles,
+                domain_size=self.domain_size,
+                max_tokens=self.max_tokens,
+                dlp_mode="dfa",
+                signed_pir=True,
+            )
+            matched, dfa_ev = tmp._dfa_match(text, action_id=action_id)
+            feats = dict(feats)
+            feats["dlp_hit"] = 1 if matched else 0
+            if dfa_ev is not None:
+                pir_ev = dict(pir_ev)
+                pir_ev["dfa"] = dfa_ev
+
+        # Secret-share MPC inputs.
+        in0: dict[int, int] = {}
+        in1: dict[int, int] = {}
+
+        def set_in(name: str, bit: int) -> None:
+            wi = int(self._circuit.inputs[name])
+            s0, s1 = _share_bit(int(bit) & 1)
+            in0[wi] = int(s0) & 1
+            in1[wi] = int(s1) & 1
+
+        for nm, bit in [
+            ("intent_send", is_send),
+            ("intent_fetch", is_fetch),
+            ("intent_webhook", is_webhook),
+            ("intent_skill_install", is_skill),
+            ("cap_send", cap_send),
+            ("cap_fetch", cap_fetch),
+            ("cap_webhook", cap_webhook),
+            ("cap_skill_install", cap_skill),
+            ("recipient_ok", int(feats["recipient_ok"])),
+            ("domain_ok", int(feats["domain_ok"])),
+            ("dlp_hit", int(feats["dlp_hit"])),
+            ("high_handle_present", 0),
+            ("ioc_hit", int(feats["ioc_hit"])),
+            ("install_hit", int(feats["install_hit"])),
+            ("base64_obf", 0),
+        ]:
+            set_in(nm, int(bit) & 1)
+
+        self._mpc_init(action_id=action_id, request_sha256=request_sha, input0=in0, input1=in1)
+        self._mpc_eval_and_rounds(action_id=action_id)
+        commit_ev = self._mpc_finalize(action_id=action_id)
+
+        p0 = (commit_ev.get("policy0") or {}) if isinstance(commit_ev, dict) else {}
+        p1 = (commit_ev.get("policy1") or {}) if isinstance(commit_ev, dict) else {}
+        o0 = p0.get("outputs") or {}
+        o1 = p1.get("outputs") or {}
+        allow_pre = (int(o0.get("allow_pre", 0)) ^ int(o1.get("allow_pre", 0))) & 1
+        need_confirm = (int(o0.get("need_confirm", 0)) ^ int(o1.get("need_confirm", 0))) & 1
+        patch0 = (int(o0.get("patch0", 0)) ^ int(o1.get("patch0", 0))) & 1
+        patch1 = (int(o0.get("patch1", 0)) ^ int(o1.get("patch1", 0))) & 1
+        patch_id = (patch0 | (patch1 << 1)) & 3
+
+        patch_params: dict[str, Any] = {}
+        if patch_id == PATCH_CLAMP_LEN:
+            patch_params["max_chars"] = int(os.getenv("PATCH_CLAMP_MAX_CHARS", "256"))
+        if patch_id == PATCH_REWRITE_DOMAIN_TO_PROXY:
+            patch_params["proxy_domain"] = os.getenv("PATCH_PROXY_DOMAIN", "proxy.example.com")
+        patch = SanitizePatch(int(patch_id), patch_params)
+
+        reason = "ALLOW"
+        if allow_pre != 1:
+            if int(feats["recipient_ok"]) != 1 and is_send:
+                reason = "RECIPIENT_NOT_ALLOWED"
+            elif int(feats["domain_ok"]) != 1 and (is_fetch or is_webhook):
+                reason = "DOMAIN_NOT_ALLOWED"
+            else:
+                reason = "POLICY_DENY"
+        elif need_confirm == 1:
+            reason = "REQUIRE_CONFIRM"
+
+        preview = {
+            "program_id": str(self.program_id),
+            "action_id": action_id,
+            "request_sha256": request_sha,
+            "allow_pre": bool(allow_pre == 1),
+            "need_confirm": bool(need_confirm == 1),
+            "patch": patch.to_dict(),
+            "pir_evidence": pir_ev,
+            "commit_evidence": commit_ev,
+        }
+        tx_rec = self.tx.mint(
+            intent_id=str(intent_id),
+            action_id=action_id,
+            request_sha256=request_sha,
+            caller=caller,
+            session=session,
+            preview=preview,
+            ttl_seconds=int(os.getenv("TX_TTL_S", "120")),
+        )
+
+        return {
+            "allow_pre": bool(allow_pre == 1),
+            "need_confirm": bool(need_confirm == 1),
+            "patch": patch.to_dict(),
+            "reason_code": reason,
+            "details": "",
+            "evidence": {"commit": commit_ev, "pir": pir_ev},
+            "tx_id": tx_rec.tx_id,
+            "action_id": action_id,
+            "request_sha256": request_sha,
+        }
+
+    def preview_skill_install(
+        self,
+        *,
+        skill_id: str,
+        skill_digest: str,
+        skill_md: str,
+        domains: list[str],
+        base64_obf: bool,
+        session: str,
+        caller: str,
+    ) -> Dict[str, Any]:
+        caps = get_capabilities(caller)
+        cap_install = 1 if caps.egress_ok(kind="skill_install") else 0
+
+        action_id = f"a_{secrets.token_urlsafe(12)}"
+        request_sha = request_sha256_v1(
+            intent_id="CommitSkillInstall",
+            caller=str(caller),
+            session=str(session),
+            inputs={"skill_id": str(skill_id), "skill_digest": str(skill_digest)},
+        )
+
+        if self.policy_bypass:
+            patch = SanitizePatch(PATCH_NOOP, {})
+            preview = {
+                "program_id": str(self.program_id),
+                "action_id": action_id,
+                "request_sha256": request_sha,
+                "allow_pre": True,
+                "need_confirm": False,
+                "patch": patch.to_dict(),
+                "pir_evidence": {},
+                "commit_evidence": {},
+                "baseline_mode": "policy_bypass",
+            }
+            tx_rec = self.tx.mint(
+                intent_id="CommitSkillInstall",
+                action_id=action_id,
+                request_sha256=request_sha,
+                caller=caller,
+                session=session,
+                preview=preview,
+                ttl_seconds=int(os.getenv("TX_TTL_S", "120")),
+            )
+            return {
+                "allow_pre": True,
+                "need_confirm": False,
+                "patch": patch.to_dict(),
+                "reason_code": "ALLOW_INSECURE_POLICY_BYPASS",
+                "details": "",
+                "evidence": {"commit": {}, "pir": {}},
+                "tx_id": tx_rec.tx_id,
+                "action_id": action_id,
+                "request_sha256": request_sha,
+                "risk_categories": [],
+                "risk_explanation": "Policy bypass mode enabled.",
+            }
+
+        # Intent bits
+        is_send, is_fetch, is_webhook, is_skill = 0, 0, 0, 1
+
+        feats, pir_ev = self._pir_unified_plan(
+            recipient=os.getenv("DUMMY_RECIPIENT", "alice@example.com"),
+            domain=os.getenv("DUMMY_DOMAIN", "example.com"),
+            text=os.getenv("DUMMY_TEXT", "hello world"),
+            skill_domains=list(domains or []),
+            skill_md=str(skill_md or ""),
+            action_id=action_id,
+        )
+
+        in0: dict[int, int] = {}
+        in1: dict[int, int] = {}
+
+        def set_in(name: str, bit: int) -> None:
+            wi = int(self._circuit.inputs[name])
+            s0, s1 = _share_bit(int(bit) & 1)
+            in0[wi] = int(s0) & 1
+            in1[wi] = int(s1) & 1
+
+        for nm, bit in [
+            ("intent_send", is_send),
+            ("intent_fetch", is_fetch),
+            ("intent_webhook", is_webhook),
+            ("intent_skill_install", is_skill),
+            ("cap_send", 0),
+            ("cap_fetch", 0),
+            ("cap_webhook", 0),
+            ("cap_skill_install", cap_install),
+            ("recipient_ok", int(feats["recipient_ok"])),
+            ("domain_ok", int(feats["domain_ok"])),
+            ("dlp_hit", int(feats["dlp_hit"])),
+            ("high_handle_present", 0),
+            ("ioc_hit", int(feats["ioc_hit"])),
+            ("install_hit", int(feats["install_hit"])),
+            ("base64_obf", 1 if base64_obf else 0),
+        ]:
+            set_in(nm, int(bit) & 1)
+
+        self._mpc_init(action_id=action_id, request_sha256=request_sha, input0=in0, input1=in1)
+        self._mpc_eval_and_rounds(action_id=action_id)
+        commit_ev = self._mpc_finalize(action_id=action_id)
+
+        p0 = (commit_ev.get("policy0") or {}) if isinstance(commit_ev, dict) else {}
+        p1 = (commit_ev.get("policy1") or {}) if isinstance(commit_ev, dict) else {}
+        o0 = p0.get("outputs") or {}
+        o1 = p1.get("outputs") or {}
+        allow_pre = (int(o0.get("allow_pre", 0)) ^ int(o1.get("allow_pre", 0))) & 1
+        need_confirm = (int(o0.get("need_confirm", 0)) ^ int(o1.get("need_confirm", 0))) & 1
+        patch0 = (int(o0.get("patch0", 0)) ^ int(o1.get("patch0", 0))) & 1
+        patch1 = (int(o0.get("patch1", 0)) ^ int(o1.get("patch1", 0))) & 1
+        patch_id = (patch0 | (patch1 << 1)) & 3
+
+        # Keep a single patch space across intents. For skills, patch is advisory.
+        patch_params: dict[str, Any] = {}
+        if patch_id == PATCH_CLAMP_LEN:
+            patch_params["max_chars"] = int(os.getenv("SKILL_MD_MAX_CHARS", "2000"))
+        patch = SanitizePatch(int(patch_id), patch_params)
+
+        reason = "ALLOW"
+        if allow_pre != 1:
+            reason = "IOC_BLOCKED" if int(feats["ioc_hit"]) == 1 else "POLICY_DENY"
+        elif need_confirm == 1:
+            reason = "REQUIRE_CONFIRM"
+
+        preview = {
+            "program_id": str(self.program_id),
+            "action_id": action_id,
+            "request_sha256": request_sha,
+            "allow_pre": bool(allow_pre == 1),
+            "need_confirm": bool(need_confirm == 1),
+            "patch": patch.to_dict(),
+            "skill_id": str(skill_id),
+            "skill_digest": str(skill_digest),
+            "pir_evidence": pir_ev,
+            "commit_evidence": commit_ev,
+        }
+        tx_rec = self.tx.mint(
+            intent_id="CommitSkillInstall",
+            action_id=action_id,
+            request_sha256=request_sha,
+            caller=caller,
+            session=session,
+            preview=preview,
+            ttl_seconds=int(os.getenv("TX_TTL_S", "120")),
+        )
+
+        return {
+            "allow_pre": bool(allow_pre == 1),
+            "need_confirm": bool(need_confirm == 1),
+            "patch": patch.to_dict(),
+            "reason_code": reason,
+            "evidence": {"commit": commit_ev, "pir": pir_ev},
+            "tx_id": tx_rec.tx_id,
+            "action_id": action_id,
+            "request_sha256": request_sha,
+        }

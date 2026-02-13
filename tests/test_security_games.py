@@ -47,7 +47,7 @@ class SecurityGameTests(unittest.TestCase):
 
     def test_dual_valid_commit_proofs_accept(self) -> None:
         action_id = "a_test"
-        program_id = "egress_v1"
+        program_id = "policy_unified_v1"
         req_sha = "ab" * 32
         p0 = _mk_commit_proof(
             server_id=0,
@@ -73,7 +73,7 @@ class SecurityGameTests(unittest.TestCase):
 
     def test_missing_second_proof_rejected(self) -> None:
         action_id = "a_test_missing"
-        program_id = "egress_v1"
+        program_id = "policy_unified_v1"
         req_sha = "cd" * 32
         p0 = _mk_commit_proof(
             server_id=0,
@@ -90,7 +90,7 @@ class SecurityGameTests(unittest.TestCase):
 
     def test_bad_mac_rejected(self) -> None:
         action_id = "a_test_mac"
-        program_id = "egress_v1"
+        program_id = "policy_unified_v1"
         req_sha = "ef" * 32
         p0 = _mk_commit_proof(
             server_id=0,
@@ -116,7 +116,7 @@ class SecurityGameTests(unittest.TestCase):
 
     def test_request_hash_binding_rejected(self) -> None:
         action_id = "a_test_sha"
-        program_id = "egress_v1"
+        program_id = "policy_unified_v1"
         req_sha = "12" * 32
         p0 = _mk_commit_proof(
             server_id=0,
@@ -142,4 +142,3 @@ class SecurityGameTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
