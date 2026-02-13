@@ -889,4 +889,28 @@ native runtime baselines（无 MIRAGE）：
 - `artifact_out/native_baselines/native_guardrail_eval.json`
 - `artifact_out/campaign/real_agent_campaign.json`
 
+样例（来自一次本地 smoke run；以输出文件中的 `seed` 与计数为准）：
+
+`paper_eval`（基线对比，节选）：
+
+| mode | 攻击阻断率 | 良性误报率 | p95 延迟（ms） | 吞吐（ops/s） |
+|---|---:|---:|---:|---:|
+| `mirage_full` | 0.750 | 0.333 | 1602.966 | 0.801 |
+| `policy_only` | 0.750 | 0.333 | 2603.220 | 0.538 |
+| `sandbox_only` | 0.250 | 0.000 | 0.748 | 2746.934 |
+| `single_server_policy` | 0.750 | 0.333 | 73.988 | 21.867 |
+
+解释要点：
+- `single_server_policy` 主要用于“隐私 vs 性能”对照：它更快，但牺牲 SAP（单审计方隐私）目标。
+- `sandbox_only` 是显式旁路策略检查的 ablation：吞吐高但安全性显著下降，用于证明“只有运行时/沙箱并不足以覆盖攻击集”。
+
+`policy_perf`（policy server 曲线，节选为本机最佳点的 effective keys/s）：
+- Python backend：约 `149.12` effective keys/s（`logical_batch=8,pad_to=0,concurrency=4`）
+- Rust backend：约 `6964.44` effective keys/s（`logical_batch=128,pad_to=128,concurrency=4`）
+
+`real_agent_campaign`（真实 agent 闭环，节选）：
+- OpenClaw + MIRAGE：`benign_allow_rate=1.0`，`attack_block_rate=1.0`（`n_ok=1`）
+- Scripted MCP：`benign_allow_rate=1.0`，`attack_block_rate=1.0`（`n_ok=1`）
+- NanoClaw：若缺少凭据会被标记为 `SKIPPED`（不影响流水线其他部分）
+
 本 README 的第 16 节仍保留了 demo artifact 的样例数值；paper-grade 结果以第 24 节这些输出为准（可在论文中引用并附上 seed/commit）。
