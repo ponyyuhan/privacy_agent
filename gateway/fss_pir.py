@@ -4,6 +4,7 @@ import base64
 import json
 import math
 import os
+import secrets
 import threading
 import time
 from dataclasses import dataclass
@@ -414,7 +415,9 @@ class _SignedBitBatchMixer:
     def _mk_dummy_req(self) -> tuple[str, list[str], list[str]]:
         # Dummy subrequest: random action_id + random index keys. Indistinguishable
         # from real subrequests under DPF security (keys hide indices).
-        action_id = f"cov_{int(time.time()*1000)}_{os.urandom(4).hex()}"
+        # Keep the same action_id *shape* as real requests (e.g., "a_<urlsafe>") so
+        # the policy servers cannot trivially distinguish cover vs real by prefix.
+        action_id = f"a_{secrets.token_urlsafe(12)}"
         ds = int(self.cfg.domain_size)
         nbits = _domain_bits(ds)
         keys0: list[str] = []

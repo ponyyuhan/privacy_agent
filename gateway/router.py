@@ -27,7 +27,7 @@ class IntentRouter:
         self.skill_store = SkillStore()
         self.fs = FSExec(handles)
         self.msg = MsgExec(handles, self.policy)
-        self.crypto = CryptoExec(handles)
+        self.crypto = CryptoExec(handles, self.tx_store)
         self.net = NetExec(handles, self.policy)
         self.webhook = WebhookExec(handles, self.policy)
         self.skill = SkillExec(handles, self.skill_policy, self.skill_store)

@@ -7,6 +7,7 @@ export PYTHONPATH="$ROOT"
 
 OUT_DIR="${OUT_DIR:-$ROOT/artifact_out}"
 mkdir -p "$OUT_DIR"
+export AUDIT_LOG_PATH="${AUDIT_LOG_PATH:-$OUT_DIR/audit.jsonl}"
 
 # Deterministic defaults for reproducibility.
 export MIRAGE_SEED="${MIRAGE_SEED:-7}"
@@ -27,7 +28,11 @@ echo "[paper] 2) formal security game check (NBE theorem harness)"
 PYTHONPATH=. python scripts/security_game_nbe_check.py | tee "$OUT_DIR/security_game_nbe_path.txt"
 
 echo "[paper] 3) strong baseline + large-scale eval"
-PYTHONPATH=. python scripts/paper_eval.py | tee "$OUT_DIR/paper_eval_path.txt"
+if command -v cargo >/dev/null 2>&1; then
+  POLICY_BACKEND="${POLICY_BACKEND:-rust}" PYTHONPATH=. python scripts/paper_eval.py | tee "$OUT_DIR/paper_eval_path.txt"
+else
+  POLICY_BACKEND="${POLICY_BACKEND:-python}" PYTHONPATH=. python scripts/paper_eval.py | tee "$OUT_DIR/paper_eval_path.txt"
+fi
 
 echo "[paper] 4) policy server throughput curves (batch/padding, python+rust)"
 PYTHONPATH=. python scripts/bench_policy_server_curves.py | tee "$OUT_DIR/policy_curve_path.txt"
@@ -52,10 +57,13 @@ if [[ "$RC" -ne 0 ]]; then
   echo "[paper] real_agent_campaign returned $RC (continuing for reproducibility pipeline)." | tee "$OUT_DIR/real_agent_campaign_warn.txt"
 fi
 
-echo "[paper] 8) auto plots"
+echo "[paper] 8) verify audit log chaining"
+PYTHONPATH=. python scripts/verify_audit_log.py | tee "$OUT_DIR/audit_verify.json"
+
+echo "[paper] 9) auto plots"
 PYTHONPATH=. python scripts/plot_paper_figures.py | tee "$OUT_DIR/figures_path.txt"
 
-echo "[paper] 9) repro manifest"
+echo "[paper] 10) repro manifest"
 PYTHONPATH=. python scripts/write_repro_manifest.py | tee "$OUT_DIR/repro_manifest_path.txt"
 
 echo "[paper] done; outputs in $OUT_DIR"

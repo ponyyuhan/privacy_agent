@@ -4,10 +4,12 @@ import hashlib
 from typing import Dict, Any
 from ..handles import HandleStore
 from ..secret_store import SecretStore
+from ..tx_store import TxStore
 
 class CryptoExec:
-    def __init__(self, handles: HandleStore):
+    def __init__(self, handles: HandleStore, tx_store: TxStore | None = None):
         self.handles = handles
+        self.tx_store = tx_store
         self.secrets = SecretStore()
         # Best-effort redaction for demo output. The real design would use structured declassification.
         self._redact_res = [
@@ -56,8 +58,17 @@ class CryptoExec:
         if not user_confirm:
             return {"status": "DENY", "summary": "Session revocation requires explicit user confirmation.", "data": {}, "artifacts": [], "reason_code": "REQUIRE_CONFIRM"}
         # Caller is included for audit/binding but session revocation is scoped to the current session.
-        n = self.handles.revoke_session(session)
-        return {"status": "OK", "summary": "Session handles revoked.", "data": {"revoked": int(n)}, "artifacts": [], "reason_code": "ALLOW"}
+        n_handles = self.handles.revoke_session(session)
+        n_tx = 0
+        if self.tx_store is not None:
+            n_tx = self.tx_store.revoke_session(session)
+        return {
+            "status": "OK",
+            "summary": "Session revoked (handles + tx).",
+            "data": {"revoked_handles": int(n_handles), "revoked_tx": int(n_tx)},
+            "artifacts": [],
+            "reason_code": "ALLOW",
+        }
 
     def read_secret(self, inputs: Dict[str, Any], session: str, caller: str = "unknown") -> Dict[str, Any]:
         # In a real system this would use workload identity / attestation to mint short-lived capability tokens.

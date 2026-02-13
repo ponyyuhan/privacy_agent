@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import secrets
 from dataclasses import dataclass
-from typing import List, Tuple
+from typing import Iterable, List, Tuple
 
 
 SEED_BYTES = 16  # 128-bit security parameter (lambda)
@@ -206,16 +206,19 @@ def gen_dpf_keys(*, alpha: int, beta: int, domain_bits: int) -> Tuple[bytes, byt
 
 def eval_dpf_point(*, key_bytes: bytes, x: int, party: int) -> int:
     key = DpfKey.decode(key_bytes)
+    return _eval_dpf_point_decoded(key=key, x=x, party=party)
+
+
+def _eval_dpf_point_decoded(*, key: DpfKey, x: int, party: int) -> int:
     if party not in (0, 1):
         raise DpfError("party must be 0/1")
     if x < 0 or x >= (1 << key.domain_bits):
         raise DpfError("x out of range")
 
-    bits = _int_to_bits(x, key.domain_bits)
     s = key.seed0
-    t = party
-    for i, xb in enumerate(bits):
-        cw = key.cws[i]
+    t = party & 1
+    for level in range(int(key.domain_bits)):
+        cw = key.cws[level]
         if key.version == 1:
             # Legacy v1 PRG: 2x SHA-256 with domain separation.
             h0 = hashlib.sha256(s + b"\x00").digest()
@@ -230,6 +233,7 @@ def eval_dpf_point(*, key_bytes: bytes, x: int, party: int) -> int:
             sR = _xor_bytes(sR, cw.s_cw)
             tR ^= cw.t_r
 
+        xb = (int(x) >> (int(key.domain_bits) - 1 - level)) & 1
         if xb == 0:
             s, t = sL, (tL & 1)
         else:
@@ -239,7 +243,29 @@ def eval_dpf_point(*, key_bytes: bytes, x: int, party: int) -> int:
         out = hashlib.sha256(s + b"convert").digest()[0] & 1
     else:
         out = _convert_to_bit(s)
-    return (out ^ (t & key.cw_last)) & 1
+    return (int(out) ^ (int(t) & int(key.cw_last))) & 1
+
+
+def eval_dpf_pir_parity_share_sparse(*, key_bytes: bytes, ones: Iterable[int], party: int) -> int:
+    """
+    Sparse PIR evaluation for a bitset DB with few 1-bits.
+
+    If DB[i]=1 only for i in S, then:
+        ans_share = XOR_i (DB[i] & f_party(i)) = XOR_{i in S} f_party(i).
+
+    This reduces server work from O(N) to O(|S| log N) when the DB is sparse.
+    """
+    key = DpfKey.decode(key_bytes)
+    if party not in (0, 1):
+        raise DpfError("party must be 0/1")
+    domain_size = 1 << int(key.domain_bits)
+    ans = 0
+    for idx in ones:
+        i = int(idx)
+        if i < 0 or i >= domain_size:
+            continue
+        ans ^= _eval_dpf_point_decoded(key=key, x=i, party=party) & 1
+    return int(ans) & 1
 
 
 def eval_dpf_pir_parity_share(*, key_bytes: bytes, db_bitset: bytes, party: int) -> int:

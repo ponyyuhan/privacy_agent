@@ -159,3 +159,22 @@ class TxStore:
                 self._db.commit()
         return True
 
+    def revoke_session(self, session: str) -> int:
+        """
+        Revoke all outstanding tx for a given session.
+
+        This is a coarse emergency stop: once a session is revoked, any previously minted
+        PREVIEW tokens are invalidated and cannot be committed.
+        """
+        n = 0
+        for rec in self._store.values():
+            if rec.session == session and not rec.revoked:
+                rec.revoked = True
+                n += 1
+        if self._db is not None:
+            with self._lock:
+                cur = self._db.execute("UPDATE tx SET revoked=1 WHERE session=? AND revoked=0", (session,))
+                self._db.commit()
+                if cur.rowcount and int(cur.rowcount) > n:
+                    n = int(cur.rowcount)
+        return int(n)

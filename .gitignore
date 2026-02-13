@@ -12,6 +12,7 @@ policy_server/data/*.bitset
 
 # Local artifact outputs
 artifact_out/
+artifact_out_tmp/
 
 # Local scratch
 tmp/

@@ -30,6 +30,7 @@ struct AppState {
     mac_keys: HashMap<String, Vec<u8>>, // kid -> key bytes
     active_kid: String,
     bitsets: Arc<HashMap<String, Arc<Vec<u8>>>>,
+    bitset_ones: Arc<HashMap<String, Arc<Vec<u32>>>>,
     blocks: Arc<HashMap<String, (Arc<Vec<u8>>, usize)>>,
     mpc_sessions: Arc<Mutex<HashMap<String, MpcSession>>>,
 }
@@ -209,6 +210,17 @@ struct MpcAndMaskBatchReq {
 }
 
 #[derive(Deserialize)]
+struct MpcAndMaskMultiSubReq {
+    action_id: String,
+    triples: Vec<MpcTripleShare>,
+}
+
+#[derive(Deserialize)]
+struct MpcAndMaskMultiReq {
+    requests: Vec<MpcAndMaskMultiSubReq>,
+}
+
+#[derive(Deserialize)]
 struct MpcAndFinishReq {
     action_id: String,
     gate_index: usize,
@@ -227,6 +239,17 @@ struct MpcAndOpen {
 struct MpcAndFinishBatchReq {
     action_id: String,
     opens: Vec<MpcAndOpen>,
+}
+
+#[derive(Deserialize)]
+struct MpcAndFinishMultiSubReq {
+    action_id: String,
+    opens: Vec<MpcAndOpen>,
+}
+
+#[derive(Deserialize)]
+struct MpcAndFinishMultiReq {
+    requests: Vec<MpcAndFinishMultiSubReq>,
 }
 
 #[derive(Deserialize)]
@@ -362,6 +385,76 @@ fn xor_inplace_u64(dst: &mut [u8], src: &[u8]) {
         dst[i] ^= src[i];
         i += 1;
     }
+}
+
+#[inline]
+fn prefer_sparse(domain_size: usize, domain_bits: usize, ones_len: usize) -> bool {
+    // Dense PIR parity share eval is O(N). Sparse eval is O(|ones| * log N).
+    // Use sparse only when it's expected to be much cheaper (>=4x).
+    if domain_size == 0 {
+        return true;
+    }
+    let sparse_cost = ones_len.saturating_mul(domain_bits.saturating_add(1));
+    sparse_cost.saturating_mul(4) < domain_size
+}
+
+fn eval_point_share(key: &DpfKey, x: usize, party: u8) -> Result<u8, String> {
+    if party > 1 {
+        return Err("party must be 0/1".to_string());
+    }
+    let domain_size = 1usize << (key.domain_bits as usize);
+    if x >= domain_size {
+        return Err("x out of range".to_string());
+    }
+
+    let mut s = key.seed0;
+    let mut t = party & 1;
+    for level in 0..(key.domain_bits as usize) {
+        let cw = &key.cws[level];
+        let (mut s_l, mut t_l, mut s_r, mut t_r) = if key.version == 1 {
+            prg_v1(&s)
+        } else {
+            prg_v2(&s)
+        };
+        if t == 1 {
+            s_l = xor16(&s_l, &cw.s_cw);
+            t_l ^= cw.t_l;
+            s_r = xor16(&s_r, &cw.s_cw);
+            t_r ^= cw.t_r;
+        }
+        let shift = (key.domain_bits as usize) - 1 - level;
+        let xb = (x >> shift) & 1;
+        if xb == 0 {
+            s = s_l;
+            t = t_l & 1;
+        } else {
+            s = s_r;
+            t = t_r & 1;
+        }
+    }
+
+    let out = if key.version == 1 {
+        convert_bit_v1(&s)
+    } else {
+        convert_bit_v2(&s)
+    };
+    Ok((out ^ (t & key.cw_last)) & 1)
+}
+
+fn eval_parity_share_sparse(key: &DpfKey, ones: &[u32], party: u8) -> Result<u8, String> {
+    if party > 1 {
+        return Err("party must be 0/1".to_string());
+    }
+    let domain_size = 1usize << (key.domain_bits as usize);
+    let mut ans: u8 = 0;
+    for &idx in ones.iter() {
+        let i = idx as usize;
+        if i >= domain_size {
+            continue;
+        }
+        ans ^= eval_point_share(key, i, party)? & 1;
+    }
+    Ok(ans & 1)
 }
 
 fn eval_parity_share(key_bytes: &[u8], db: &[u8], party: u8) -> Result<u8, String> {
@@ -663,6 +756,13 @@ fn get_bitset<'a>(st: &'a AppState, name: &str) -> Result<Arc<Vec<u8>>, String> 
         .ok_or_else(|| format!("unknown bitset db: {name}"))
 }
 
+fn get_bitset_ones<'a>(st: &'a AppState, name: &str) -> Result<Arc<Vec<u32>>, String> {
+    st.bitset_ones
+        .get(name)
+        .cloned()
+        .ok_or_else(|| format!("unknown bitset db: {name}"))
+}
+
 fn get_block_db<'a>(st: &'a AppState, name: &str) -> Result<(Arc<Vec<u8>>, usize), String> {
     st.blocks
         .get(name)
@@ -680,7 +780,24 @@ fn bit_at(db: &[u8], idx: usize) -> u8 {
 
 async fn pir_query_batch(State(st): State<AppState>, Json(q): Json<PirQueryBatch>) -> Result<Json<PirAnsBatch>, (StatusCode, String)> {
     let db = get_bitset(&st, &q.db).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    let ones = get_bitset_ones(&st, &q.db).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
     let party = st.server_id;
+    let mode = env::var("PIR_EVAL_MODE").unwrap_or_else(|_| "auto".to_string());
+    let mode = mode.trim().to_ascii_lowercase();
+    let domain_size = db.len() * 8;
+    let mut tmp = domain_size;
+    let mut domain_bits = 0usize;
+    while tmp > 1 {
+        domain_bits += 1;
+        tmp >>= 1;
+    }
+    let use_sparse = if mode == "sparse" {
+        true
+    } else if mode == "dense" {
+        false
+    } else {
+        prefer_sparse(domain_size, domain_bits, ones.len())
+    };
     let ans: Result<Vec<u8>, String> = q
         .dpf_keys_b64
         .par_iter()
@@ -688,7 +805,12 @@ async fn pir_query_batch(State(st): State<AppState>, Json(q): Json<PirQueryBatch
             let kb = B64
                 .decode(k.as_bytes())
                 .map_err(|_| "bad base64 key".to_string())?;
-            eval_parity_share(&kb, &db, party)
+            if use_sparse {
+                let key = decode_dpf_key(&kb)?;
+                eval_parity_share_sparse(&key, &ones, party)
+            } else {
+                eval_parity_share(&kb, &db, party)
+            }
         })
         .collect();
     let ans = ans.map_err(|e| (StatusCode::BAD_REQUEST, e))?;
@@ -732,7 +854,24 @@ async fn pir_query_batch_signed(
     Json(q): Json<PirQueryBatchSigned>,
 ) -> Result<Json<PirAnsBatchSigned>, (StatusCode, String)> {
     let db = get_bitset(&st, &q.db).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    let ones = get_bitset_ones(&st, &q.db).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
     let party = st.server_id;
+    let mode = env::var("PIR_EVAL_MODE").unwrap_or_else(|_| "auto".to_string());
+    let mode = mode.trim().to_ascii_lowercase();
+    let domain_size = db.len() * 8;
+    let mut tmp = domain_size;
+    let mut domain_bits = 0usize;
+    while tmp > 1 {
+        domain_bits += 1;
+        tmp >>= 1;
+    }
+    let use_sparse = if mode == "sparse" {
+        true
+    } else if mode == "dense" {
+        false
+    } else {
+        prefer_sparse(domain_size, domain_bits, ones.len())
+    };
 
     let decoded_keys: Result<Vec<Vec<u8>>, String> = q
         .dpf_keys_b64
@@ -743,7 +882,14 @@ async fn pir_query_batch_signed(
 
     let ans: Result<Vec<u8>, String> = decoded_keys
         .par_iter()
-        .map(|kb| eval_parity_share(kb, &db, party))
+        .map(|kb| {
+            if use_sparse {
+                let key = decode_dpf_key(kb)?;
+                eval_parity_share_sparse(&key, &ones, party)
+            } else {
+                eval_parity_share(kb, &db, party)
+            }
+        })
         .collect();
     let ans = ans.map_err(|e| (StatusCode::BAD_REQUEST, e))?;
 
@@ -793,7 +939,24 @@ async fn pir_query_batch_multi_signed(
     Json(q): Json<PirQueryBatchMultiSigned>,
 ) -> Result<Json<PirAnsBatchMultiSigned>, (StatusCode, String)> {
     let db = get_bitset(&st, &q.db).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    let ones = get_bitset_ones(&st, &q.db).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
     let party = st.server_id;
+    let mode = env::var("PIR_EVAL_MODE").unwrap_or_else(|_| "auto".to_string());
+    let mode = mode.trim().to_ascii_lowercase();
+    let domain_size = db.len() * 8;
+    let mut tmp = domain_size;
+    let mut domain_bits = 0usize;
+    while tmp > 1 {
+        domain_bits += 1;
+        tmp >>= 1;
+    }
+    let use_sparse = if mode == "sparse" {
+        true
+    } else if mode == "dense" {
+        false
+    } else {
+        prefer_sparse(domain_size, domain_bits, ones.len())
+    };
 
     let ts = (std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -822,7 +985,14 @@ async fn pir_query_batch_multi_signed(
 
             let ans: Result<Vec<u8>, (StatusCode, String)> = decoded_keys
                 .iter()
-                .map(|kb| eval_parity_share(kb, &db, party).map_err(|e| (StatusCode::BAD_REQUEST, e)))
+                .map(|kb| {
+                    if use_sparse {
+                        let key = decode_dpf_key(kb).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+                        eval_parity_share_sparse(&key, &ones, party).map_err(|e| (StatusCode::BAD_REQUEST, e))
+                    } else {
+                        eval_parity_share(kb, &db, party).map_err(|e| (StatusCode::BAD_REQUEST, e))
+                    }
+                })
                 .collect();
             let ans = ans?;
 
@@ -1071,6 +1241,83 @@ async fn mpc_and_mask_batch(
     Ok(Json(json!({"d_shares": d_shares, "e_shares": e_shares})))
 }
 
+async fn mpc_and_mask_multi(
+    State(st): State<AppState>,
+    Json(req): Json<MpcAndMaskMultiReq>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let mut map = st.mpc_sessions.lock().unwrap();
+    cleanup_mpc_sessions(&mut map);
+
+    let mut responses: Vec<Value> = Vec::with_capacity(req.requests.len());
+    for sub in req.requests.iter() {
+        let sess = match map.get_mut(&sub.action_id) {
+            Some(s) => s,
+            None => {
+                responses.push(json!({"action_id": sub.action_id, "ok": false, "error": "missing_session", "d_shares": [], "e_shares": []}));
+                continue;
+            }
+        };
+
+        if let Err(e) = sess.eval_local(st.server_id) {
+            responses.push(json!({"action_id": sub.action_id, "ok": false, "error": e, "d_shares": [], "e_shares": []}));
+            continue;
+        }
+
+        let mut d_shares: Vec<u8> = Vec::with_capacity(sub.triples.len());
+        let mut e_shares: Vec<u8> = Vec::with_capacity(sub.triples.len());
+        let mut ok = true;
+        let mut err_msg: String = String::new();
+        for t in sub.triples.iter() {
+            if t.gate_index >= sess.gates.len() {
+                ok = false;
+                err_msg = "gate_oob".to_string();
+                break;
+            }
+            let g = &sess.gates[t.gate_index];
+            if g.op.to_ascii_uppercase() != "AND" {
+                ok = false;
+                err_msg = "not_and_gate".to_string();
+                break;
+            }
+            let a = match g.a {
+                Some(v) => v,
+                None => {
+                    ok = false;
+                    err_msg = "bad_gate".to_string();
+                    break;
+                }
+            };
+            let b = match g.b {
+                Some(v) => v,
+                None => {
+                    ok = false;
+                    err_msg = "bad_gate".to_string();
+                    break;
+                }
+            };
+            if sess.wire(a).is_err() || sess.wire(b).is_err() {
+                ok = false;
+                err_msg = "and_inputs_not_ready".to_string();
+                break;
+            }
+
+            sess.pending.insert(t.gate_index, (t.a_share & 1, t.b_share & 1, t.c_share & 1));
+            let d_share = (sess.wire(a).unwrap() ^ (t.a_share & 1)) & 1;
+            let e_share = (sess.wire(b).unwrap() ^ (t.b_share & 1)) & 1;
+            d_shares.push(d_share);
+            e_shares.push(e_share);
+        }
+
+        if ok {
+            responses.push(json!({"action_id": sub.action_id, "ok": true, "d_shares": d_shares, "e_shares": e_shares}));
+        } else {
+            responses.push(json!({"action_id": sub.action_id, "ok": false, "error": err_msg, "d_shares": [], "e_shares": []}));
+        }
+    }
+
+    Ok(Json(json!({"responses": responses})))
+}
+
 async fn mpc_and_finish(State(st): State<AppState>, Json(req): Json<MpcAndFinishReq>) -> Result<Json<Value>, (StatusCode, String)> {
     let mut map = st.mpc_sessions.lock().unwrap();
     cleanup_mpc_sessions(&mut map);
@@ -1118,6 +1365,75 @@ async fn mpc_and_finish_batch(
     sess.eval_local(st.server_id)
         .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
     Ok(Json(json!({"ok": true, "z_shares": z_shares})))
+}
+
+async fn mpc_and_finish_multi(
+    State(st): State<AppState>,
+    Json(req): Json<MpcAndFinishMultiReq>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let mut map = st.mpc_sessions.lock().unwrap();
+    cleanup_mpc_sessions(&mut map);
+
+    let mut responses: Vec<Value> = Vec::with_capacity(req.requests.len());
+    for sub in req.requests.iter() {
+        let sess = match map.get_mut(&sub.action_id) {
+            Some(s) => s,
+            None => {
+                responses.push(json!({"action_id": sub.action_id, "ok": false, "error": "missing_session", "z_shares": []}));
+                continue;
+            }
+        };
+
+        let mut z_shares: Vec<u8> = Vec::with_capacity(sub.opens.len());
+        let mut ok = true;
+        let mut err_msg: String = String::new();
+
+        for it in sub.opens.iter() {
+            if it.gate_index >= sess.gates.len() {
+                ok = false;
+                err_msg = "gate_oob".to_string();
+                break;
+            }
+            let g = &sess.gates[it.gate_index];
+            if g.op.to_ascii_uppercase() != "AND" {
+                ok = false;
+                err_msg = "not_and_gate".to_string();
+                break;
+            }
+            let (a_share, b_share, c_share) = match sess.pending.remove(&it.gate_index) {
+                Some(x) => x,
+                None => {
+                    ok = false;
+                    err_msg = "missing_triple".to_string();
+                    break;
+                }
+            };
+            let dd = it.d & 1;
+            let ee = it.e & 1;
+            let mut z = (c_share ^ (dd & b_share) ^ (ee & a_share)) & 1;
+            if st.server_id == 0 {
+                z ^= (dd & ee) & 1;
+            }
+            if let Err(e) = sess.set_wire(g.out, z) {
+                ok = false;
+                err_msg = e;
+                break;
+            }
+            z_shares.push(z & 1);
+        }
+
+        if ok {
+            if let Err(e) = sess.eval_local(st.server_id) {
+                responses.push(json!({"action_id": sub.action_id, "ok": false, "error": e, "z_shares": []}));
+                continue;
+            }
+            responses.push(json!({"action_id": sub.action_id, "ok": true, "z_shares": z_shares}));
+        } else {
+            responses.push(json!({"action_id": sub.action_id, "ok": false, "error": err_msg, "z_shares": []}));
+        }
+    }
+
+    Ok(Json(json!({"responses": responses})))
 }
 
 async fn mpc_finalize(State(st): State<AppState>, Json(req): Json<MpcFinalizeReq>) -> Result<Json<Value>, (StatusCode, String)> {
@@ -1172,21 +1488,39 @@ async fn mpc_finalize(State(st): State<AppState>, Json(req): Json<MpcFinalizeReq
     })))
 }
 
-fn load_bitsets(data_dir: &Path) -> HashMap<String, Arc<Vec<u8>>> {
-    let mut out = HashMap::new();
+fn bitset_ones(db: &[u8]) -> Vec<u32> {
+    let mut out: Vec<u32> = Vec::new();
+    for (byte_i, &b) in db.iter().enumerate() {
+        if b == 0 {
+            continue;
+        }
+        let mut bb = b;
+        while bb != 0 {
+            let tz = bb.trailing_zeros() as usize;
+            out.push((byte_i * 8 + tz) as u32);
+            bb &= bb - 1;
+        }
+    }
+    out
+}
+
+fn load_bitsets(data_dir: &Path) -> (HashMap<String, Arc<Vec<u8>>>, HashMap<String, Arc<Vec<u32>>>) {
+    let mut bitsets: HashMap<String, Arc<Vec<u8>>> = HashMap::new();
+    let mut ones: HashMap<String, Arc<Vec<u32>>> = HashMap::new();
     if let Ok(rd) = fs::read_dir(data_dir) {
         for ent in rd.flatten() {
             let p = ent.path();
             if p.extension().and_then(|s| s.to_str()) == Some("bitset") {
                 if let Some(stem) = p.file_stem().and_then(|s| s.to_str()) {
                     if let Ok(b) = fs::read(&p) {
-                        out.insert(stem.to_string(), Arc::new(b));
+                        ones.insert(stem.to_string(), Arc::new(bitset_ones(&b)));
+                        bitsets.insert(stem.to_string(), Arc::new(b));
                     }
                 }
             }
         }
     }
-    out
+    (bitsets, ones)
 }
 
 fn load_blocks(data_dir: &Path) -> HashMap<String, (Arc<Vec<u8>>, usize)> {
@@ -1255,7 +1589,9 @@ async fn main() {
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| mac_keys.keys().next().cloned().unwrap_or_else(|| "0".to_string()));
 
-    let bitsets = Arc::new(load_bitsets(&data_dir));
+    let (bitsets, bitset_ones) = load_bitsets(&data_dir);
+    let bitsets = Arc::new(bitsets);
+    let bitset_ones = Arc::new(bitset_ones);
     let blocks = Arc::new(load_blocks(&data_dir));
 
     let st = AppState {
@@ -1264,6 +1600,7 @@ async fn main() {
         mac_keys,
         active_kid,
         bitsets,
+        bitset_ones,
         blocks,
         mpc_sessions: Arc::new(Mutex::new(HashMap::new())),
     };
@@ -1281,8 +1618,10 @@ async fn main() {
         .route("/mpc/init", post(mpc_init))
         .route("/mpc/and_mask", post(mpc_and_mask))
         .route("/mpc/and_mask_batch", post(mpc_and_mask_batch))
+        .route("/mpc/and_mask_multi", post(mpc_and_mask_multi))
         .route("/mpc/and_finish", post(mpc_and_finish))
         .route("/mpc/and_finish_batch", post(mpc_and_finish_batch))
+        .route("/mpc/and_finish_multi", post(mpc_and_finish_multi))
         .route("/mpc/finalize", post(mpc_finalize))
         .with_state(st);
 

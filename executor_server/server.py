@@ -4,6 +4,8 @@ import base64
 import hashlib
 import hmac
 import os
+import sqlite3
+import threading
 import time
 from typing import Any, Dict, List, Optional
 
@@ -17,6 +19,90 @@ from common.sanitize import SanitizePatch, apply_patch_to_domain, apply_patch_to
 EXECUTOR_INSECURE_ALLOW = bool(int(os.getenv("EXECUTOR_INSECURE_ALLOW", "0")))
 
 POLICY_PROGRAM_ID = (os.getenv("MIRAGE_POLICY_PROGRAM_ID", "policy_unified_v1") or "policy_unified_v1").strip()
+
+class _ReplayGuard:
+    """
+    Best-effort anti-replay guard for commit proofs.
+
+    Without this, an attacker who captures a valid (dual) commit proof can attempt to
+    replay it within the MAC TTL window. We treat each `action_id` as a one-time token
+    and reject duplicates.
+
+    Storage:
+    - In-memory map by default.
+    - Optional persistent sqlite via EXECUTOR_REPLAY_DB_PATH.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._seen: dict[str, float] = {}
+        self._ttl_s = int(os.getenv("EXECUTOR_REPLAY_TTL_S", "3600"))
+        if self._ttl_s < 30:
+            self._ttl_s = 30
+        if self._ttl_s > 7 * 24 * 3600:
+            self._ttl_s = 7 * 24 * 3600
+
+        self._db_path = (os.getenv("EXECUTOR_REPLAY_DB_PATH", "") or "").strip() or None
+        self._db: sqlite3.Connection | None = None
+        if self._db_path:
+            self._db = sqlite3.connect(self._db_path, check_same_thread=False)
+            self._db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS replay (
+                  action_id TEXT PRIMARY KEY,
+                  seen_at REAL NOT NULL
+                )
+                """
+            )
+            self._db.commit()
+
+    def _prune_locked(self, now: float) -> None:
+        # In-memory prune
+        dead = [k for k, t in self._seen.items() if (now - float(t)) > float(self._ttl_s)]
+        for k in dead:
+            self._seen.pop(k, None)
+        # Persistent prune (best-effort)
+        if self._db is not None:
+            try:
+                self._db.execute("DELETE FROM replay WHERE seen_at < ?", (float(now - float(self._ttl_s)),))
+                self._db.commit()
+            except Exception:
+                pass
+
+    def check_and_mark(self, *, action_id: str) -> bool:
+        """
+        Returns True if this action_id is fresh and is now marked as used.
+        Returns False if this action_id was already used (replay).
+        """
+        if not action_id:
+            return False
+        now = float(time.time())
+        with self._lock:
+            self._prune_locked(now)
+            if action_id in self._seen:
+                return False
+            if self._db is not None:
+                try:
+                    row = self._db.execute("SELECT action_id FROM replay WHERE action_id=?", (str(action_id),)).fetchone()
+                    if row:
+                        return False
+                    self._db.execute("INSERT OR REPLACE INTO replay(action_id, seen_at) VALUES (?,?)", (str(action_id), float(now)))
+                    self._db.commit()
+                except Exception:
+                    # If persistent store fails, fall back to in-memory protection.
+                    pass
+            self._seen[str(action_id)] = now
+            return True
+
+
+_REPLAY_GUARD: _ReplayGuard | None = None
+
+
+def _replay_guard() -> _ReplayGuard:
+    global _REPLAY_GUARD
+    if _REPLAY_GUARD is None:
+        _REPLAY_GUARD = _ReplayGuard()
+    return _REPLAY_GUARD
 
 def _sha256_hex(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
@@ -420,6 +506,10 @@ def exec_send_message(req: ExecSendMessageReq):
             patch = SanitizePatch(patch_id, {})
             preview = apply_patch_to_message(text=req.text, patch=patch)
             return {"status": "DENY", "reason_code": "REQUIRE_CONFIRM", "data": {"text_preview": preview[:200]}}
+
+        # Anti-replay: each (action_id, commit proof pair) should be usable at most once.
+        if not _replay_guard().check_and_mark(action_id=str(action_id)):
+            return {"status": "DENY", "reason_code": "REPLAY_DENY"}
         patch = SanitizePatch(patch_id, {})
         out_text = apply_patch_to_message(text=req.text, patch=patch)
         return {
@@ -488,6 +578,8 @@ def exec_fetch(req: ExecFetchReq):
             return {"status": "DENY", "reason_code": "POLICY_DENY"}
         if need_confirm == 1 and not bool(req.user_confirm):
             return {"status": "DENY", "reason_code": "REQUIRE_CONFIRM"}
+        if not _replay_guard().check_and_mark(action_id=str(action_id)):
+            return {"status": "DENY", "reason_code": "REPLAY_DENY"}
         return {
             "status": "OK",
             "reason_code": "ALLOW",
@@ -537,6 +629,8 @@ def exec_webhook(req: ExecWebhookReq):
             patch = SanitizePatch(patch_id, {})
             preview = apply_patch_to_message(text=req.body, patch=patch)
             return {"status": "DENY", "reason_code": "REQUIRE_CONFIRM", "data": {"body_preview": preview[:200]}}
+        if not _replay_guard().check_and_mark(action_id=str(action_id)):
+            return {"status": "DENY", "reason_code": "REPLAY_DENY"}
         patch = SanitizePatch(patch_id, {})
         out_body = apply_patch_to_message(text=req.body, patch=patch)
         out_domain = apply_patch_to_domain(domain=req.domain, patch=patch)
@@ -566,6 +660,8 @@ def exec_skill_install(req: ExecSkillInstallReq):
             return {"status": "DENY", "reason_code": "POLICY_DENY"}
         if need_confirm == 1 and not bool(req.user_confirm):
             return {"status": "DENY", "reason_code": "REQUIRE_CONFIRM"}
+        if not _replay_guard().check_and_mark(action_id=str(action_id)):
+            return {"status": "DENY", "reason_code": "REPLAY_DENY"}
 
         # Side effect: record enabled skill into a local registry (demo).
         # This is intentionally outside the gateway so "enable" is tied to dual proofs.

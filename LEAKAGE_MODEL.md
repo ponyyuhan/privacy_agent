@@ -1,20 +1,18 @@
-# Leakage Model (Traffic Shaping, Intent/DB Obfuscation)
+# Leakage Model (L(.)) for MIRAGE-OG++ (PIR + MPC + Confirm Path + Traffic Shaping)
 
-This document makes the **allowed leakage** of the current MIRAGE-OG++ implementation explicit.
+This document defines a **paper-citable** leakage function `L(.)` for what a *single*
+policy server learns from its transcript in MIRAGE-OG++.
 
-Scope:
+This is the artifact-accurate model corresponding to the current code:
 
-- This is a *protocol-level* leakage model for what a **single policy server** learns from its
-  network transcript (PIR/FSS + MPC endpoints), assuming the two policy servers do not collude.
-- It is written to match the current code paths:
-  - Gateway: unified policy engine (`gateway/policy_unified.py`)
-  - PIR/FSS: DPF-based 2-server PIR (`gateway/fss_pir.py`, `policy_server/*`)
-  - MPC: GMW-style XOR sharing + Beaver triples (`policy_server/mpc_engine.py`, `policy_server_rust/src/main.rs`)
+- Gateway: `gateway/mcp_server.py`, `gateway/egress_policy.py`, `gateway/policy_unified.py`, `gateway/fss_pir.py`
+- Policy servers: `policy_server/server.py`, `policy_server_rust/src/main.rs`
+- Optional DFA confirm path: `gateway/guardrails.py:ObliviousGuardrails._dfa_match`
 
 Non-goals:
 
-- This document does not claim to hide leakage visible to the gateway or executor (they are in the TCB).
-- This document does not claim to hide coarse system-level signals (host load, kernel scheduling, etc.).
+- We do not attempt to hide leakage visible to the gateway or executor (they are in the TCB).
+- We do not claim protection against host-level side channels (kernel scheduling, CPU contention, etc.).
 
 ---
 
@@ -22,175 +20,193 @@ Non-goals:
 
 Parties:
 
-- `G`: trusted gateway (runs the agent-facing MCP server and orchestrates PIR/MPC).
-- `P0, P1`: policy servers (honest-but-curious; non-colluding for PIR privacy).
-- `E`: executor (enforces side effects by verifying dual commit proofs).
+- `G`: trusted gateway.
+- `P0, P1`: policy servers (honest-but-curious; non-colluding for privacy).
+- `E`: executor (trusted effect gate; not part of SAP leakage).
 
-For a single policy server `Pi`, define its **view** `View(Pi)` as the full transcript of:
+For a single policy server `Pi`, define its transcript view `View(Pi)` as everything it observes on inbound HTTP:
 
-1. **PIR/FSS traffic** to `/pir/*` endpoints:
-   - URL path (endpoint), request/response sizes, timing.
-   - JSON payload fields: `db`, per-subrequest `action_id`, and lists of `dpf_keys_b64`.
-   - Returned `ans_shares` and per-subrequest MAC proofs (which include hashes such as `keys_sha256`, `resp_sha256`).
-2. **MPC traffic** to `/mpc/*` endpoints:
-   - `action_id`, `program_id`, `request_sha256`, circuit/gate metadata, `input_shares`.
-   - Beaver triple shares sent by `G`, and opened values `d,e` returned by `G`.
-   - Final per-server commit proof share (MAC) and output shares.
+- request path (endpoint), headers, and body fields,
+- response sizes and timings,
+- any local computation-time variability (not explicitly modeled unless noted).
 
----
+We partition the transcript into channels:
 
-## 2. Security Goal: What We Want to Hide
-
-The *privacy* goal against a single policy server is to hide:
-
-- The agent's **intent category** (egress send/fetch/webhook vs skill install).
-- The **logical DB name** being queried (recipients vs domains vs tokens vs IOCs vs install markers).
-- The concrete **query indices** (recipient/domain/token strings, domains in SKILL.md, etc.).
-- Message length within configured caps (e.g., token batch length) and other shape signals.
-
-The *integrity* goal is handled separately (dual MAC proofs in `FORMAL_SECURITY.md`).
+- PIR bit queries (DPF/FSS): `/pir/query_batch_signed`, `/pir/query_batch_multi_signed`, etc.
+- PIR block queries (DFA confirm): `/pir/query_block_batch_signed` (repeated per DFA step).
+- MPC policy evaluation: `/mpc/init`, `/mpc/and_*`, `/mpc/finalize`.
 
 ---
 
-## 3. Modes and Their Leakage
+## 2. Secrets We Aim to Hide (Against a Single Policy Server)
 
-### 3.1 Unshaped Mode (for comparison)
+Against one policy server, we aim to hide:
 
-If the gateway issues minimal PIR queries per intent (different endpoints/DBs/batch sizes), then `View(Pi)` leaks:
+- The **queried identity**: recipient/domain/token/IOC index being tested.
+- The **intent category**: egress send vs fetch vs webhook vs skill install (and any finer category).
+- The **logical DB name** (recipient allowlist vs IOC vs DLP tokens vs install markers), when bundling is enabled.
+- Action load shape (bursts vs idle) to the extent allowed by shaping mode.
 
-- `intent_class` (from which DBs are queried and how many queries occur).
-- Which logical DB was used (`db` field), if bundles are not used.
-- Approximate message length (from the number of PIR keys), if token batches are not padded.
+Integrity (preventing bypass) is handled separately in `FORMAL_SECURITY.md` and is not part of `L(.)`.
 
-This is the baseline the paper's leakage evaluation compares against.
+---
 
-### 3.2 Oblivious Bundling + Unified Policy Program (Current Default)
+## 3. Public Parameters (Configuration) and Action Sequence
 
-Current implementation defaults to:
+Let public configuration parameters be:
 
-- **Oblivious bundle selection**: gateway queries only `db="policy_bundle"` and shifts indices inside the bundle.
-- **Unified program id**: gateway uses a single `program_id` for multiple intent classes (default: `policy_unified_v1`).
-- **Fixed-shape PIR plan per action**: each policy check uses a single bundled PIR query with a constant number of keys:
+- `domain_size`, `bundle_domain_size`
+- `program_id` (fixed string in unified mode)
+- `fixed_n_keys` (constant #keys per PIR subrequest in unified plan)
+- PIR shaping: `PIR_MIX_INTERVAL_MS`, `PIR_MIX_PAD_TO`, `PIR_COVER_TRAFFIC`
+- MPC shaping: `MPC_MIX_INTERVAL_MS`, `MPC_MIX_PAD_TO`, `MPC_COVER_TRAFFIC`, `MPC_MIX_MULTI_ENDPOINTS`
+- `POLICY_MAC_TTL_S` (freshness)
+- DFA params (if enabled): `MAX_DFA_SCAN_CHARS`, `PAD_DFA_STEPS`, `block_size`
+
+Let the secret action sequence be:
+
+- `A = [(a_1, I_1, x_1), ..., (a_T, I_T, x_T)]`,
+  where `a_t` is an `action_id`, `I_t` is the intent category, and `x_t` are sensitive inputs (recipient/domain/text/skill_md/...).
+
+---
+
+## 4. Leakage Function L(.)
+
+We define an explicit leakage function:
 
 ```
-fixed_n_keys = 2 + max_tokens(dlp) + max_domains(ioc) + max_tokens(install)
-            = 2 + 2*max_tokens + max_domains
+L(params, A) = (params, L_PIR(params, A), L_MPC(params, A), L_CONFIRM(params, A))
 ```
 
-This eliminates direct `intent_id` / logical-DB leakage from PIR transcript shape and from `program_id`.
+Where each component captures exactly the information a single policy server learns from that channel *under the configured shaping mode*.
 
-### 3.3 Batch Mixing + Cover Traffic (Optional, Configurable)
+### 4.1 PIR Bit-Query Leakage (DPF/FSS)
 
-When enabled (`PIR_MIX_ENABLED=1` with `PIR_MIX_PAD_TO>1` and `PIR_COVER_TRAFFIC=1`), the gateway:
+Mechanisms:
 
-- microbatches PIR subrequests and sends them via `/pir/query_batch_multi_signed`,
-- pads each batch to a constant number of subrequests (`pad_to`) with dummy subrequests,
-- emits dummy-only batches even when there are no real requests (cover traffic).
-
-This further reduces leakage of *load shape* from PIR traffic (bursty vs steady; number of real subrequests).
-
-Important implementation note:
-
-- The current cover traffic implementation applies to **PIR**. MPC cover traffic is not implemented yet;
-  therefore, the number and timing of `/mpc/*` sessions remain observable by `Pi`.
-
----
-
-## 4. Allowed Leakage Function `L`
-
-We define an explicit leakage function `L` for the policy server view. The point is not that `Pi` learns *nothing*,
-but that the learned information is *constrained and deliberate*.
-
-Let the global configuration be:
-
-- `params = (domain_size, bundle_domain_size, fixed_n_keys, PIR_MIX_INTERVAL_MS, PIR_MIX_PAD_TO, program_id, MAC_TTL, ...)`.
-
-Let the (possibly empty) sequence of gateway actions be:
-
-- `A = [(a_1, I_1, x_1), ..., (a_T, I_T, x_T)]` where:
-  - `a_t` is a gateway-generated `action_id`,
-  - `I_t` is the intent category,
-  - `x_t` are the secret inputs (recipient/domain/text/skill_md/...).
-
-### 4.1 Leakage for PIR Channel (Unify + Mix + Cover)
+- Two-server DPF/FSS hides the queried index from each server (cryptographic assumption).
+- Oblivious bundling (`USE_POLICY_BUNDLE=1`) uses a single DB name `policy_bundle` and shifts indices inside the bundle.
+- Unified fixed-shape plan uses a constant number of keys per action (`fixed_n_keys`).
+- Optional gateway-side microbatching + padding + cover traffic uses constant-shape ticks via `/pir/query_batch_multi_signed`.
 
 Define `L_PIR(params, A)` as:
 
-- The fixed endpoint name: `"/pir/query_batch_multi_signed"`.
-- The fixed DB name: `db = "policy_bundle"`.
-- The public schedule parameters: `(interval_ms, pad_to, fixed_n_keys)`.
-- The number of ticks `N_ticks` that elapsed while the system was running.
-- For each tick `k ∈ [1..N_ticks]`:
-  - the multiset of **subrequest action ids** carried in that tick (real and dummy are indistinguishable),
-  - and the fact that each subrequest contains exactly `fixed_n_keys` PIR keys.
+- The endpoint(s) used (`/pir/query_batch_signed` or `/pir/query_batch_multi_signed`).
+- The DB name(s) observed (in full mode, a single bundled db such as `policy_bundle`).
+- The shaping schedule parameters `(interval_ms, pad_to, fixed_n_keys)`.
+- For each PIR tick `k`:
+  - the fact that exactly `pad_to` subrequests were sent (some may be dummy),
+  - the multiset of `action_id` values included in that tick (random tokens; dummy and real have the same shape),
+  - and that each subrequest contains exactly `fixed_n_keys` DPF keys.
 
 Crucially, `L_PIR` does **not** reveal:
 
-- which action ids are real vs dummy,
-- any query indices,
-- any logical DB name,
-- the intent class.
+- which subrequests are real vs dummy,
+- any queried indices (DPF security),
+- logical DB selection (when bundled),
+- intent category (when unified plan is used).
 
-### 4.2 Leakage for MPC Channel (Unified Program, No MPC Cover Yet)
+### 4.2 MPC Leakage (Policy Circuit Evaluation)
+
+Mechanisms:
+
+- Inputs are XOR-secret-shared; a single server sees only shares.
+- Unified program uses a constant circuit and a constant `program_id`.
+- Optional MPC microbatching + padding + cover traffic runs constant-shape ticks of MPC sessions.
 
 Define `L_MPC(params, A)` as:
 
-- The endpoint names used: `"/mpc/init"`, `"/mpc/and_mask_batch"`, `"/mpc/and_finish_batch"`, `"/mpc/finalize"`.
-- The fixed `program_id` string.
-- For each real action `a_t` (because MPC cover is not implemented):
-  - the existence and timing of that MPC session,
-  - `request_sha256(a_t)` as sent by the gateway,
-  - the circuit size metadata (`n_wires`, `gates` length) which is constant under a fixed `program_id`,
-  - the number of AND rounds and the set of AND gate indices per round (constant for the fixed circuit).
+- The endpoint names used (subset of `/mpc/init`, `/mpc/and_mask_*`, `/mpc/and_finish_*`, `/mpc/finalize`).
+- The public `program_id`.
+- The shaping schedule parameters `(interval_ms, pad_to, cover_traffic, multi_endpoints)`.
+- Circuit shape metadata visible to the server (e.g., `n_wires`, `n_gates`, and AND-round structure), which is constant for a fixed program.
+- For each MPC tick:
+  - the fact that exactly `pad_to` sessions are executed (some may be dummy),
+  - the multiset of `action_id` values included in that tick.
 
-`L_MPC` does **not** reveal:
+Under MPC cover traffic, `L_MPC` does **not** reveal:
 
-- intent class directly via `program_id` (unified),
-- any plaintext predicate inputs (only XOR shares are sent),
-- any PIR indices.
+- how many *real* actions occurred in that interval (only constant tick shape),
+- intent category via circuit shape (circuit is fixed in unified mode),
+- any plaintext predicate inputs (only one-time shares).
 
-### 4.3 Full Allowed Leakage
+Residual exposure (explicitly allowed unless mitigated):
 
-The full leakage function is:
+- `request_sha256` is sent in `/mpc/init`. It is a hash commitment, but unkeyed; low-entropy guessing attacks are possible in principle.
 
-```
-L(params, A) = (params, L_PIR(params, A), L_MPC(params, A))
-```
+### 4.3 Confirm-Path Leakage (DFA / Block PIR)
 
-This is the leakage target for any future simulation-style privacy argument about policy-server transcripts.
+If DFA confirm is enabled (`DLP_MODE=dfa`), the gateway may perform a DFA scan using PIR **block** queries.
+
+Current artifact behavior (important):
+
+- The DFA scan is **conditional** in some paths: it may run only when a coarse filter hits.
+- The scan performs up to `MAX_DFA_SCAN_CHARS` steps, optionally padded with `PAD_DFA_STEPS=1`.
+
+Define `L_CONFIRM(params, A)` as:
+
+- Whether a DFA scan was invoked for an action (branch leakage, if conditional).
+- The number of DFA steps executed (unless padded).
+- The DFA endpoint and block size (public).
+
+Mitigation knobs:
+
+- `PAD_DFA_STEPS=1` makes the number of steps constant (still does not hide whether the scan was invoked unless the system always runs it).
+- A stronger constant-shape design would always run DFA scans (possibly with cover traffic), but this is expensive and not the default in the artifact.
 
 ---
 
-## 5. What Is Still Leaked (By Design or Not Yet Implemented)
+## 5. Modes (What Changes in L(.))
 
-Even in the strongest currently-implemented shaping mode, a single policy server still learns:
+This repo supports several configurations. Reviewer-relevant ones:
 
-- The fact that MPC sessions occurred (action count / timing), since MPC cover traffic is not implemented.
-- The values `request_sha256` (hashes) sent in MPC init; a determined server may attempt dictionary attacks
-  if the underlying inputs are low-entropy. Mitigation would require a keyed commitment or a different binding design.
-- Whether DFA confirm traffic occurred (if `DLP_MODE=dfa` and confirm is only run on the coarse-hit path).
-
-These items must be treated as part of the explicit leakage model until mitigated.
+- **Unshaped**: intent/db/length leak via endpoint/DB choice and batch sizes.
+- **Bundled + Unified (default full mode)**: hides logical DB name and intent category from PIR/MPC structure.
+- **+ PIR mixing/padding/cover**: reduces load-shape leakage at PIR channel.
+- **+ MPC mixing/padding/cover**: reduces load-shape leakage at MPC channel.
+- **DFA confirm**: introduces additional block-query leakage unless padded/always-run.
 
 ---
 
 ## 6. Configuration Knobs (Gateway)
 
-Relevant env vars (gateway-side):
+Unified policy + bundling:
 
-- `UNIFIED_POLICY=1`: enable the unified policy program (`policy_unified_v1`) and unified PIR plan.
-- `USE_POLICY_BUNDLE=1`: require bundled DB (`policy_bundle`) so `db_name` is hidden.
-- `POLICY_BUNDLE_NAME=default`: bundle selection (oblivious; index shift only).
-- `MIRAGE_POLICY_PROGRAM_ID=policy_unified_v1`: program id bound into commit proofs.
+- `UNIFIED_POLICY=1`
+- `USE_POLICY_BUNDLE=1`
+- `MIRAGE_POLICY_PROGRAM_ID=policy_unified_v1`
 
-PIR mixing / cover traffic:
+PIR mixing / cover:
 
-- `PIR_MIX_ENABLED=1`: enable PIR microbatching client.
-- `PIR_MIX_INTERVAL_MS=50`: flush interval.
-- `PIR_MIX_PAD_TO=1`: subrequests per tick; set `>1` to mix/pad (production).
-- `PIR_COVER_TRAFFIC=0`: set to `1` to emit dummy-only ticks (production cover traffic).
+- `PIR_MIX_ENABLED=1`
+- `PIR_MIX_INTERVAL_MS=50`
+- `PIR_MIX_PAD_TO=1` (set >1 to mix/pad)
+- `PIR_COVER_TRAFFIC=0` (set 1 for dummy-only ticks)
 
-Policy server backend note:
+MPC mixing / cover:
 
-- Python policy server cannot sustain large `PIR_MIX_PAD_TO` with cover traffic. Use the Rust backend for production-scale shaping.
+- `MPC_MIX_ENABLED=0` (set 1 to enable constant-shape MPC ticks)
+- `MPC_MIX_INTERVAL_MS=50`
+- `MPC_MIX_PAD_TO=1` (set >1 to mix/pad)
+- `MPC_COVER_TRAFFIC=0` (set 1 for dummy-only ticks)
+- `MPC_MIX_MULTI_ENDPOINTS=1` (use `/mpc/and_*_multi`)
+
+DFA padding:
+
+- `DLP_MODE=dfa`
+- `MAX_DFA_SCAN_CHARS=256`
+- `PAD_DFA_STEPS=1` (constant steps)
+
+---
+
+## 7. What Is Still Leaked (Explicitly)
+
+Even in the strongest implemented shaping mode, a single policy server may still learn:
+
+- coarse system timing signals (tick-to-tick jitter),
+- `request_sha256` values used in MPC init (hash commitments),
+- any confirm-path invocation (unless always-run),
+- host-level side channels not modeled by `L(.)`.
+
+This is intentional: `L(.)` is the contract of what we *allow* to leak; anything not mitigated is treated as explicit leakage until addressed.
 

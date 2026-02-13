@@ -3,7 +3,13 @@ import os
 import json
 import tempfile
 
-from fss.dpf import gen_dpf_keys, eval_dpf_point, eval_dpf_pir_parity_share, eval_dpf_pir_block_share
+from fss.dpf import (
+    eval_dpf_pir_block_share,
+    eval_dpf_pir_parity_share,
+    eval_dpf_pir_parity_share_sparse,
+    eval_dpf_point,
+    gen_dpf_keys,
+)
 from gateway.handles import HandleStore
 from gateway.guardrails import ObliviousGuardrails
 from gateway.executors.cryptoexec import CryptoExec
@@ -59,6 +65,25 @@ class DpfTests(unittest.TestCase):
             a0 = eval_dpf_pir_parity_share(key_bytes=k0, db_bitset=bytes(db), party=0)
             a1 = eval_dpf_pir_parity_share(key_bytes=k1, db_bitset=bytes(db), party=1)
             self.assertEqual((a0 ^ a1) & 1, expected)
+
+    def test_sparse_parity_share_matches_dense(self) -> None:
+        nbits = 10
+        N = 1 << nbits
+        nbytes = (N + 7) // 8
+        db = bytearray(b"\x00" * nbytes)
+        # Build a moderately sparse DB.
+        for idx in [1, 7, 13, 42, 99, 101, 777]:
+            _set_bit(db, idx)
+        ones = [i for i in range(N) if ((db[i // 8] >> (i % 8)) & 1)]
+
+        for alpha in [0, 1, 2, 7, 13, 42, 100, 777, 1023]:
+            k0, k1 = gen_dpf_keys(alpha=alpha, beta=1, domain_bits=nbits)
+            d0 = eval_dpf_pir_parity_share(key_bytes=k0, db_bitset=bytes(db), party=0) & 1
+            d1 = eval_dpf_pir_parity_share(key_bytes=k1, db_bitset=bytes(db), party=1) & 1
+            s0 = eval_dpf_pir_parity_share_sparse(key_bytes=k0, ones=ones, party=0) & 1
+            s1 = eval_dpf_pir_parity_share_sparse(key_bytes=k1, ones=ones, party=1) & 1
+            self.assertEqual(d0, s0)
+            self.assertEqual(d1, s1)
 
     def test_pir_block_share_reconstructs_db_block(self) -> None:
         nbits = 8

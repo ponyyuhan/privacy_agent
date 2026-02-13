@@ -91,6 +91,14 @@ class MpcAndMaskBatchReq(BaseModel):
     action_id: str
     triples: list[MpcTripleShare] = Field(default_factory=list)
 
+class MpcAndMaskMultiSubReq(BaseModel):
+    action_id: str
+    triples: list[MpcTripleShare] = Field(default_factory=list)
+
+
+class MpcAndMaskMultiReq(BaseModel):
+    requests: list[MpcAndMaskMultiSubReq] = Field(default_factory=list)
+
 
 class MpcAndFinishReq(BaseModel):
     action_id: str
@@ -107,6 +115,14 @@ class MpcAndFinishItem(BaseModel):
 class MpcAndFinishBatchReq(BaseModel):
     action_id: str
     opens: list[MpcAndFinishItem] = Field(default_factory=list)
+
+class MpcAndFinishMultiSubReq(BaseModel):
+    action_id: str
+    opens: list[MpcAndFinishItem] = Field(default_factory=list)
+
+
+class MpcAndFinishMultiReq(BaseModel):
+    requests: list[MpcAndFinishMultiSubReq] = Field(default_factory=list)
 
 
 class MpcFinalizeReq(BaseModel):
@@ -394,6 +410,26 @@ def mpc_and_mask_batch(req: MpcAndMaskBatchReq):
     d_shares, e_shares = sess.and_mask_batch(items)
     return {"d_shares": [int(x) & 1 for x in d_shares], "e_shares": [int(x) & 1 for x in e_shares]}
 
+@app.post("/mpc/and_mask_multi")
+def mpc_and_mask_multi(req: MpcAndMaskMultiReq):
+    out: list[dict] = []
+    for sub in (req.requests or []):
+        try:
+            sess = mpc_store.get(sub.action_id)
+            items = [(int(t.gate_index), int(t.a_share), int(t.b_share), int(t.c_share)) for t in (sub.triples or [])]
+            d_shares, e_shares = sess.and_mask_batch(items)
+            out.append(
+                {
+                    "action_id": str(sub.action_id),
+                    "ok": True,
+                    "d_shares": [int(x) & 1 for x in d_shares],
+                    "e_shares": [int(x) & 1 for x in e_shares],
+                }
+            )
+        except Exception as e:
+            out.append({"action_id": str(sub.action_id), "ok": False, "error": str(e)[:200], "d_shares": [], "e_shares": []})
+    return {"responses": out}
+
 
 @app.post("/mpc/and_finish")
 def mpc_and_finish(req: MpcAndFinishReq):
@@ -407,6 +443,19 @@ def mpc_and_finish_batch(req: MpcAndFinishBatchReq):
     items = [(int(it.gate_index), int(it.d), int(it.e)) for it in (req.opens or [])]
     zs = sess.and_finish_batch(items)
     return {"z_shares": [int(x) & 1 for x in zs], "ok": True}
+
+@app.post("/mpc/and_finish_multi")
+def mpc_and_finish_multi(req: MpcAndFinishMultiReq):
+    out: list[dict] = []
+    for sub in (req.requests or []):
+        try:
+            sess = mpc_store.get(sub.action_id)
+            items = [(int(it.gate_index), int(it.d), int(it.e)) for it in (sub.opens or [])]
+            zs = sess.and_finish_batch(items)
+            out.append({"action_id": str(sub.action_id), "ok": True, "z_shares": [int(x) & 1 for x in zs]})
+        except Exception as e:
+            out.append({"action_id": str(sub.action_id), "ok": False, "error": str(e)[:200], "z_shares": []})
+    return {"responses": out}
 
 
 @app.post("/mpc/finalize")

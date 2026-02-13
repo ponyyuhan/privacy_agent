@@ -13,7 +13,7 @@ from pathlib import Path
 
 import requests
 
-from gateway.fss_pir import PirClient
+from gateway.fss_pir import PirClient, MixedPirClient, PirMixConfig
 from gateway.handles import HandleStore
 from gateway.executors.msgexec import MsgExec
 from gateway.egress_policy import EgressPolicyEngine
@@ -148,7 +148,38 @@ def main() -> None:
 
         # Gateway objects (in-process). These still do network calls to policy servers + executor.
         handles = HandleStore()
-        pir = PirClient(policy0_url=policy0_url, policy1_url=policy1_url, domain_size=int(os.getenv("FSS_DOMAIN_SIZE", "4096")))
+        base_pir = PirClient(policy0_url=policy0_url, policy1_url=policy1_url, domain_size=int(os.getenv("FSS_DOMAIN_SIZE", "4096")))
+        pir = base_pir
+
+        # Optional PIR mixing / cover traffic (constant-shape ticks). This matches the MCP server behavior.
+        if bool(int(os.getenv("PIR_MIX_ENABLED", "0"))):
+            try:
+                meta = requests.get(f"{base_pir.policy0_url}/meta", timeout=1.5).json()
+                b = (meta.get("bundle") or {}) if isinstance(meta, dict) else {}
+                if isinstance(b, dict) and bool(b.get("enabled")):
+                    bundle_db = str(b.get("db") or os.getenv("POLICY_BUNDLE_DB", "policy_bundle"))
+                    bundle_ds = int(b.get("bundle_domain_size") or 0)
+                    if bundle_ds > 0:
+                        max_tokens = int(os.getenv("MAX_TOKENS_PER_MESSAGE", "32"))
+                        max_domains = int(os.getenv("MAX_SKILL_DOMAINS", "8"))
+                        if max_domains < 1:
+                            max_domains = 1
+                        if max_domains > 64:
+                            max_domains = 64
+                        fixed_n_keys = 2 + (2 * max_tokens) + max_domains
+                        mix = PirMixConfig(
+                            enabled=True,
+                            interval_ms=int(os.getenv("PIR_MIX_INTERVAL_MS", "50")),
+                            pad_to=int(os.getenv("PIR_MIX_PAD_TO", "1")),
+                            fixed_n_keys=int(fixed_n_keys),
+                            db_name=bundle_db,
+                            domain_size=bundle_ds,
+                            timeout_s=int(os.getenv("PIR_MIX_TIMEOUT_S", "10")),
+                            cover_traffic=bool(int(os.getenv("PIR_COVER_TRAFFIC", "0"))),
+                        )
+                        pir = MixedPirClient(base_pir, mix=mix)
+            except Exception:
+                pir = base_pir
         policy = EgressPolicyEngine(pir=pir, handles=handles, tx_store=TxStore(), domain_size=pir.domain_size, max_tokens=int(os.getenv("MAX_TOKENS_PER_MESSAGE", "32")))
         msg = MsgExec(handles, policy)
 
@@ -213,6 +244,11 @@ def main() -> None:
         out_path.write_text(json.dumps(row, indent=2, sort_keys=True) + "\n")
         print(str(out_path))
     finally:
+        try:
+            if hasattr(pir, "close"):
+                pir.close()
+        except Exception:
+            pass
         for p in procs:
             try:
                 p.terminate()

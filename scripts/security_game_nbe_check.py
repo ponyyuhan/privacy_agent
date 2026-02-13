@@ -158,6 +158,30 @@ def main() -> None:
         c_ok, c_item = _expect_status("valid_dual_proof_accepts", valid, "OK")
         report["checks"].append(c_item)
 
+        # Replay should be rejected (best-effort anti-replay guard keyed by action_id).
+        replay = requests.post(f"{executor_url}/exec/send_message", json=base_req, timeout=5).json()
+        c_ok_r, c_item_r = _expect_status("replay_denied", replay, "DENY")
+        c_item_r["reason_code"] = replay.get("reason_code")
+        report["checks"].append(c_item_r)
+
+        # Session binding: changing session should invalidate request_sha256 binding.
+        req_sess = dict(base_req)
+        req_sess["session"] = "other-session"
+        r_sess = requests.post(f"{executor_url}/exec/send_message", json=req_sess, timeout=5).json()
+        c_ok_s, c_item_s = _expect_status("session_binding_denied", r_sess, "DENY")
+        c_item_s["reason_code"] = r_sess.get("reason_code")
+        c_item_s["details"] = r_sess.get("details")
+        report["checks"].append(c_item_s)
+
+        # Caller binding: changing caller should invalidate request_sha256 binding.
+        req_caller = dict(base_req)
+        req_caller["caller"] = "other-caller"
+        r_caller = requests.post(f"{executor_url}/exec/send_message", json=req_caller, timeout=5).json()
+        c_ok_c, c_item_c = _expect_status("caller_binding_denied", r_caller, "DENY")
+        c_item_c["reason_code"] = r_caller.get("reason_code")
+        c_item_c["details"] = r_caller.get("details")
+        report["checks"].append(c_item_c)
+
         req_missing = dict(base_req)
         req_missing["commit"] = {"policy0": (commit or {}).get("policy0")}
         r_missing = requests.post(f"{executor_url}/exec/send_message", json=req_missing, timeout=5).json()

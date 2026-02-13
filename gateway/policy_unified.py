@@ -3,7 +3,10 @@ from __future__ import annotations
 import ast
 import os
 import secrets
+import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
@@ -28,6 +31,56 @@ from .skill_ingress import extract_install_tokens
 from .tx_store import TxStore
 
 _HTTP_POOL = ThreadPoolExecutor(max_workers=8)
+_TRACE_LOCK = threading.Lock()
+
+
+def _trace_mpc(
+    *,
+    server_id: int,
+    endpoint: str,
+    action_id: str | None,
+    program_id: str,
+    request_sha256: str | None = None,
+    n_wires: int | None = None,
+    n_gates: int | None = None,
+    and_round: int | None = None,
+    n_items: int | None = None,
+    multi: bool = False,
+) -> None:
+    """
+    Optional "single policy server transcript" logging for leakage evaluation.
+
+    This logs only metadata that a single policy server learns at the MPC API layer
+    (endpoint name, action_id, program_id, request_sha256 hash, circuit size, batch sizes).
+    """
+    path = (os.getenv("MIRAGE_TRANSCRIPT_PATH") or os.getenv("MPC_TRANSCRIPT_PATH") or "").strip()
+    if not path:
+        return
+    ev: dict[str, Any] = {
+        "ts": int(time.time() * 1000),
+        "server_id": int(server_id),
+        "endpoint": str(endpoint),
+        "program_id": str(program_id),
+        "multi": bool(multi),
+    }
+    if action_id:
+        ev["action_id"] = str(action_id)
+    if request_sha256:
+        ev["request_sha256"] = str(request_sha256)
+    if n_wires is not None:
+        ev["n_wires"] = int(n_wires)
+    if n_gates is not None:
+        ev["n_gates"] = int(n_gates)
+    if and_round is not None:
+        ev["and_round"] = int(and_round)
+    if n_items is not None:
+        ev["n_items"] = int(n_items)
+    import json
+
+    line = json.dumps(ev, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
+    with _TRACE_LOCK:
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(line + "\n")
 
 
 @dataclass(frozen=True, slots=True)
@@ -418,6 +471,358 @@ def _bool_or(xs: list[int]) -> int:
     return 1 if any(int(x) & 1 for x in (xs or [])) else 0
 
 
+@dataclass(frozen=True, slots=True)
+class MpcMixConfig:
+    """
+    Gateway-side MPC cover traffic / microbatching configuration.
+
+    This mixer is specialized for the unified constant-shape policy program:
+    it evaluates a fixed circuit for a fixed number of sessions per tick, padding
+    with dummy sessions when needed.
+    """
+
+    enabled: bool
+    interval_ms: int
+    pad_to: int
+    cover_traffic: bool = False
+    timeout_s: int = 15
+    use_multi_endpoints: bool = True
+
+
+class _MpcReq:
+    __slots__ = ("action_id", "request_sha256", "input0", "input1", "future", "is_dummy")
+
+    def __init__(self, *, action_id: str, request_sha256: str, input0: dict[int, int], input1: dict[int, int], future: Future, is_dummy: bool) -> None:
+        self.action_id = str(action_id)
+        self.request_sha256 = str(request_sha256)
+        self.input0 = dict(input0 or {})
+        self.input1 = dict(input1 or {})
+        self.future = future
+        self.is_dummy = bool(is_dummy)
+
+
+class _MpcBatchMixer:
+    def __init__(self, *, policy0_url: str, policy1_url: str, cfg: MpcMixConfig, circuit: Circuit, program_id: str) -> None:
+        self.policy0_url = str(policy0_url)
+        self.policy1_url = str(policy1_url)
+        self.cfg = cfg
+        self.circuit = circuit
+        self.program_id = str(program_id)
+
+        self._lock = threading.Lock()
+        self._pending: list[_MpcReq] = []
+        self._stop = threading.Event()
+        self._t = threading.Thread(target=self._run, name="mpc-mixer", daemon=True)
+        self._t.start()
+
+    def close(self) -> None:
+        self._stop.set()
+        try:
+            self._t.join(timeout=1.0)
+        except Exception:
+            pass
+
+    def submit(self, *, action_id: str, request_sha256: str, input0: dict[int, int], input1: dict[int, int]) -> Future:
+        fut: Future = Future()
+        with self._lock:
+            self._pending.append(_MpcReq(action_id=action_id, request_sha256=request_sha256, input0=input0, input1=input1, future=fut, is_dummy=False))
+        return fut
+
+    def _mk_dummy_req(self) -> _MpcReq:
+        # Keep the same action_id *shape* as real requests (e.g., "a_<urlsafe>") so
+        # the policy servers cannot trivially distinguish cover vs real by prefix.
+        aid = f"a_{secrets.token_urlsafe(12)}"
+        # request_sha256 is a hash in the protocol; random-looking is fine for cover.
+        req_sha = os.urandom(32).hex()
+
+        # Provide shares for all fixed input wires to keep sessions evaluatable.
+        in0: dict[int, int] = {}
+        in1: dict[int, int] = {}
+        for _nm, wi in (self.circuit.inputs or {}).items():
+            x0 = secrets.randbits(1) & 1
+            x1 = secrets.randbits(1) & 1
+            in0[int(wi)] = int(x0) & 1
+            in1[int(wi)] = int(x1) & 1
+        fut: Future = Future()
+        fut.set_result(None)
+        return _MpcReq(action_id=aid, request_sha256=req_sha, input0=in0, input1=in1, future=fut, is_dummy=True)
+
+    def _mpc_init_many(self, batch: list[_MpcReq]) -> None:
+        gates = [{"op": g.op, "out": int(g.out), "a": g.a, "b": g.b, "value": g.value} for g in self.circuit.gates]
+        ttl = int(os.getenv("MPC_SESSION_TTL_S", "30"))
+        if ttl < 5:
+            ttl = 5
+        if ttl > 300:
+            ttl = 300
+
+        def one(url: str, req: _MpcReq, shares: dict[int, int]) -> dict[str, Any]:
+            payload = {
+                "action_id": req.action_id,
+                "program_id": str(self.program_id),
+                "request_sha256": str(req.request_sha256),
+                "n_wires": int(self.circuit.n_wires),
+                "gates": gates,
+                "input_shares": {str(k): int(v) & 1 for k, v in (shares or {}).items()},
+                "outputs": {k: int(v) for k, v in self.circuit.outputs.items()},
+                "ttl_seconds": ttl,
+            }
+            _trace_mpc(server_id=(0 if url == self.policy0_url else 1), endpoint="/mpc/init", action_id=req.action_id, program_id=str(self.program_id), request_sha256=req.request_sha256, n_wires=int(self.circuit.n_wires), n_gates=len(gates), multi=False)
+            r = requests.post(f"{url}/mpc/init", json=payload, timeout=int(self.cfg.timeout_s))
+            r.raise_for_status()
+            j = r.json()
+            if not j.get("ok"):
+                raise RuntimeError("mpc_init_failed")
+            return j
+
+        fs: list[Future] = []
+        for req in batch:
+            fs.append(_HTTP_POOL.submit(one, self.policy0_url, req, req.input0))
+            fs.append(_HTTP_POOL.submit(one, self.policy1_url, req, req.input1))
+        # raise on any failure
+        for f in fs:
+            _ = f.result()
+
+    def _mpc_and_round_multi(self, batch: list[_MpcReq], *, round_index: int, gate_indices: list[int]) -> None:
+        # Prepare triple shares for each session.
+        reqs0: list[dict[str, Any]] = []
+        reqs1: list[dict[str, Any]] = []
+        for req in batch:
+            triples0: list[dict[str, Any]] = []
+            triples1: list[dict[str, Any]] = []
+            for gi in gate_indices:
+                a = secrets.randbits(1) & 1
+                b = secrets.randbits(1) & 1
+                c = (a & b) & 1
+                a0, a1 = _share_bit(a)
+                b0, b1 = _share_bit(b)
+                c0, c1 = _share_bit(c)
+                triples0.append({"gate_index": int(gi), "a_share": int(a0), "b_share": int(b0), "c_share": int(c0)})
+                triples1.append({"gate_index": int(gi), "a_share": int(a1), "b_share": int(b1), "c_share": int(c1)})
+            reqs0.append({"action_id": str(req.action_id), "triples": triples0})
+            reqs1.append({"action_id": str(req.action_id), "triples": triples1})
+
+        _trace_mpc(server_id=0, endpoint="/mpc/and_mask_multi", action_id=None, program_id=str(self.program_id), and_round=int(round_index), n_items=len(batch) * len(gate_indices), multi=True)
+        _trace_mpc(server_id=1, endpoint="/mpc/and_mask_multi", action_id=None, program_id=str(self.program_id), and_round=int(round_index), n_items=len(batch) * len(gate_indices), multi=True)
+        f0 = _HTTP_POOL.submit(requests.post, f"{self.policy0_url}/mpc/and_mask_multi", json={"requests": reqs0}, timeout=int(self.cfg.timeout_s))
+        f1 = _HTTP_POOL.submit(requests.post, f"{self.policy1_url}/mpc/and_mask_multi", json={"requests": reqs1}, timeout=int(self.cfg.timeout_s))
+        r0 = f0.result()
+        r1 = f1.result()
+        r0.raise_for_status()
+        r1.raise_for_status()
+        j0 = r0.json()
+        j1 = r1.json()
+
+        # action_id -> shares
+        m0: dict[str, tuple[list[int], list[int]]] = {}
+        m1: dict[str, tuple[list[int], list[int]]] = {}
+        for it in (j0.get("responses") or []):
+            if not isinstance(it, dict):
+                continue
+            if not it.get("ok"):
+                continue
+            aid = str(it.get("action_id") or "")
+            d = [int(x) & 1 for x in (it.get("d_shares") or [])]
+            e = [int(x) & 1 for x in (it.get("e_shares") or [])]
+            m0[aid] = (d, e)
+        for it in (j1.get("responses") or []):
+            if not isinstance(it, dict):
+                continue
+            if not it.get("ok"):
+                continue
+            aid = str(it.get("action_id") or "")
+            d = [int(x) & 1 for x in (it.get("d_shares") or [])]
+            e = [int(x) & 1 for x in (it.get("e_shares") or [])]
+            m1[aid] = (d, e)
+
+        # Build finish opens per session.
+        fin_reqs: list[dict[str, Any]] = []
+        for req in batch:
+            a0 = m0.get(str(req.action_id))
+            a1 = m1.get(str(req.action_id))
+            if not a0 or not a1:
+                raise RuntimeError("mpc_multi_missing_reply")
+            d0s, e0s = a0
+            d1s, e1s = a1
+            if not (len(d0s) == len(e0s) == len(d1s) == len(e1s) == len(gate_indices)):
+                raise RuntimeError("mpc_multi_bad_batch_size")
+            opens: list[dict[str, Any]] = []
+            for k, gi in enumerate(gate_indices):
+                d = (int(d0s[k]) ^ int(d1s[k])) & 1
+                e = (int(e0s[k]) ^ int(e1s[k])) & 1
+                opens.append({"gate_index": int(gi), "d": int(d), "e": int(e)})
+            fin_reqs.append({"action_id": str(req.action_id), "opens": opens})
+
+        _trace_mpc(server_id=0, endpoint="/mpc/and_finish_multi", action_id=None, program_id=str(self.program_id), and_round=int(round_index), n_items=len(batch) * len(gate_indices), multi=True)
+        _trace_mpc(server_id=1, endpoint="/mpc/and_finish_multi", action_id=None, program_id=str(self.program_id), and_round=int(round_index), n_items=len(batch) * len(gate_indices), multi=True)
+        f0 = _HTTP_POOL.submit(requests.post, f"{self.policy0_url}/mpc/and_finish_multi", json={"requests": fin_reqs}, timeout=int(self.cfg.timeout_s))
+        f1 = _HTTP_POOL.submit(requests.post, f"{self.policy1_url}/mpc/and_finish_multi", json={"requests": fin_reqs}, timeout=int(self.cfg.timeout_s))
+        r0 = f0.result()
+        r1 = f1.result()
+        r0.raise_for_status()
+        r1.raise_for_status()
+        # We don't need z_shares for correctness at gateway (servers update wires internally).
+
+    def _mpc_and_round_single(self, batch: list[_MpcReq], *, round_index: int, gate_indices: list[int]) -> None:
+        # Fallback: per-session batch endpoints.
+        for req in batch:
+            triples0: list[dict[str, Any]] = []
+            triples1: list[dict[str, Any]] = []
+            for gi in gate_indices:
+                a = secrets.randbits(1) & 1
+                b = secrets.randbits(1) & 1
+                c = (a & b) & 1
+                a0, a1 = _share_bit(a)
+                b0, b1 = _share_bit(b)
+                c0, c1 = _share_bit(c)
+                triples0.append({"gate_index": int(gi), "a_share": int(a0), "b_share": int(b0), "c_share": int(c0)})
+                triples1.append({"gate_index": int(gi), "a_share": int(a1), "b_share": int(b1), "c_share": int(c1)})
+
+            _trace_mpc(server_id=0, endpoint="/mpc/and_mask_batch", action_id=req.action_id, program_id=str(self.program_id), and_round=int(round_index), n_items=len(gate_indices), multi=False)
+            _trace_mpc(server_id=1, endpoint="/mpc/and_mask_batch", action_id=req.action_id, program_id=str(self.program_id), and_round=int(round_index), n_items=len(gate_indices), multi=False)
+            f0 = _HTTP_POOL.submit(requests.post, f"{self.policy0_url}/mpc/and_mask_batch", json={"action_id": req.action_id, "triples": triples0}, timeout=int(self.cfg.timeout_s))
+            f1 = _HTTP_POOL.submit(requests.post, f"{self.policy1_url}/mpc/and_mask_batch", json={"action_id": req.action_id, "triples": triples1}, timeout=int(self.cfg.timeout_s))
+            r0 = f0.result()
+            r1 = f1.result()
+            r0.raise_for_status()
+            r1.raise_for_status()
+            j0 = r0.json()
+            j1 = r1.json()
+            d0s = j0.get("d_shares") or []
+            e0s = j0.get("e_shares") or []
+            d1s = j1.get("d_shares") or []
+            e1s = j1.get("e_shares") or []
+            if not (len(d0s) == len(e0s) == len(d1s) == len(e1s) == len(gate_indices)):
+                raise RuntimeError("mpc_bad_batch_size")
+            opens: list[dict[str, Any]] = []
+            for k, gi in enumerate(gate_indices):
+                d = (int(d0s[k]) ^ int(d1s[k])) & 1
+                e = (int(e0s[k]) ^ int(e1s[k])) & 1
+                opens.append({"gate_index": int(gi), "d": int(d), "e": int(e)})
+
+            _trace_mpc(server_id=0, endpoint="/mpc/and_finish_batch", action_id=req.action_id, program_id=str(self.program_id), and_round=int(round_index), n_items=len(gate_indices), multi=False)
+            _trace_mpc(server_id=1, endpoint="/mpc/and_finish_batch", action_id=req.action_id, program_id=str(self.program_id), and_round=int(round_index), n_items=len(gate_indices), multi=False)
+            f0 = _HTTP_POOL.submit(requests.post, f"{self.policy0_url}/mpc/and_finish_batch", json={"action_id": req.action_id, "opens": opens}, timeout=int(self.cfg.timeout_s))
+            f1 = _HTTP_POOL.submit(requests.post, f"{self.policy1_url}/mpc/and_finish_batch", json={"action_id": req.action_id, "opens": opens}, timeout=int(self.cfg.timeout_s))
+            r0 = f0.result()
+            r1 = f1.result()
+            r0.raise_for_status()
+            r1.raise_for_status()
+
+    def _mpc_finalize_many(self, batch: list[_MpcReq]) -> dict[str, dict[str, Any]]:
+        out: dict[str, dict[str, Any]] = {}
+
+        def one(url: str, req: _MpcReq) -> dict[str, Any]:
+            _trace_mpc(server_id=(0 if url == self.policy0_url else 1), endpoint="/mpc/finalize", action_id=req.action_id, program_id=str(self.program_id), request_sha256=req.request_sha256, multi=False)
+            r = requests.post(f"{url}/mpc/finalize", json={"action_id": req.action_id}, timeout=int(self.cfg.timeout_s))
+            r.raise_for_status()
+            j = r.json()
+            if not j.get("ok"):
+                raise RuntimeError("mpc_finalize_failed")
+            return j
+
+        fs: dict[tuple[str, int], Future] = {}
+        for req in batch:
+            fs[(req.action_id, 0)] = _HTTP_POOL.submit(one, self.policy0_url, req)
+            fs[(req.action_id, 1)] = _HTTP_POOL.submit(one, self.policy1_url, req)
+        # collect
+        for (aid, sid), f in fs.items():
+            j = f.result()
+            out.setdefault(aid, {})
+            out[aid][f"policy{sid}"] = j.get("proof")
+        return out
+
+    def _flush_once(self) -> None:
+        cfg = self.cfg
+        batch: list[_MpcReq] = []
+        with self._lock:
+            if self._pending:
+                take = min(int(cfg.pad_to), len(self._pending))
+                batch = self._pending[:take]
+                self._pending = self._pending[take:]
+
+        # If there are no real sessions, still emit cover traffic if enabled.
+        if not batch and not bool(cfg.cover_traffic):
+            return
+
+        # Pad with dummy sessions up to pad_to.
+        pad_to = int(cfg.pad_to)
+        while len(batch) < pad_to:
+            batch.append(self._mk_dummy_req())
+
+        # Execute full MPC pipeline for this constant-shape batch.
+        try:
+            self._mpc_init_many(batch)
+            for ridx, gates in enumerate(self.circuit.and_rounds):
+                if not gates:
+                    continue
+                if bool(cfg.use_multi_endpoints):
+                    self._mpc_and_round_multi(batch, round_index=ridx, gate_indices=gates)
+                else:
+                    self._mpc_and_round_single(batch, round_index=ridx, gate_indices=gates)
+            proofs_by_action = self._mpc_finalize_many(batch)
+        except Exception as e:
+            # Fail all *real* futures in this flush.
+            for req in batch:
+                if req.is_dummy:
+                    continue
+                try:
+                    req.future.set_exception(e)
+                except Exception:
+                    pass
+            return
+
+        for req in batch:
+            if req.is_dummy:
+                continue
+            try:
+                ce = proofs_by_action.get(req.action_id) or {}
+                if not ce.get("policy0") or not ce.get("policy1"):
+                    raise RuntimeError("mpc_missing_commit_proofs")
+                req.future.set_result({"policy0": ce.get("policy0"), "policy1": ce.get("policy1")})
+            except Exception as e:
+                try:
+                    req.future.set_exception(e)
+                except Exception:
+                    pass
+
+    def _run(self) -> None:
+        interval_s = max(0.001, float(self.cfg.interval_ms) / 1000.0)
+        while not self._stop.is_set():
+            t0 = time.perf_counter()
+            self._flush_once()
+            dt = time.perf_counter() - t0
+            sleep_s = interval_s - dt
+            if sleep_s > 0:
+                self._stop.wait(timeout=sleep_s)
+
+
+class MixedMpcClient:
+    """
+    Minimal wrapper that exposes a `run_commit` API for the unified policy engine.
+
+    When enabled, MPC sessions are executed in constant-shape ticks.
+    """
+
+    def __init__(self, *, policy0_url: str, policy1_url: str, cfg: MpcMixConfig, circuit: Circuit, program_id: str) -> None:
+        self._cfg = cfg
+        self._mixer: _MpcBatchMixer | None = None
+        if cfg.enabled:
+            self._mixer = _MpcBatchMixer(policy0_url=policy0_url, policy1_url=policy1_url, cfg=cfg, circuit=circuit, program_id=program_id)
+
+    def close(self) -> None:
+        if self._mixer:
+            self._mixer.close()
+
+    def run_commit(self, *, action_id: str, request_sha256: str, input0: dict[int, int], input1: dict[int, int], timeout_s: int) -> dict[str, Any]:
+        if not self._mixer:
+            raise RuntimeError("mpc_mixer_disabled")
+        fut = self._mixer.submit(action_id=action_id, request_sha256=request_sha256, input0=input0, input1=input1)
+        out = fut.result(timeout=max(1.0, float(timeout_s)))
+        if not isinstance(out, dict):
+            raise RuntimeError("mpc_mixer_bad_result")
+        return dict(out)
+
+
 class UnifiedPolicyEngine:
     """
     Unified policy program with constant-shape PIR surface and constant program_id.
@@ -450,6 +855,31 @@ class UnifiedPolicyEngine:
         cfg = _load_policy_config()
         self._circuit = build_policy_unified_v1_circuit_from_policy(cfg) or build_policy_unified_v1_circuit_default()
         self._bundle: BundleConfig | None = None
+        self._mpc_mixed: MixedMpcClient | None = None
+
+        # Optional MPC cover traffic + microbatching (to reduce action-count/timing leakage at MPC layer).
+        if bool(int(os.getenv("MPC_MIX_ENABLED", "0"))):
+            pad_to = int(os.getenv("MPC_MIX_PAD_TO", "1"))
+            if pad_to < 1:
+                pad_to = 1
+            if pad_to > 64:
+                pad_to = 64
+            mcfg = MpcMixConfig(
+                enabled=True,
+                interval_ms=int(os.getenv("MPC_MIX_INTERVAL_MS", "50")),
+                # Default to no padding for paper pipeline; raise for production hiding.
+                pad_to=int(pad_to),
+                cover_traffic=bool(int(os.getenv("MPC_COVER_TRAFFIC", "0"))),
+                timeout_s=int(os.getenv("MPC_MIX_TIMEOUT_S", "15")),
+                use_multi_endpoints=bool(int(os.getenv("MPC_MIX_MULTI_ENDPOINTS", "1"))),
+            )
+            self._mpc_mixed = MixedMpcClient(
+                policy0_url=str(getattr(self.pir, "policy0_url")),
+                policy1_url=str(getattr(self.pir, "policy1_url")),
+                cfg=mcfg,
+                circuit=self._circuit,
+                program_id=str(self.program_id),
+            )
 
     def _query_bits_signed_or_single_server(
         self,
@@ -574,6 +1004,8 @@ class UnifiedPolicyEngine:
         payload1 = dict(payload0)
         payload1["input_shares"] = {str(k): int(v) & 1 for k, v in (input1 or {}).items()}
 
+        _trace_mpc(server_id=0, endpoint="/mpc/init", action_id=str(action_id), program_id=str(self.program_id), request_sha256=str(request_sha256), n_wires=int(self._circuit.n_wires), n_gates=len(gates), multi=False)
+        _trace_mpc(server_id=1, endpoint="/mpc/init", action_id=str(action_id), program_id=str(self.program_id), request_sha256=str(request_sha256), n_wires=int(self._circuit.n_wires), n_gates=len(gates), multi=False)
         f0 = _HTTP_POOL.submit(requests.post, f"{self.pir.policy0_url}/mpc/init", json=payload0, timeout=10)
         f1 = _HTTP_POOL.submit(requests.post, f"{self.pir.policy1_url}/mpc/init", json=payload1, timeout=10)
         r0 = f0.result()
@@ -584,7 +1016,7 @@ class UnifiedPolicyEngine:
             raise RuntimeError("mpc_init_failed")
 
     def _mpc_eval_and_rounds(self, *, action_id: str) -> None:
-        for round_gates in self._circuit.and_rounds:
+        for ridx, round_gates in enumerate(self._circuit.and_rounds):
             triples0: list[dict[str, Any]] = []
             triples1: list[dict[str, Any]] = []
             for gi in round_gates:
@@ -599,6 +1031,8 @@ class UnifiedPolicyEngine:
 
             m0 = {"action_id": action_id, "triples": triples0}
             m1 = {"action_id": action_id, "triples": triples1}
+            _trace_mpc(server_id=0, endpoint="/mpc/and_mask_batch", action_id=str(action_id), program_id=str(self.program_id), and_round=int(ridx), n_items=len(round_gates), multi=False)
+            _trace_mpc(server_id=1, endpoint="/mpc/and_mask_batch", action_id=str(action_id), program_id=str(self.program_id), and_round=int(ridx), n_items=len(round_gates), multi=False)
             f0 = _HTTP_POOL.submit(requests.post, f"{self.pir.policy0_url}/mpc/and_mask_batch", json=m0, timeout=10)
             f1 = _HTTP_POOL.submit(requests.post, f"{self.pir.policy1_url}/mpc/and_mask_batch", json=m1, timeout=10)
             r0 = f0.result()
@@ -622,6 +1056,8 @@ class UnifiedPolicyEngine:
                 e = (int(e0s[k]) ^ int(e1s[k])) & 1
                 opens.append({"gate_index": int(gi), "d": int(d), "e": int(e)})
             fin = {"action_id": action_id, "opens": opens}
+            _trace_mpc(server_id=0, endpoint="/mpc/and_finish_batch", action_id=str(action_id), program_id=str(self.program_id), and_round=int(ridx), n_items=len(round_gates), multi=False)
+            _trace_mpc(server_id=1, endpoint="/mpc/and_finish_batch", action_id=str(action_id), program_id=str(self.program_id), and_round=int(ridx), n_items=len(round_gates), multi=False)
             f0 = _HTTP_POOL.submit(requests.post, f"{self.pir.policy0_url}/mpc/and_finish_batch", json=fin, timeout=10)
             f1 = _HTTP_POOL.submit(requests.post, f"{self.pir.policy1_url}/mpc/and_finish_batch", json=fin, timeout=10)
             r0 = f0.result()
@@ -631,6 +1067,8 @@ class UnifiedPolicyEngine:
 
     def _mpc_finalize(self, *, action_id: str) -> dict[str, Any]:
         payload = {"action_id": action_id}
+        _trace_mpc(server_id=0, endpoint="/mpc/finalize", action_id=str(action_id), program_id=str(self.program_id), multi=False)
+        _trace_mpc(server_id=1, endpoint="/mpc/finalize", action_id=str(action_id), program_id=str(self.program_id), multi=False)
         f0 = _HTTP_POOL.submit(requests.post, f"{self.pir.policy0_url}/mpc/finalize", json=payload, timeout=10)
         f1 = _HTTP_POOL.submit(requests.post, f"{self.pir.policy1_url}/mpc/finalize", json=payload, timeout=10)
         r0 = f0.result()
@@ -811,9 +1249,18 @@ class UnifiedPolicyEngine:
         ]:
             set_in(nm, int(bit) & 1)
 
-        self._mpc_init(action_id=action_id, request_sha256=request_sha, input0=in0, input1=in1)
-        self._mpc_eval_and_rounds(action_id=action_id)
-        commit_ev = self._mpc_finalize(action_id=action_id)
+        if self._mpc_mixed is not None:
+            commit_ev = self._mpc_mixed.run_commit(
+                action_id=action_id,
+                request_sha256=request_sha,
+                input0=in0,
+                input1=in1,
+                timeout_s=int(os.getenv("MPC_COMMIT_TIMEOUT_S", "30")),
+            )
+        else:
+            self._mpc_init(action_id=action_id, request_sha256=request_sha, input0=in0, input1=in1)
+            self._mpc_eval_and_rounds(action_id=action_id)
+            commit_ev = self._mpc_finalize(action_id=action_id)
 
         p0 = (commit_ev.get("policy0") or {}) if isinstance(commit_ev, dict) else {}
         p1 = (commit_ev.get("policy1") or {}) if isinstance(commit_ev, dict) else {}
@@ -973,9 +1420,18 @@ class UnifiedPolicyEngine:
         ]:
             set_in(nm, int(bit) & 1)
 
-        self._mpc_init(action_id=action_id, request_sha256=request_sha, input0=in0, input1=in1)
-        self._mpc_eval_and_rounds(action_id=action_id)
-        commit_ev = self._mpc_finalize(action_id=action_id)
+        if self._mpc_mixed is not None:
+            commit_ev = self._mpc_mixed.run_commit(
+                action_id=action_id,
+                request_sha256=request_sha,
+                input0=in0,
+                input1=in1,
+                timeout_s=int(os.getenv("MPC_COMMIT_TIMEOUT_S", "30")),
+            )
+        else:
+            self._mpc_init(action_id=action_id, request_sha256=request_sha, input0=in0, input1=in1)
+            self._mpc_eval_and_rounds(action_id=action_id)
+            commit_ev = self._mpc_finalize(action_id=action_id)
 
         p0 = (commit_ev.get("policy0") or {}) if isinstance(commit_ev, dict) else {}
         p1 = (commit_ev.get("policy1") or {}) if isinstance(commit_ev, dict) else {}

@@ -801,6 +801,8 @@ OPENCLAW_STATE_DIR="artifact_out/openclaw_state" \
 ## 23. 相关文档
 
 - `ARTIFACT.md`: artifact 运行与提交说明
+- `ALGORITHMS.md`: 英文版算法/协议说明（对应主要贡献点；含正确性与验证映射）
+- `ALGORITHMS_CN.md`: 中文版算法/协议说明（与 `ALGORITHMS.md` 对应）
 - `EFFECTIVENESS.md`: 有效性定义与对应证据
 - `FORMAL_SECURITY.md`: NBE/SM/SAP/SCS 的严格定义、安全游戏与可验证命题
 - `MOTIVATION_PAPER.md`: 英文论文级 Motivation/Problem/Goals/Approach（含 baseline 能力矩阵与案例映射）
@@ -868,9 +870,16 @@ python main.py paper-artifact
 
 ### 24.5 性能工程与吞吐曲线（必须）
 
-policy server 的 O(N) 内积计算有两条后端：
-- Python：`policy_server/db.py`
-- Rust：`policy_server_rust/src/main.rs`（64-bit chunk + popcount parity；更接近生产可用实现）
+policy server 的 PIR bitset 求值内核有两条实现（共享同一接口与 proof 格式）：
+- Python：`policy_server/db.py` + `fss/dpf.py`
+- Rust：`policy_server_rust/src/main.rs`（compiled backend；dense 路径使用 64-bit chunk + popcount parity）
+
+另外实现了“稀疏 bitset”快速路径（默认 `auto`）：
+- 预计算 bitset 的 set-bit 索引集合 `S`，用 `ans_share = XOR_{i in S} DPFEvalPoint(k_party, i)` 计算 parity share（见 `ALGORITHMS.md:Algorithm A4b`）。
+- 通过 `PIR_EVAL_MODE={auto|dense|sparse}` 控制：
+  - `auto`：按 `|S|·logN` vs `N` 的启发式自动选择（推荐）
+  - `dense`：强制走 O(N) 路径（用于 worst-case 吞吐曲线）
+  - `sparse`：强制走稀疏路径（用于稀疏集合的生产常见场景）
 
 吞吐曲线：
 - `scripts/bench_policy_server_curves.py`
@@ -906,24 +915,24 @@ native runtime baselines（无 MIRAGE）：
 - `artifact_out/native_baselines/native_guardrail_eval.json`
 - `artifact_out/campaign/real_agent_campaign.json`
 
-样例（来自一次本地 smoke run；以输出文件中的 `seed` 与计数为准）：
+样例（来自一次本地 smoke run；以输出文件中的 `seed` 与计数为准；本例参数：`POLICY_BACKEND=rust,EVAL_ATTACKS_PER_CATEGORY=10,EVAL_BENIGNS_PER_CATEGORY=10,PIR_EVAL_MODE=auto`）：
 
 `paper_eval`（基线对比，节选）：
 
 | mode | 攻击阻断率 | 良性误报率 | p95 延迟（ms） | 吞吐（ops/s） |
 |---|---:|---:|---:|---:|
-| `mirage_full` | 0.750 | 0.333 | 1602.966 | 0.801 |
-| `policy_only` | 0.750 | 0.333 | 2603.220 | 0.538 |
-| `sandbox_only` | 0.250 | 0.000 | 0.748 | 2746.934 |
-| `single_server_policy` | 0.750 | 0.333 | 73.988 | 21.867 |
+| `mirage_full` | 0.889 | 0.000 | 69.471 | 20.387 |
+| `policy_only` | 0.889 | 0.000 | 68.917 | 19.882 |
+| `sandbox_only` | 0.111 | 0.000 | 0.805 | 3234.753 |
+| `single_server_policy` | 0.889 | 0.000 | 14.349 | 88.465 |
 
 解释要点：
 - `single_server_policy` 主要用于“隐私 vs 性能”对照：它更快，但牺牲 SAP（单审计方隐私）目标。
 - `sandbox_only` 是显式旁路策略检查的 ablation：吞吐高但安全性显著下降，用于证明“只有运行时/沙箱并不足以覆盖攻击集”。
 
 `policy_perf`（policy server 曲线，节选为本机最佳点的 effective keys/s）：
-- Python backend：约 `149.12` effective keys/s（`logical_batch=8,pad_to=0,concurrency=4`）
-- Rust backend：约 `6964.44` effective keys/s（`logical_batch=128,pad_to=128,concurrency=4`）
+- Python backend：约 `20000` effective keys/s（`logical_batch=8,effective_batch=128,pad_to=128`）
+- Rust backend：约 `172625` effective keys/s（`logical_batch=128,effective_batch=128,pad_to=32`）
 
 `real_agent_campaign`（真实 agent 闭环，节选）：
 - OpenClaw + MIRAGE：`benign_allow_rate=1.0`，`attack_block_rate=1.0`（`n_ok=1`）
