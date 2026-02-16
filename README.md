@@ -275,6 +275,7 @@ artifact 证据：
 - `scripts/security_game_nbe_check.py`: NBE 安全游戏/定理的可执行检查
 - `scripts/paper_eval.py`: 强基线 + 攻击/良性任务集评测（含置信区间/显著性）
 - `scripts/bench_policy_server_curves.py`: policy server 曲线（batch/padding 对吞吐影响）
+- `scripts/bench_policy_server_scaling.py`: policy server 单核/多核 scaling（RAYON 线程数）+ JSON/Binary 传输对比
 - `scripts/bench_e2e_shaping_curves.py`: 端到端 shaping 曲线（PIR/MPC mixing + cover traffic + pad_to）
 - `scripts/native_guardrail_eval.py`: Codex/Claude/OpenClaw 原生防护强基线
 - `scripts/real_agent_campaign.py`: real-agent 闭环评测与证据链产出
@@ -561,11 +562,14 @@ Router 已实现的 intent（是否可用取决于 capability 配置）：
 2. NBE 形式化检查（见 `FORMAL_SECURITY.md` 与 `scripts/security_game_nbe_check.py`）
 3. baselines + 大规模评测（`scripts/paper_eval.py`）
 4. policy server 吞吐曲线（`scripts/bench_policy_server_curves.py`）
-5. 端到端吞吐 benches（python + rust，可选）
-6. native runtime baselines（`scripts/native_guardrail_eval.py`）
-7. real-agent campaign（`scripts/real_agent_campaign.py`）
-8. 自动产图（`artifact_out/figures/*.svg`）
-9. 可复现 manifest（`artifact_out/repro_manifest.json`）
+5. policy server 单核/多核 scaling + JSON/Binary 传输对比（`scripts/bench_policy_server_scaling.py`）
+6. 端到端吞吐 benches（python + rust，可选）
+7. 端到端 shaping 曲线（`scripts/bench_e2e_shaping_curves.py`）
+8. native runtime baselines（`scripts/native_guardrail_eval.py`）
+9. real-agent campaign（`scripts/real_agent_campaign.py`）
+10. 审计日志 hash-chain 校验（`scripts/verify_audit_log.py`）
+11. 自动产图（`artifact_out/figures/*.svg`）
+12. 可复现 manifest（`artifact_out/repro_manifest.json`）
 
 ---
 
@@ -877,6 +881,14 @@ policy server 的 PIR bitset 求值内核有两条实现（共享同一接口与
 - Python：`policy_server/db.py` + `fss/dpf.py`
 - Rust：`policy_server_rust/src/main.rs`（compiled backend；dense 路径使用 64-bit chunk + popcount parity）
 
+传输层优化（长连接 + 二进制 framing）：
+- 网关端对 policy/executor 调用统一改为 `requests.Session` 连接池复用（`gateway/http_session.py`）。
+- Rust policy server 新增 binary PIR 端点：
+  - `/pir/query_batch_bin`
+  - `/pir/query_batch_signed_bin`
+  - `/pir/query_batch_multi_signed_bin`
+- 网关可通过 `PIR_BINARY_TRANSPORT=1` 启用 binary PIR（失败自动回退 JSON），减少 JSON/base64 编解码与 payload 体积。
+
 另外实现了“稀疏 bitset”快速路径（默认 `auto`）：
 - 预计算 bitset 的 set-bit 索引集合 `S`，用 `ans_share = XOR_{i in S} DPFEvalPoint(k_party, i)` 计算 parity share（见 `ALGORITHMS.md:Algorithm A4b`）。
 - 通过 `PIR_EVAL_MODE={auto|dense|sparse}` 控制：
@@ -888,10 +900,26 @@ policy server 的 PIR bitset 求值内核有两条实现（共享同一接口与
 - `scripts/bench_policy_server_curves.py`
 - 输出：`artifact_out/policy_perf/policy_server_curves.json` 与 `.csv`
 
+单核/多核 scaling（含 JSON vs binary 传输）：
+- `scripts/bench_policy_server_scaling.py`
+- 输出：`artifact_out/policy_perf/policy_server_scaling.json` 与 `.csv`
+- 自动产图：`artifact_out/figures/policy_server_scaling_keys_s.svg`
+
 端到端 shaping 曲线（mixing/padding/cover 的吞吐-延迟权衡）：
 - `scripts/bench_e2e_shaping_curves.py`
 - 输出：`artifact_out/shaping_perf/e2e_shaping_curves.json` 与 `.csv`
 - 自动产图：`artifact_out/figures/e2e_shaping_curves_ops_s.svg`
+
+高利用率 shaping 调度（可选）：
+- PIR mixer:
+  - `PIR_MIX_LANES`（并行 lane 数）
+  - `PIR_MIX_MAX_INFLIGHT`（允许并行在途 tick 数）
+  - `PIR_MIX_SCHEDULE={fixed|eager}`
+- MPC mixer:
+  - `MPC_MIX_LANES`
+  - `MPC_MIX_MAX_INFLIGHT`
+  - `MPC_MIX_SCHEDULE={fixed|eager}`
+- 默认值保持保守（`lanes=1,max_inflight=1,fixed`）以避免低负载下排队抖动；生产压测时可逐步上调。
 
 目标解释：证明“安全提升不是靠把系统变慢 100 倍”，而是可以通过编译/向量化显著降低常数因子。
 
@@ -941,6 +969,10 @@ native runtime baselines（无 MIRAGE）：
 `policy_perf`（policy server 曲线，节选为本机最佳点的 effective keys/s）：
 - Python backend：约 `20000` effective keys/s（`logical_batch=8,effective_batch=128,pad_to=128`）
 - Rust backend：约 `172625` effective keys/s（`logical_batch=128,effective_batch=128,pad_to=32`）
+
+`policy_server_scaling`（单机线程扩展与传输层对比，示例）：
+- 在同一 batch/concurrency 下，`PIR_BINARY_TRANSPORT=1` 相对 JSON 常见可观收益（一次本机短测：throughput 约 `1.20x`、p95 约降至 `0.47x`）。
+- 以 `policy_server_scaling.json` 为准报告不同线程数（`RAYON_NUM_THREADS`）下的 `throughput_keys_s / p50 / p95` 曲线。
 
 `real_agent_campaign`（真实 agent 闭环，节选）：
 - OpenClaw + MIRAGE：`benign_allow_rate=1.0`，`attack_block_rate=1.0`（`n_ok=1`）

@@ -6,6 +6,8 @@ from typing import Any, Dict, Optional
 
 import requests
 
+from .http_session import session_for
+
 
 @dataclass(frozen=True, slots=True)
 class ExecutorClient:
@@ -41,7 +43,8 @@ class ExecutorClient:
             "session": session,
             "user_confirm": bool(user_confirm),
         }
-        r = requests.post(f"{self.base_url}/exec/send_message", json=payload, timeout=10)
+        u = str(self.base_url).rstrip("/")
+        r = session_for(u).post(f"{u}/exec/send_message", json=payload, timeout=10)
         r.raise_for_status()
         return r.json()
 
@@ -71,7 +74,8 @@ class ExecutorClient:
             "recipient": recipient,
             "text": text,
         }
-        r = requests.post(f"{self.base_url}/exec/fetch", json=payload, timeout=10)
+        u = str(self.base_url).rstrip("/")
+        r = session_for(u).post(f"{u}/exec/fetch", json=payload, timeout=10)
         r.raise_for_status()
         return r.json()
 
@@ -103,7 +107,8 @@ class ExecutorClient:
             "recipient": recipient,
             "text": text,
         }
-        r = requests.post(f"{self.base_url}/exec/webhook", json=payload, timeout=10)
+        u = str(self.base_url).rstrip("/")
+        r = session_for(u).post(f"{u}/exec/webhook", json=payload, timeout=10)
         r.raise_for_status()
         return r.json()
 
@@ -127,7 +132,8 @@ class ExecutorClient:
             "session": session,
             "user_confirm": bool(user_confirm),
         }
-        r = requests.post(f"{self.base_url}/exec/skill_install", json=payload, timeout=10)
+        u = str(self.base_url).rstrip("/")
+        r = session_for(u).post(f"{u}/exec/skill_install", json=payload, timeout=10)
         r.raise_for_status()
         return r.json()
 

@@ -1,6 +1,9 @@
 use axum::{
+    body::{Body, Bytes},
     extract::State,
     http::StatusCode,
+    http::{header, HeaderValue},
+    response::Response,
     routing::{get, post},
     Json, Router,
 };
@@ -22,6 +25,66 @@ use std::sync::{Arc, Mutex};
 type HmacSha256 = Hmac<Sha256>;
 
 const SEED_BYTES: usize = 16;
+const BIN_MAGIC: &[u8; 4] = b"MPIR";
+const BIN_VER: u8 = 1;
+
+// Binary PIR wire message types (HTTP body, Content-Type: application/octet-stream).
+const BIN_MSG_PIR_BATCH: u8 = 1;
+const BIN_MSG_PIR_BATCH_SIGNED: u8 = 2;
+const BIN_MSG_PIR_MULTI_SIGNED: u8 = 3;
+
+struct BinCur<'a> {
+    b: &'a [u8],
+    i: usize,
+}
+
+impl<'a> BinCur<'a> {
+    fn new(b: &'a [u8]) -> Self {
+        Self { b, i: 0 }
+    }
+
+    fn take(&mut self, n: usize) -> Result<&'a [u8], String> {
+        if self.i.saturating_add(n) > self.b.len() {
+            return Err("bin_truncated".to_string());
+        }
+        let out = &self.b[self.i..self.i + n];
+        self.i += n;
+        Ok(out)
+    }
+
+    fn u8(&mut self) -> Result<u8, String> {
+        Ok(self.take(1)?[0])
+    }
+
+    fn u16_le(&mut self) -> Result<u16, String> {
+        let x = self.take(2)?;
+        Ok(u16::from_le_bytes([x[0], x[1]]))
+    }
+
+    fn u32_le(&mut self) -> Result<u32, String> {
+        let x = self.take(4)?;
+        Ok(u32::from_le_bytes([x[0], x[1], x[2], x[3]]))
+    }
+
+    fn bytes_u32(&mut self) -> Result<&'a [u8], String> {
+        let n = self.u32_le()? as usize;
+        self.take(n)
+    }
+
+    fn str_u32(&mut self) -> Result<String, String> {
+        let x = self.bytes_u32()?;
+        std::str::from_utf8(x)
+            .map(|s| s.to_string())
+            .map_err(|_| "bin_bad_utf8".to_string())
+    }
+}
+
+fn octet_response(buf: Vec<u8>) -> Response {
+    let mut resp = Response::new(Body::from(buf));
+    resp.headers_mut()
+        .insert(header::CONTENT_TYPE, HeaderValue::from_static("application/octet-stream"));
+    resp
+}
 
 #[derive(Clone)]
 struct AppState {
@@ -746,6 +809,14 @@ async fn meta(State(st): State<AppState>) -> Json<Value> {
             );
         }
     }
+    out.insert(
+        "transport".to_string(),
+        json!({
+            "pir_binary": true,
+            "magic": "MPIR",
+            "version": BIN_VER
+        }),
+    );
     Json(Value::Object(out))
 }
 
@@ -934,6 +1005,197 @@ async fn pir_query_batch_signed(
     }))
 }
 
+async fn pir_query_batch_bin(State(st): State<AppState>, body: Bytes) -> Result<Response, (StatusCode, String)> {
+    let mut c = BinCur::new(&body);
+    let magic = c.take(4).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    if magic != BIN_MAGIC {
+        return Err((StatusCode::BAD_REQUEST, "bin_bad_magic".to_string()));
+    }
+    let ver = c.u8().map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    if ver != BIN_VER {
+        return Err((StatusCode::BAD_REQUEST, "bin_bad_version".to_string()));
+    }
+    let msg = c.u8().map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    if msg != BIN_MSG_PIR_BATCH {
+        return Err((StatusCode::BAD_REQUEST, "bin_bad_msg".to_string()));
+    }
+    let _ = c.u16_le().map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    let db_name = c.str_u32().map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    let n_keys = c.u32_le().map_err(|e| (StatusCode::BAD_REQUEST, e))? as usize;
+    let key_len = c.u16_le().map_err(|e| (StatusCode::BAD_REQUEST, e))? as usize;
+    if n_keys == 0 || key_len == 0 || key_len > 4096 {
+        return Err((StatusCode::BAD_REQUEST, "bin_bad_shape".to_string()));
+    }
+    let keys_blob = c
+        .take(n_keys.saturating_mul(key_len))
+        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    let mut keys: Vec<&[u8]> = Vec::with_capacity(n_keys);
+    for i in 0..n_keys {
+        let off = i * key_len;
+        keys.push(&keys_blob[off..off + key_len]);
+    }
+
+    let db = get_bitset(&st, &db_name).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    let ones = get_bitset_ones(&st, &db_name).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    let party = st.server_id;
+    let mode = env::var("PIR_EVAL_MODE").unwrap_or_else(|_| "auto".to_string());
+    let mode = mode.trim().to_ascii_lowercase();
+    let domain_size = db.len() * 8;
+    let mut tmp = domain_size;
+    let mut domain_bits = 0usize;
+    while tmp > 1 {
+        domain_bits += 1;
+        tmp >>= 1;
+    }
+    let use_sparse = if mode == "sparse" {
+        true
+    } else if mode == "dense" {
+        false
+    } else {
+        prefer_sparse(domain_size, domain_bits, ones.len())
+    };
+
+    let ans: Result<Vec<u8>, String> = keys
+        .par_iter()
+        .map(|kb| {
+            if use_sparse {
+                let key = decode_dpf_key(kb)?;
+                eval_parity_share_sparse(&key, &ones, party)
+            } else {
+                eval_parity_share(kb, &db, party)
+            }
+        })
+        .collect();
+    let ans = ans.map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+
+    let mut out = Vec::with_capacity(4 + 1 + 1 + 2 + 4 + ans.len());
+    out.extend_from_slice(BIN_MAGIC);
+    out.push(BIN_VER);
+    out.push(BIN_MSG_PIR_BATCH);
+    out.extend_from_slice(&0u16.to_le_bytes());
+    out.extend_from_slice(&(n_keys as u32).to_le_bytes());
+    out.extend_from_slice(&ans);
+    Ok(octet_response(out))
+}
+
+async fn pir_query_batch_signed_bin(State(st): State<AppState>, body: Bytes) -> Result<Response, (StatusCode, String)> {
+    let mut c = BinCur::new(&body);
+    let magic = c.take(4).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    if magic != BIN_MAGIC {
+        return Err((StatusCode::BAD_REQUEST, "bin_bad_magic".to_string()));
+    }
+    let ver = c.u8().map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    if ver != BIN_VER {
+        return Err((StatusCode::BAD_REQUEST, "bin_bad_version".to_string()));
+    }
+    let msg = c.u8().map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    if msg != BIN_MSG_PIR_BATCH_SIGNED {
+        return Err((StatusCode::BAD_REQUEST, "bin_bad_msg".to_string()));
+    }
+    let _ = c.u16_le().map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    let db_name = c.str_u32().map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    let action_id = c.str_u32().map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    let n_keys = c.u32_le().map_err(|e| (StatusCode::BAD_REQUEST, e))? as usize;
+    let key_len = c.u16_le().map_err(|e| (StatusCode::BAD_REQUEST, e))? as usize;
+    if n_keys == 0 || key_len == 0 || key_len > 4096 {
+        return Err((StatusCode::BAD_REQUEST, "bin_bad_shape".to_string()));
+    }
+    let keys_blob = c
+        .take(n_keys.saturating_mul(key_len))
+        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    let mut keys: Vec<&[u8]> = Vec::with_capacity(n_keys);
+    for i in 0..n_keys {
+        let off = i * key_len;
+        keys.push(&keys_blob[off..off + key_len]);
+    }
+
+    let db = get_bitset(&st, &db_name).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    let ones = get_bitset_ones(&st, &db_name).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    let party = st.server_id;
+    let mode = env::var("PIR_EVAL_MODE").unwrap_or_else(|_| "auto".to_string());
+    let mode = mode.trim().to_ascii_lowercase();
+    let domain_size = db.len() * 8;
+    let mut tmp = domain_size;
+    let mut domain_bits = 0usize;
+    while tmp > 1 {
+        domain_bits += 1;
+        tmp >>= 1;
+    }
+    let use_sparse = if mode == "sparse" {
+        true
+    } else if mode == "dense" {
+        false
+    } else {
+        prefer_sparse(domain_size, domain_bits, ones.len())
+    };
+
+    let ans: Result<Vec<u8>, String> = keys
+        .par_iter()
+        .map(|kb| {
+            if use_sparse {
+                let key = decode_dpf_key(kb)?;
+                eval_parity_share_sparse(&key, &ones, party)
+            } else {
+                eval_parity_share(kb, &db, party)
+            }
+        })
+        .collect();
+    let ans = ans.map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+
+    // keys_sha256 and resp_sha256 are over raw bytes / shares (same as JSON endpoint).
+    let mut hk = Sha256::new();
+    for kb in keys.iter() {
+        hk.update(kb);
+    }
+    let keys_sha256 = hex::encode(hk.finalize());
+
+    let mut hr = Sha256::new();
+    hr.update(&ans);
+    let resp_sha256 = hex::encode(hr.finalize());
+
+    let ts = (std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()) as i64;
+
+    let kid = st.active_kid.clone();
+    let key = st
+        .mac_keys
+        .get(&kid)
+        .ok_or_else(|| (StatusCode::INTERNAL_SERVER_ERROR, "missing mac key".to_string()))?;
+
+    let mut payload: BTreeMap<&str, Value> = BTreeMap::new();
+    payload.insert("v", Value::from(1));
+    payload.insert("kind", Value::from("bit"));
+    payload.insert("server_id", Value::from(st.server_id as i64));
+    payload.insert("kid", Value::from(kid.clone()));
+    payload.insert("ts", Value::from(ts));
+    payload.insert("action_id", Value::from(action_id.clone()));
+    payload.insert("db", Value::from(db_name.clone()));
+    payload.insert("keys_sha256", Value::from(keys_sha256));
+    payload.insert("resp_sha256", Value::from(resp_sha256));
+
+    let mac_b64 = sign_payload(key, &payload);
+    let mut proof_obj = serde_json::Map::new();
+    for (k, v) in payload.into_iter() {
+        proof_obj.insert(k.to_string(), v);
+    }
+    proof_obj.insert("mac_b64".to_string(), Value::from(mac_b64));
+    let proof_bytes = serde_json::to_vec(&Value::Object(proof_obj))
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "bad_proof_json".to_string()))?;
+
+    let mut out = Vec::with_capacity(4 + 1 + 1 + 2 + 4 + ans.len() + 4 + proof_bytes.len());
+    out.extend_from_slice(BIN_MAGIC);
+    out.push(BIN_VER);
+    out.push(BIN_MSG_PIR_BATCH_SIGNED);
+    out.extend_from_slice(&0u16.to_le_bytes());
+    out.extend_from_slice(&(n_keys as u32).to_le_bytes());
+    out.extend_from_slice(&ans);
+    out.extend_from_slice(&(proof_bytes.len() as u32).to_le_bytes());
+    out.extend_from_slice(&proof_bytes);
+    Ok(octet_response(out))
+}
+
 async fn pir_query_batch_multi_signed(
     State(st): State<AppState>,
     Json(q): Json<PirQueryBatchMultiSigned>,
@@ -1031,6 +1293,146 @@ async fn pir_query_batch_multi_signed(
 
     let responses = responses?;
     Ok(Json(PirAnsBatchMultiSigned { responses }))
+}
+
+async fn pir_query_batch_multi_signed_bin(State(st): State<AppState>, body: Bytes) -> Result<Response, (StatusCode, String)> {
+    let mut c = BinCur::new(&body);
+    let magic = c.take(4).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    if magic != BIN_MAGIC {
+        return Err((StatusCode::BAD_REQUEST, "bin_bad_magic".to_string()));
+    }
+    let ver = c.u8().map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    if ver != BIN_VER {
+        return Err((StatusCode::BAD_REQUEST, "bin_bad_version".to_string()));
+    }
+    let msg = c.u8().map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    if msg != BIN_MSG_PIR_MULTI_SIGNED {
+        return Err((StatusCode::BAD_REQUEST, "bin_bad_msg".to_string()));
+    }
+    let _ = c.u16_le().map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    let db_name = c.str_u32().map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    let n_sub = c.u32_le().map_err(|e| (StatusCode::BAD_REQUEST, e))? as usize;
+    let keys_per = c.u32_le().map_err(|e| (StatusCode::BAD_REQUEST, e))? as usize;
+    let key_len = c.u16_le().map_err(|e| (StatusCode::BAD_REQUEST, e))? as usize;
+    if n_sub == 0 || n_sub > 2048 || keys_per == 0 || keys_per > 4096 || key_len == 0 || key_len > 4096 {
+        return Err((StatusCode::BAD_REQUEST, "bin_bad_shape".to_string()));
+    }
+
+    struct Sub<'a> {
+        action_id: String,
+        keys: Vec<&'a [u8]>,
+    }
+    let mut subs: Vec<Sub> = Vec::with_capacity(n_sub);
+    for _ in 0..n_sub {
+        let action_id = c.str_u32().map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+        let kb = c
+            .take(keys_per.saturating_mul(key_len))
+            .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+        let mut keys: Vec<&[u8]> = Vec::with_capacity(keys_per);
+        for i in 0..keys_per {
+            let off = i * key_len;
+            keys.push(&kb[off..off + key_len]);
+        }
+        subs.push(Sub { action_id, keys });
+    }
+
+    let db = get_bitset(&st, &db_name).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    let ones = get_bitset_ones(&st, &db_name).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    let party = st.server_id;
+    let mode = env::var("PIR_EVAL_MODE").unwrap_or_else(|_| "auto".to_string());
+    let mode = mode.trim().to_ascii_lowercase();
+    let domain_size = db.len() * 8;
+    let mut tmp = domain_size;
+    let mut domain_bits = 0usize;
+    while tmp > 1 {
+        domain_bits += 1;
+        tmp >>= 1;
+    }
+    let use_sparse = if mode == "sparse" {
+        true
+    } else if mode == "dense" {
+        false
+    } else {
+        prefer_sparse(domain_size, domain_bits, ones.len())
+    };
+
+    let ts = (std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()) as i64;
+
+    let kid = st.active_kid.clone();
+    let mac_key = st
+        .mac_keys
+        .get(&kid)
+        .ok_or_else(|| (StatusCode::INTERNAL_SERVER_ERROR, "missing mac key".to_string()))?;
+
+    // Evaluate all subrequests. Include action_id in each response so ordering is not security-sensitive.
+    let responses: Result<Vec<(String, Vec<u8>, Vec<u8>)>, String> = subs
+        .par_iter()
+        .map(|sub| {
+            let ans: Result<Vec<u8>, String> = sub
+                .keys
+                .iter()
+                .map(|kb| {
+                    if use_sparse {
+                        let key = decode_dpf_key(kb)?;
+                        eval_parity_share_sparse(&key, &ones, party)
+                    } else {
+                        eval_parity_share(kb, &db, party)
+                    }
+                })
+                .collect();
+            let ans = ans?;
+
+            let mut hk = Sha256::new();
+            for kb in sub.keys.iter() {
+                hk.update(kb);
+            }
+            let keys_sha256 = hex::encode(hk.finalize());
+            let mut hr = Sha256::new();
+            hr.update(&ans);
+            let resp_sha256 = hex::encode(hr.finalize());
+
+            let mut payload: BTreeMap<&str, Value> = BTreeMap::new();
+            payload.insert("v", Value::from(1));
+            payload.insert("kind", Value::from("bit"));
+            payload.insert("server_id", Value::from(st.server_id as i64));
+            payload.insert("kid", Value::from(kid.clone()));
+            payload.insert("ts", Value::from(ts));
+            payload.insert("action_id", Value::from(sub.action_id.clone()));
+            payload.insert("db", Value::from(db_name.clone()));
+            payload.insert("keys_sha256", Value::from(keys_sha256));
+            payload.insert("resp_sha256", Value::from(resp_sha256));
+
+            let mac_b64 = sign_payload(mac_key, &payload);
+            let mut proof_obj = serde_json::Map::new();
+            for (k, v) in payload.into_iter() {
+                proof_obj.insert(k.to_string(), v);
+            }
+            proof_obj.insert("mac_b64".to_string(), Value::from(mac_b64));
+            let proof_bytes = serde_json::to_vec(&Value::Object(proof_obj)).map_err(|_| "bad_proof_json".to_string())?;
+
+            Ok((sub.action_id.clone(), ans, proof_bytes))
+        })
+        .collect();
+    let responses = responses.map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+
+    let mut out = Vec::new();
+    out.extend_from_slice(BIN_MAGIC);
+    out.push(BIN_VER);
+    out.push(BIN_MSG_PIR_MULTI_SIGNED);
+    out.extend_from_slice(&0u16.to_le_bytes());
+    out.extend_from_slice(&(n_sub as u32).to_le_bytes());
+    for (aid, ans, proof_bytes) in responses.into_iter() {
+        out.extend_from_slice(&(aid.as_bytes().len() as u32).to_le_bytes());
+        out.extend_from_slice(aid.as_bytes());
+        out.extend_from_slice(&(ans.len() as u32).to_le_bytes());
+        out.extend_from_slice(&ans);
+        out.extend_from_slice(&(proof_bytes.len() as u32).to_le_bytes());
+        out.extend_from_slice(&proof_bytes);
+    }
+    Ok(octet_response(out))
 }
 
 async fn pir_query_block_batch_signed(
@@ -1609,10 +2011,13 @@ async fn main() {
         .route("/health", get(health))
         .route("/meta", get(meta))
         .route("/pir/query_batch", post(pir_query_batch))
+        .route("/pir/query_batch_bin", post(pir_query_batch_bin))
         .route("/pir/query_block_batch", post(pir_query_block_batch))
         .route("/pir/query_idx_batch", post(pir_query_idx_batch))
         .route("/pir/query_batch_signed", post(pir_query_batch_signed))
+        .route("/pir/query_batch_signed_bin", post(pir_query_batch_signed_bin))
         .route("/pir/query_batch_multi_signed", post(pir_query_batch_multi_signed))
+        .route("/pir/query_batch_multi_signed_bin", post(pir_query_batch_multi_signed_bin))
         .route("/pir/query_block_batch_signed", post(pir_query_block_batch_signed))
         .route("/pir/query_idx_batch_signed", post(pir_query_idx_batch_signed))
         .route("/mpc/init", post(mpc_init))

@@ -8,7 +8,15 @@ import threading
 from concurrent.futures import Future
 
 from gateway.fss_pir import PirClient
-from gateway.fss_pir import PirMixConfig, _SignedBitBatchMixer
+from gateway.fss_pir import (
+    PirMixConfig,
+    _SignedBitBatchMixer,
+    _pack_pir_batch_req,
+    _pack_pir_multi_signed_req,
+    _parse_batch_resp,
+    _parse_batch_signed_resp,
+    _parse_multi_signed_resp,
+)
 from gateway.policy_unified import (
     BundleConfig,
     UnifiedPolicyEngine,
@@ -122,6 +130,65 @@ def _share_bit(rng: random.Random, x: int) -> tuple[int, int]:
 
 
 class AlgorithmTests(unittest.TestCase):
+    def test_binary_pir_wire_codec_roundtrip(self) -> None:
+        keys = [b"\x01\x02\x03", b"\x04\x05\x06"]
+        req = _pack_pir_batch_req(msg_type=2, db_name="allow_recipients", keys=keys, action_id="a_test")
+        self.assertTrue(req.startswith(b"MPIR"))
+        self.assertGreater(len(req), 16)
+
+        # batch (unsigned) response
+        resp = b"MPIR" + bytes([1, 1]) + b"\x00\x00" + (2).to_bytes(4, "little") + bytes([1, 0])
+        bits = _parse_batch_resp(resp, expect_msg=1)
+        self.assertEqual(bits, [1, 0])
+
+        # batch signed response
+        proof = b'{"ok":true}'
+        resp_s = (
+            b"MPIR"
+            + bytes([1, 2])
+            + b"\x00\x00"
+            + (2).to_bytes(4, "little")
+            + bytes([0, 1])
+            + len(proof).to_bytes(4, "little")
+            + proof
+        )
+        bits_s, p = _parse_batch_signed_resp(resp_s)
+        self.assertEqual(bits_s, [0, 1])
+        self.assertTrue(bool(p.get("ok")))
+
+        # multi-signed request + response
+        mreq = _pack_pir_multi_signed_req(
+            db_name="policy_bundle",
+            reqs=[("a0", [b"\x00\x01", b"\x02\x03"]), ("a1", [b"\x04\x05", b"\x06\x07"])],
+        )
+        self.assertTrue(mreq.startswith(b"MPIR"))
+
+        p0 = b'{"kid":"0"}'
+        p1 = b'{"kid":"1"}'
+        mresp = (
+            b"MPIR"
+            + bytes([1, 3])
+            + b"\x00\x00"
+            + (2).to_bytes(4, "little")
+            + (2).to_bytes(4, "little")
+            + b"a0"
+            + (2).to_bytes(4, "little")
+            + bytes([1, 0])
+            + len(p0).to_bytes(4, "little")
+            + p0
+            + (2).to_bytes(4, "little")
+            + b"a1"
+            + (2).to_bytes(4, "little")
+            + bytes([0, 1])
+            + len(p1).to_bytes(4, "little")
+            + p1
+        )
+        out = _parse_multi_signed_resp(mresp)
+        self.assertEqual(out["a0"][0], [1, 0])
+        self.assertEqual(out["a1"][0], [0, 1])
+        self.assertEqual(out["a0"][1].get("kid"), "0")
+        self.assertEqual(out["a1"][1].get("kid"), "1")
+
     def test_bundle_shift_formula(self) -> None:
         b = BundleConfig(
             enabled=True,
@@ -369,7 +436,11 @@ class AlgorithmTests(unittest.TestCase):
             responses = [{"action_id": str(sub["action_id"]), "ans_shares": [0, 0, 0, 0], "proof": {}} for sub in reqs]
             return _Resp({"responses": responses})
 
-        with patch("gateway.fss_pir.requests.post", side_effect=fake_post):
+        class _Sess:
+            def post(self, url: str, *, json: dict, timeout: int):  # noqa: ARG002
+                return fake_post(url, json=json, timeout=timeout)
+
+        with patch("gateway.fss_pir.session_for", return_value=_Sess()):
             m._flush_once()
 
         self.assertTrue(f0.done())

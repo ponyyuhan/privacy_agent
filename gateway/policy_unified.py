@@ -29,6 +29,7 @@ from .guardrails import fourgram_indices, stable_idx
 from .handles import HandleStore
 from .skill_ingress import extract_install_tokens
 from .tx_store import TxStore
+from .http_session import session_for
 
 _HTTP_POOL = ThreadPoolExecutor(max_workers=8)
 _TRACE_LOCK = threading.Lock()
@@ -487,6 +488,9 @@ class MpcMixConfig:
     cover_traffic: bool = False
     timeout_s: int = 15
     use_multi_endpoints: bool = True
+    lanes: int = 1
+    max_inflight: int = 1
+    schedule_mode: str = "fixed"  # fixed | eager
 
 
 class _MpcReq:
@@ -511,14 +515,32 @@ class _MpcBatchMixer:
 
         self._lock = threading.Lock()
         self._pending: list[_MpcReq] = []
+        self._inflight = 0
         self._stop = threading.Event()
-        self._t = threading.Thread(target=self._run, name="mpc-mixer", daemon=True)
-        self._t.start()
+        lanes = int(getattr(cfg, "lanes", 1) or 1)
+        if lanes < 1:
+            lanes = 1
+        if lanes > 16:
+            lanes = 16
+        self._lanes = lanes
+        # Run MPC batches in a separate pool so the scheduler threads never block
+        # and we avoid deadlocking on the shared HTTP pool.
+        self._work_pool = ThreadPoolExecutor(max_workers=max(1, min(8, lanes * 2)))
+        self._threads: list[threading.Thread] = []
+        for i in range(lanes):
+            t = threading.Thread(target=self._run_lane, args=(i,), name=f"mpc-mixer-{i}", daemon=True)
+            t.start()
+            self._threads.append(t)
 
     def close(self) -> None:
         self._stop.set()
+        for t in list(self._threads):
+            try:
+                t.join(timeout=1.0)
+            except Exception:
+                pass
         try:
-            self._t.join(timeout=1.0)
+            self._work_pool.shutdown(wait=False, cancel_futures=True)
         except Exception:
             pass
 
@@ -567,7 +589,8 @@ class _MpcBatchMixer:
                 "ttl_seconds": ttl,
             }
             _trace_mpc(server_id=(0 if url == self.policy0_url else 1), endpoint="/mpc/init", action_id=req.action_id, program_id=str(self.program_id), request_sha256=req.request_sha256, n_wires=int(self.circuit.n_wires), n_gates=len(gates), multi=False)
-            r = requests.post(f"{url}/mpc/init", json=payload, timeout=int(self.cfg.timeout_s))
+            u = str(url).rstrip("/")
+            r = session_for(u).post(f"{u}/mpc/init", json=payload, timeout=int(self.cfg.timeout_s))
             r.raise_for_status()
             j = r.json()
             if not j.get("ok"):
@@ -603,8 +626,10 @@ class _MpcBatchMixer:
 
         _trace_mpc(server_id=0, endpoint="/mpc/and_mask_multi", action_id=None, program_id=str(self.program_id), and_round=int(round_index), n_items=len(batch) * len(gate_indices), multi=True)
         _trace_mpc(server_id=1, endpoint="/mpc/and_mask_multi", action_id=None, program_id=str(self.program_id), and_round=int(round_index), n_items=len(batch) * len(gate_indices), multi=True)
-        f0 = _HTTP_POOL.submit(requests.post, f"{self.policy0_url}/mpc/and_mask_multi", json={"requests": reqs0}, timeout=int(self.cfg.timeout_s))
-        f1 = _HTTP_POOL.submit(requests.post, f"{self.policy1_url}/mpc/and_mask_multi", json={"requests": reqs1}, timeout=int(self.cfg.timeout_s))
+        u0 = str(self.policy0_url).rstrip("/")
+        u1 = str(self.policy1_url).rstrip("/")
+        f0 = _HTTP_POOL.submit(session_for(u0).post, f"{u0}/mpc/and_mask_multi", json={"requests": reqs0}, timeout=int(self.cfg.timeout_s))
+        f1 = _HTTP_POOL.submit(session_for(u1).post, f"{u1}/mpc/and_mask_multi", json={"requests": reqs1}, timeout=int(self.cfg.timeout_s))
         r0 = f0.result()
         r1 = f1.result()
         r0.raise_for_status()
@@ -654,8 +679,8 @@ class _MpcBatchMixer:
 
         _trace_mpc(server_id=0, endpoint="/mpc/and_finish_multi", action_id=None, program_id=str(self.program_id), and_round=int(round_index), n_items=len(batch) * len(gate_indices), multi=True)
         _trace_mpc(server_id=1, endpoint="/mpc/and_finish_multi", action_id=None, program_id=str(self.program_id), and_round=int(round_index), n_items=len(batch) * len(gate_indices), multi=True)
-        f0 = _HTTP_POOL.submit(requests.post, f"{self.policy0_url}/mpc/and_finish_multi", json={"requests": fin_reqs}, timeout=int(self.cfg.timeout_s))
-        f1 = _HTTP_POOL.submit(requests.post, f"{self.policy1_url}/mpc/and_finish_multi", json={"requests": fin_reqs}, timeout=int(self.cfg.timeout_s))
+        f0 = _HTTP_POOL.submit(session_for(u0).post, f"{u0}/mpc/and_finish_multi", json={"requests": fin_reqs}, timeout=int(self.cfg.timeout_s))
+        f1 = _HTTP_POOL.submit(session_for(u1).post, f"{u1}/mpc/and_finish_multi", json={"requests": fin_reqs}, timeout=int(self.cfg.timeout_s))
         r0 = f0.result()
         r1 = f1.result()
         r0.raise_for_status()
@@ -679,8 +704,10 @@ class _MpcBatchMixer:
 
             _trace_mpc(server_id=0, endpoint="/mpc/and_mask_batch", action_id=req.action_id, program_id=str(self.program_id), and_round=int(round_index), n_items=len(gate_indices), multi=False)
             _trace_mpc(server_id=1, endpoint="/mpc/and_mask_batch", action_id=req.action_id, program_id=str(self.program_id), and_round=int(round_index), n_items=len(gate_indices), multi=False)
-            f0 = _HTTP_POOL.submit(requests.post, f"{self.policy0_url}/mpc/and_mask_batch", json={"action_id": req.action_id, "triples": triples0}, timeout=int(self.cfg.timeout_s))
-            f1 = _HTTP_POOL.submit(requests.post, f"{self.policy1_url}/mpc/and_mask_batch", json={"action_id": req.action_id, "triples": triples1}, timeout=int(self.cfg.timeout_s))
+            u0 = str(self.policy0_url).rstrip("/")
+            u1 = str(self.policy1_url).rstrip("/")
+            f0 = _HTTP_POOL.submit(session_for(u0).post, f"{u0}/mpc/and_mask_batch", json={"action_id": req.action_id, "triples": triples0}, timeout=int(self.cfg.timeout_s))
+            f1 = _HTTP_POOL.submit(session_for(u1).post, f"{u1}/mpc/and_mask_batch", json={"action_id": req.action_id, "triples": triples1}, timeout=int(self.cfg.timeout_s))
             r0 = f0.result()
             r1 = f1.result()
             r0.raise_for_status()
@@ -701,8 +728,8 @@ class _MpcBatchMixer:
 
             _trace_mpc(server_id=0, endpoint="/mpc/and_finish_batch", action_id=req.action_id, program_id=str(self.program_id), and_round=int(round_index), n_items=len(gate_indices), multi=False)
             _trace_mpc(server_id=1, endpoint="/mpc/and_finish_batch", action_id=req.action_id, program_id=str(self.program_id), and_round=int(round_index), n_items=len(gate_indices), multi=False)
-            f0 = _HTTP_POOL.submit(requests.post, f"{self.policy0_url}/mpc/and_finish_batch", json={"action_id": req.action_id, "opens": opens}, timeout=int(self.cfg.timeout_s))
-            f1 = _HTTP_POOL.submit(requests.post, f"{self.policy1_url}/mpc/and_finish_batch", json={"action_id": req.action_id, "opens": opens}, timeout=int(self.cfg.timeout_s))
+            f0 = _HTTP_POOL.submit(session_for(u0).post, f"{u0}/mpc/and_finish_batch", json={"action_id": req.action_id, "opens": opens}, timeout=int(self.cfg.timeout_s))
+            f1 = _HTTP_POOL.submit(session_for(u1).post, f"{u1}/mpc/and_finish_batch", json={"action_id": req.action_id, "opens": opens}, timeout=int(self.cfg.timeout_s))
             r0 = f0.result()
             r1 = f1.result()
             r0.raise_for_status()
@@ -713,7 +740,8 @@ class _MpcBatchMixer:
 
         def one(url: str, req: _MpcReq) -> dict[str, Any]:
             _trace_mpc(server_id=(0 if url == self.policy0_url else 1), endpoint="/mpc/finalize", action_id=req.action_id, program_id=str(self.program_id), request_sha256=req.request_sha256, multi=False)
-            r = requests.post(f"{url}/mpc/finalize", json={"action_id": req.action_id}, timeout=int(self.cfg.timeout_s))
+            u = str(url).rstrip("/")
+            r = session_for(u).post(f"{u}/mpc/finalize", json={"action_id": req.action_id}, timeout=int(self.cfg.timeout_s))
             r.raise_for_status()
             j = r.json()
             if not j.get("ok"):
@@ -731,10 +759,12 @@ class _MpcBatchMixer:
             out[aid][f"policy{sid}"] = j.get("proof")
         return out
 
-    def _flush_once(self) -> None:
+    def _dispatch_tick(self) -> None:
         cfg = self.cfg
         batch: list[_MpcReq] = []
         with self._lock:
+            if self._inflight >= int(getattr(cfg, "max_inflight", 1) or 1):
+                return
             if self._pending:
                 take = min(int(cfg.pad_to), len(self._pending))
                 batch = self._pending[:take]
@@ -749,8 +779,14 @@ class _MpcBatchMixer:
         while len(batch) < pad_to:
             batch.append(self._mk_dummy_req())
 
-        # Execute full MPC pipeline for this constant-shape batch.
+        with self._lock:
+            self._inflight += 1
+        self._work_pool.submit(self._do_batch, batch)
+
+    def _do_batch(self, batch: list[_MpcReq]) -> None:
+        cfg = self.cfg
         try:
+            # Execute full MPC pipeline for this constant-shape batch.
             self._mpc_init_many(batch)
             for ridx, gates in enumerate(self.circuit.and_rounds):
                 if not gates:
@@ -761,7 +797,6 @@ class _MpcBatchMixer:
                     self._mpc_and_round_single(batch, round_index=ridx, gate_indices=gates)
             proofs_by_action = self._mpc_finalize_many(batch)
         except Exception as e:
-            # Fail all *real* futures in this flush.
             for req in batch:
                 if req.is_dummy:
                     continue
@@ -770,6 +805,9 @@ class _MpcBatchMixer:
                 except Exception:
                     pass
             return
+        finally:
+            with self._lock:
+                self._inflight = max(0, int(self._inflight) - 1)
 
         for req in batch:
             if req.is_dummy:
@@ -785,13 +823,25 @@ class _MpcBatchMixer:
                 except Exception:
                     pass
 
-    def _run(self) -> None:
+    def _run_lane(self, lane: int) -> None:
         interval_s = max(0.001, float(self.cfg.interval_ms) / 1000.0)
+        if self._lanes > 1:
+            self._stop.wait(timeout=(interval_s * float(int(lane) % int(self._lanes)) / float(self._lanes)))
         while not self._stop.is_set():
             t0 = time.perf_counter()
-            self._flush_once()
+            self._dispatch_tick()
             dt = time.perf_counter() - t0
-            sleep_s = interval_s - dt
+            mode = str(getattr(self.cfg, "schedule_mode", "fixed") or "fixed").strip().lower()
+            if mode == "eager":
+                with self._lock:
+                    pending = len(self._pending)
+                    inflight = int(self._inflight)
+                if pending >= int(self.cfg.pad_to) and inflight < int(getattr(self.cfg, "max_inflight", 1) or 1):
+                    sleep_s = 0.0
+                else:
+                    sleep_s = interval_s - dt
+            else:
+                sleep_s = interval_s - dt
             if sleep_s > 0:
                 self._stop.wait(timeout=sleep_s)
 
@@ -872,6 +922,9 @@ class UnifiedPolicyEngine:
                 cover_traffic=bool(int(os.getenv("MPC_COVER_TRAFFIC", "0"))),
                 timeout_s=int(os.getenv("MPC_MIX_TIMEOUT_S", "15")),
                 use_multi_endpoints=bool(int(os.getenv("MPC_MIX_MULTI_ENDPOINTS", "1"))),
+                lanes=int(os.getenv("MPC_MIX_LANES", "1")),
+                max_inflight=int(os.getenv("MPC_MIX_MAX_INFLIGHT", "1")),
+                schedule_mode=str(os.getenv("MPC_MIX_SCHEDULE", "fixed")),
             )
             self._mpc_mixed = MixedMpcClient(
                 policy0_url=str(getattr(self.pir, "policy0_url")),

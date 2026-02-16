@@ -176,6 +176,9 @@ def main() -> None:
                             domain_size=bundle_ds,
                             timeout_s=int(os.getenv("PIR_MIX_TIMEOUT_S", "10")),
                             cover_traffic=bool(int(os.getenv("PIR_COVER_TRAFFIC", "0"))),
+                            lanes=int(os.getenv("PIR_MIX_LANES", "1")),
+                            max_inflight=int(os.getenv("PIR_MIX_MAX_INFLIGHT", "1")),
+                            schedule_mode=str(os.getenv("PIR_MIX_SCHEDULE", "fixed")),
                         )
                         pir = MixedPirClient(base_pir, mix=mix)
             except Exception:

@@ -7,6 +7,7 @@ import os
 import secrets
 import threading
 import time
+import random
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Tuple
 from concurrent.futures import ThreadPoolExecutor
@@ -15,6 +16,7 @@ from concurrent.futures import Future
 import requests
 
 from fss.dpf import gen_dpf_keys
+from .http_session import session_for
 
 
 def _domain_bits(domain_size: int) -> int:
@@ -24,6 +26,190 @@ def _domain_bits(domain_size: int) -> int:
 
 _HTTP_POOL = ThreadPoolExecutor(max_workers=8)
 _TRACE_LOCK = threading.Lock()
+
+_BIN_MAGIC = b"MPIR"
+_BIN_VER = 1
+_BIN_MSG_PIR_BATCH = 1
+_BIN_MSG_PIR_BATCH_SIGNED = 2
+_BIN_MSG_PIR_MULTI_SIGNED = 3
+
+
+def _pir_bin_enabled() -> bool:
+    return bool(int(os.getenv("PIR_BINARY_TRANSPORT", "0")))
+
+
+def _u16(x: int) -> bytes:
+    return int(x).to_bytes(2, "little", signed=False)
+
+
+def _u32(x: int) -> bytes:
+    return int(x).to_bytes(4, "little", signed=False)
+
+
+def _pack_str(buf: bytearray, s: str) -> None:
+    b = str(s).encode("utf-8")
+    buf.extend(_u32(len(b)))
+    buf.extend(b)
+
+
+def _pack_pir_batch_req(*, msg_type: int, db_name: str, keys: list[bytes], action_id: str | None = None) -> bytes:
+    if not keys:
+        raise ValueError("empty_keys")
+    key_len = len(keys[0])
+    if key_len <= 0:
+        raise ValueError("bad_key_len")
+    for k in keys:
+        if len(k) != key_len:
+            raise ValueError("nonuniform_key_len")
+
+    buf = bytearray()
+    buf.extend(_BIN_MAGIC)
+    buf.append(_BIN_VER)
+    buf.append(int(msg_type) & 0xFF)
+    buf.extend(_u16(0))  # flags
+    _pack_str(buf, db_name)
+    if action_id is not None:
+        _pack_str(buf, action_id)
+    buf.extend(_u32(len(keys)))
+    buf.extend(_u16(key_len))
+    for k in keys:
+        buf.extend(k)
+    return bytes(buf)
+
+
+def _pack_pir_multi_signed_req(*, db_name: str, reqs: list[tuple[str, list[bytes]]]) -> bytes:
+    if not reqs:
+        raise ValueError("empty_subrequests")
+    keys_per = len(reqs[0][1] or [])
+    if keys_per <= 0:
+        raise ValueError("empty_subrequest_keys")
+    key_len = len((reqs[0][1] or [b""])[0])
+    if key_len <= 0:
+        raise ValueError("bad_key_len")
+    for _aid, keys in reqs:
+        if len(keys) != keys_per:
+            raise ValueError("nonuniform_keys_per_subrequest")
+        for k in keys:
+            if len(k) != key_len:
+                raise ValueError("nonuniform_key_len")
+
+    buf = bytearray()
+    buf.extend(_BIN_MAGIC)
+    buf.append(_BIN_VER)
+    buf.append(_BIN_MSG_PIR_MULTI_SIGNED)
+    buf.extend(_u16(0))  # flags
+    _pack_str(buf, db_name)
+    buf.extend(_u32(len(reqs)))
+    buf.extend(_u32(keys_per))
+    buf.extend(_u16(key_len))
+    for aid, keys in reqs:
+        _pack_str(buf, aid)
+        for k in keys:
+            buf.extend(k)
+    return bytes(buf)
+
+
+def _expect_u8(buf: bytes, off: int) -> tuple[int, int]:
+    if off + 1 > len(buf):
+        raise ValueError("bin_truncated")
+    return int(buf[off]), off + 1
+
+
+def _expect_u16(buf: bytes, off: int) -> tuple[int, int]:
+    if off + 2 > len(buf):
+        raise ValueError("bin_truncated")
+    return int.from_bytes(buf[off : off + 2], "little", signed=False), off + 2
+
+
+def _expect_u32(buf: bytes, off: int) -> tuple[int, int]:
+    if off + 4 > len(buf):
+        raise ValueError("bin_truncated")
+    return int.from_bytes(buf[off : off + 4], "little", signed=False), off + 4
+
+
+def _expect_bytes(buf: bytes, off: int, n: int) -> tuple[bytes, int]:
+    n = int(n)
+    if n < 0 or off + n > len(buf):
+        raise ValueError("bin_truncated")
+    return bytes(buf[off : off + n]), off + n
+
+
+def _expect_str(buf: bytes, off: int) -> tuple[str, int]:
+    n, off = _expect_u32(buf, off)
+    b, off = _expect_bytes(buf, off, n)
+    return b.decode("utf-8"), off
+
+
+def _parse_batch_resp(buf: bytes, *, expect_msg: int) -> list[int]:
+    off = 0
+    magic, off = _expect_bytes(buf, off, 4)
+    if magic != _BIN_MAGIC:
+        raise ValueError("bin_bad_magic")
+    ver, off = _expect_u8(buf, off)
+    if ver != _BIN_VER:
+        raise ValueError("bin_bad_version")
+    msg, off = _expect_u8(buf, off)
+    if int(msg) != int(expect_msg):
+        raise ValueError("bin_bad_msg")
+    _flags, off = _expect_u16(buf, off)
+    n, off = _expect_u32(buf, off)
+    ans, off = _expect_bytes(buf, off, n)
+    if off != len(buf):
+        raise ValueError("bin_extra_bytes")
+    return [int(x) & 1 for x in ans]
+
+
+def _parse_batch_signed_resp(buf: bytes) -> tuple[list[int], dict[str, Any]]:
+    off = 0
+    magic, off = _expect_bytes(buf, off, 4)
+    if magic != _BIN_MAGIC:
+        raise ValueError("bin_bad_magic")
+    ver, off = _expect_u8(buf, off)
+    if ver != _BIN_VER:
+        raise ValueError("bin_bad_version")
+    msg, off = _expect_u8(buf, off)
+    if int(msg) != int(_BIN_MSG_PIR_BATCH_SIGNED):
+        raise ValueError("bin_bad_msg")
+    _flags, off = _expect_u16(buf, off)
+    n, off = _expect_u32(buf, off)
+    ans, off = _expect_bytes(buf, off, n)
+    proof_n, off = _expect_u32(buf, off)
+    proof_b, off = _expect_bytes(buf, off, proof_n)
+    if off != len(buf):
+        raise ValueError("bin_extra_bytes")
+    proof = json.loads(proof_b.decode("utf-8"))
+    if not isinstance(proof, dict):
+        raise ValueError("bin_bad_proof")
+    return [int(x) & 1 for x in ans], dict(proof)
+
+
+def _parse_multi_signed_resp(buf: bytes) -> dict[str, tuple[list[int], dict[str, Any]]]:
+    off = 0
+    magic, off = _expect_bytes(buf, off, 4)
+    if magic != _BIN_MAGIC:
+        raise ValueError("bin_bad_magic")
+    ver, off = _expect_u8(buf, off)
+    if ver != _BIN_VER:
+        raise ValueError("bin_bad_version")
+    msg, off = _expect_u8(buf, off)
+    if int(msg) != int(_BIN_MSG_PIR_MULTI_SIGNED):
+        raise ValueError("bin_bad_msg")
+    _flags, off = _expect_u16(buf, off)
+    n_sub, off = _expect_u32(buf, off)
+    out: dict[str, tuple[list[int], dict[str, Any]]] = {}
+    for _ in range(int(n_sub)):
+        aid, off = _expect_str(buf, off)
+        ans_n, off = _expect_u32(buf, off)
+        ans_b, off = _expect_bytes(buf, off, ans_n)
+        proof_n, off = _expect_u32(buf, off)
+        proof_b, off = _expect_bytes(buf, off, proof_n)
+        proof = json.loads(proof_b.decode("utf-8"))
+        if not isinstance(proof, dict):
+            raise ValueError("bin_bad_proof")
+        out[str(aid)] = ([int(x) & 1 for x in ans_b], dict(proof))
+    if off != len(buf):
+        raise ValueError("bin_extra_bytes")
+    return out
 
 
 def _trace_pir(
@@ -97,10 +283,14 @@ class PirClient:
         nbits = _domain_bits(ds)
         keys0: list[str] = []
         keys1: list[str] = []
+        keys0_raw: list[bytes] = []
+        keys1_raw: list[bytes] = []
         for idx in idx_list:
             if idx < 0 or idx >= ds:
                 raise ValueError("idx out of range")
             k0, k1 = gen_dpf_keys(alpha=idx, beta=1, domain_bits=nbits)
+            keys0_raw.append(k0)
+            keys1_raw.append(k1)
             keys0.append(base64.b64encode(k0).decode("ascii"))
             keys1.append(base64.b64encode(k1).decode("ascii"))
 
@@ -110,14 +300,35 @@ class PirClient:
         _trace_pir(server_id=0, endpoint="/pir/query_batch", db=db_name, n_keys=len(keys0), domain_size=ds, action_id=None, signed=False)
         _trace_pir(server_id=1, endpoint="/pir/query_batch", db=db_name, n_keys=len(keys1), domain_size=ds, action_id=None, signed=False)
 
-        f0 = _HTTP_POOL.submit(requests.post, f"{self.policy0_url}/pir/query_batch", json=payload0, timeout=timeout_s)
-        f1 = _HTTP_POOL.submit(requests.post, f"{self.policy1_url}/pir/query_batch", json=payload1, timeout=timeout_s)
-        r0 = f0.result()
-        r1 = f1.result()
-        r0.raise_for_status()
-        r1.raise_for_status()
-        a0 = [int(x) & 1 for x in r0.json()["ans_shares"]]
-        a1 = [int(x) & 1 for x in r1.json()["ans_shares"]]
+        u0 = str(self.policy0_url).rstrip("/")
+        u1 = str(self.policy1_url).rstrip("/")
+        a0: list[int] | None = None
+        a1: list[int] | None = None
+        if _pir_bin_enabled():
+            try:
+                b0 = _pack_pir_batch_req(msg_type=_BIN_MSG_PIR_BATCH, db_name=db_name, keys=keys0_raw)
+                b1 = _pack_pir_batch_req(msg_type=_BIN_MSG_PIR_BATCH, db_name=db_name, keys=keys1_raw)
+                h = {"content-type": "application/octet-stream"}
+                f0 = _HTTP_POOL.submit(session_for(u0).post, f"{u0}/pir/query_batch_bin", data=b0, headers=h, timeout=timeout_s)
+                f1 = _HTTP_POOL.submit(session_for(u1).post, f"{u1}/pir/query_batch_bin", data=b1, headers=h, timeout=timeout_s)
+                r0 = f0.result()
+                r1 = f1.result()
+                r0.raise_for_status()
+                r1.raise_for_status()
+                a0 = _parse_batch_resp(r0.content, expect_msg=_BIN_MSG_PIR_BATCH)
+                a1 = _parse_batch_resp(r1.content, expect_msg=_BIN_MSG_PIR_BATCH)
+            except Exception:
+                a0 = None
+                a1 = None
+        if a0 is None or a1 is None:
+            f0 = _HTTP_POOL.submit(session_for(u0).post, f"{u0}/pir/query_batch", json=payload0, timeout=timeout_s)
+            f1 = _HTTP_POOL.submit(session_for(u1).post, f"{u1}/pir/query_batch", json=payload1, timeout=timeout_s)
+            r0 = f0.result()
+            r1 = f1.result()
+            r0.raise_for_status()
+            r1.raise_for_status()
+            a0 = [int(x) & 1 for x in r0.json()["ans_shares"]]
+            a1 = [int(x) & 1 for x in r1.json()["ans_shares"]]
         if len(a0) != len(idx_list) or len(a1) != len(idx_list):
             raise ValueError("policy server returned wrong batch size")
         return [(x ^ y) & 1 for x, y in zip(a0, a1)]
@@ -149,8 +360,10 @@ class PirClient:
         _trace_pir(server_id=0, endpoint="/pir/query_block_batch", db=db_name, n_keys=len(keys0), domain_size=ds, action_id=None, block_size=block_size, signed=False)
         _trace_pir(server_id=1, endpoint="/pir/query_block_batch", db=db_name, n_keys=len(keys1), domain_size=ds, action_id=None, block_size=block_size, signed=False)
 
-        f0 = _HTTP_POOL.submit(requests.post, f"{self.policy0_url}/pir/query_block_batch", json=payload0, timeout=timeout_s)
-        f1 = _HTTP_POOL.submit(requests.post, f"{self.policy1_url}/pir/query_block_batch", json=payload1, timeout=timeout_s)
+        u0 = str(self.policy0_url).rstrip("/")
+        u1 = str(self.policy1_url).rstrip("/")
+        f0 = _HTTP_POOL.submit(session_for(u0).post, f"{u0}/pir/query_block_batch", json=payload0, timeout=timeout_s)
+        f1 = _HTTP_POOL.submit(session_for(u1).post, f"{u1}/pir/query_block_batch", json=payload1, timeout=timeout_s)
         r0 = f0.result()
         r1 = f1.result()
         r0.raise_for_status()
@@ -180,10 +393,14 @@ class PirClient:
         nbits = _domain_bits(ds)
         keys0: list[str] = []
         keys1: list[str] = []
+        keys0_raw: list[bytes] = []
+        keys1_raw: list[bytes] = []
         for idx in idx_list:
             if idx < 0 or idx >= ds:
                 raise ValueError("idx out of range")
             k0, k1 = gen_dpf_keys(alpha=idx, beta=1, domain_bits=nbits)
+            keys0_raw.append(k0)
+            keys1_raw.append(k1)
             keys0.append(base64.b64encode(k0).decode("ascii"))
             keys1.append(base64.b64encode(k1).decode("ascii"))
 
@@ -193,14 +410,37 @@ class PirClient:
         _trace_pir(server_id=0, endpoint="/pir/query_batch_signed", db=db_name, n_keys=len(keys0), domain_size=ds, action_id=action_id, signed=True)
         _trace_pir(server_id=1, endpoint="/pir/query_batch_signed", db=db_name, n_keys=len(keys1), domain_size=ds, action_id=action_id, signed=True)
 
-        f0 = _HTTP_POOL.submit(requests.post, f"{self.policy0_url}/pir/query_batch_signed", json=payload0, timeout=timeout_s)
-        f1 = _HTTP_POOL.submit(requests.post, f"{self.policy1_url}/pir/query_batch_signed", json=payload1, timeout=timeout_s)
-        r0 = f0.result()
-        r1 = f1.result()
-        r0.raise_for_status()
-        r1.raise_for_status()
-        j0 = r0.json()
-        j1 = r1.json()
+        u0 = str(self.policy0_url).rstrip("/")
+        u1 = str(self.policy1_url).rstrip("/")
+        j0: dict[str, Any] | None = None
+        j1: dict[str, Any] | None = None
+        if _pir_bin_enabled():
+            try:
+                b0 = _pack_pir_batch_req(msg_type=_BIN_MSG_PIR_BATCH_SIGNED, db_name=db_name, keys=keys0_raw, action_id=action_id)
+                b1 = _pack_pir_batch_req(msg_type=_BIN_MSG_PIR_BATCH_SIGNED, db_name=db_name, keys=keys1_raw, action_id=action_id)
+                h = {"content-type": "application/octet-stream"}
+                f0 = _HTTP_POOL.submit(session_for(u0).post, f"{u0}/pir/query_batch_signed_bin", data=b0, headers=h, timeout=timeout_s)
+                f1 = _HTTP_POOL.submit(session_for(u1).post, f"{u1}/pir/query_batch_signed_bin", data=b1, headers=h, timeout=timeout_s)
+                r0 = f0.result()
+                r1 = f1.result()
+                r0.raise_for_status()
+                r1.raise_for_status()
+                a0_bin, p0_bin = _parse_batch_signed_resp(r0.content)
+                a1_bin, p1_bin = _parse_batch_signed_resp(r1.content)
+                j0 = {"ans_shares": a0_bin, "proof": p0_bin}
+                j1 = {"ans_shares": a1_bin, "proof": p1_bin}
+            except Exception:
+                j0 = None
+                j1 = None
+        if j0 is None or j1 is None:
+            f0 = _HTTP_POOL.submit(session_for(u0).post, f"{u0}/pir/query_batch_signed", json=payload0, timeout=timeout_s)
+            f1 = _HTTP_POOL.submit(session_for(u1).post, f"{u1}/pir/query_batch_signed", json=payload1, timeout=timeout_s)
+            r0 = f0.result()
+            r1 = f1.result()
+            r0.raise_for_status()
+            r1.raise_for_status()
+            j0 = r0.json()
+            j1 = r1.json()
 
         a0 = [int(x) & 1 for x in j0.get("ans_shares", [])]
         a1 = [int(x) & 1 for x in j1.get("ans_shares", [])]
@@ -234,8 +474,10 @@ class PirClient:
         _trace_pir(server_id=0, endpoint="/pir/query_block_batch_signed", db=db_name, n_keys=len(keys0), domain_size=ds, action_id=action_id, block_size=block_size, signed=True)
         _trace_pir(server_id=1, endpoint="/pir/query_block_batch_signed", db=db_name, n_keys=len(keys1), domain_size=ds, action_id=action_id, block_size=block_size, signed=True)
 
-        f0 = _HTTP_POOL.submit(requests.post, f"{self.policy0_url}/pir/query_block_batch_signed", json=payload0, timeout=timeout_s)
-        f1 = _HTTP_POOL.submit(requests.post, f"{self.policy1_url}/pir/query_block_batch_signed", json=payload1, timeout=timeout_s)
+        u0 = str(self.policy0_url).rstrip("/")
+        u1 = str(self.policy1_url).rstrip("/")
+        f0 = _HTTP_POOL.submit(session_for(u0).post, f"{u0}/pir/query_block_batch_signed", json=payload0, timeout=timeout_s)
+        f1 = _HTTP_POOL.submit(session_for(u1).post, f"{u1}/pir/query_block_batch_signed", json=payload1, timeout=timeout_s)
         r0 = f0.result()
         r1 = f1.result()
         r0.raise_for_status()
@@ -286,8 +528,9 @@ class PirClient:
             action_id=None,
             signed=False,
         )
-        r = requests.post(
-            f"{url}/pir/query_idx_batch",
+        u = str(url).rstrip("/")
+        r = session_for(u).post(
+            f"{u}/pir/query_idx_batch",
             json={"db": db_name, "idxs": idx_list},
             timeout=timeout_s,
         )
@@ -328,8 +571,9 @@ class PirClient:
             action_id=action_id,
             signed=True,
         )
-        r = requests.post(
-            f"{url}/pir/query_idx_batch_signed",
+        u = str(url).rstrip("/")
+        r = session_for(u).post(
+            f"{u}/pir/query_idx_batch_signed",
             json={"db": db_name, "idxs": idx_list, "action_id": str(action_id)},
             timeout=timeout_s,
         )
@@ -380,6 +624,9 @@ class PirMixConfig:
     domain_size: int
     timeout_s: int = 10
     cover_traffic: bool = True
+    lanes: int = 1
+    max_inflight: int = 1
+    schedule_mode: str = "fixed"  # fixed | eager
 
 
 class _SignedBitBatchMixer:
@@ -389,16 +636,27 @@ class _SignedBitBatchMixer:
         self.cfg = cfg
         self._lock = threading.Lock()
         self._pending: list[tuple[str, list[str], list[str], Future]] = []
+        self._inflight = 0
         self._stop = threading.Event()
-        self._t = threading.Thread(target=self._run, name="pir-mixer", daemon=True)
-        self._t.start()
+        lanes = int(getattr(cfg, "lanes", 1) or 1)
+        if lanes < 1:
+            lanes = 1
+        if lanes > 32:
+            lanes = 32
+        self._lanes = lanes
+        self._threads: list[threading.Thread] = []
+        for i in range(lanes):
+            t = threading.Thread(target=self._run_lane, args=(i,), name=f"pir-mixer-{i}", daemon=True)
+            t.start()
+            self._threads.append(t)
 
     def close(self) -> None:
         self._stop.set()
-        try:
-            self._t.join(timeout=1.0)
-        except Exception:
-            pass
+        for t in list(self._threads):
+            try:
+                t.join(timeout=1.0)
+            except Exception:
+                pass
 
     def submit(self, *, action_id: str, keys0_b64: list[str], keys1_b64: list[str]) -> Future:
         fut: Future = Future()
@@ -429,10 +687,12 @@ class _SignedBitBatchMixer:
             keys1.append(base64.b64encode(k1).decode("ascii"))
         return action_id, keys0, keys1
 
-    def _flush_once(self) -> None:
+    def _dispatch_tick(self) -> None:
         cfg = self.cfg
         batch: list[tuple[str, list[str], list[str], Future]] = []
         with self._lock:
+            if int(getattr(self, "_inflight", 0)) >= int(getattr(cfg, "max_inflight", 1) or 1):
+                return
             if self._pending:
                 take = min(int(cfg.pad_to), len(self._pending))
                 batch = self._pending[:take]
@@ -447,15 +707,20 @@ class _SignedBitBatchMixer:
         req0: list[dict[str, Any]] = []
         req1: list[dict[str, Any]] = []
 
-        real_action_ids: set[str] = set()
         for action_id, k0s, k1s, _f in batch:
-            real_action_ids.add(str(action_id))
             req0.append({"action_id": str(action_id), "dpf_keys_b64": list(k0s)})
             req1.append({"action_id": str(action_id), "dpf_keys_b64": list(k1s)})
         while len(req0) < pad_to:
             aid, k0s, k1s = self._mk_dummy_req()
             req0.append({"action_id": aid, "dpf_keys_b64": k0s})
             req1.append({"action_id": aid, "dpf_keys_b64": k1s})
+
+        # Shuffle subrequests so "real-first" ordering does not leak at a single server.
+        # (action_id is already random-looking, but this makes the transcript cleaner.)
+        perm = list(range(len(req0)))
+        random.shuffle(perm)
+        req0 = [req0[i] for i in perm]
+        req1 = [req1[i] for i in perm]
 
         payload0 = {"db": str(cfg.db_name), "requests": req0}
         payload1 = {"db": str(cfg.db_name), "requests": req1}
@@ -484,55 +749,129 @@ class _SignedBitBatchMixer:
             keys_per_subreq=int(cfg.fixed_n_keys),
         )
 
+        with self._lock:
+            self._inflight = int(getattr(self, "_inflight", 0)) + 1
+        _HTTP_POOL.submit(self._do_call, payload0, payload1, batch)
+
+    def _flush_once(self) -> None:
+        """
+        Synchronous flush helper (unit-test friendly).
+
+        Production traffic shaping uses the lane schedulers + async dispatch in
+        `_dispatch_tick`; tests call `_flush_once()` directly to validate
+        constant-shape padding behavior without background threads.
+        """
+        cfg = self.cfg
+        batch: list[tuple[str, list[str], list[str], Future]] = []
+        with self._lock:
+            if self._pending:
+                take = min(int(cfg.pad_to), len(self._pending))
+                batch = self._pending[:take]
+                self._pending = self._pending[take:]
+
+        if not batch and not bool(cfg.cover_traffic):
+            return
+
+        pad_to = int(cfg.pad_to)
+        req0: list[dict[str, Any]] = []
+        req1: list[dict[str, Any]] = []
+        for action_id, k0s, k1s, _f in batch:
+            req0.append({"action_id": str(action_id), "dpf_keys_b64": list(k0s)})
+            req1.append({"action_id": str(action_id), "dpf_keys_b64": list(k1s)})
+        while len(req0) < pad_to:
+            aid, k0s, k1s = self._mk_dummy_req()
+            req0.append({"action_id": aid, "dpf_keys_b64": k0s})
+            req1.append({"action_id": aid, "dpf_keys_b64": k1s})
+
+        perm = list(range(len(req0)))
+        random.shuffle(perm)
+        req0 = [req0[i] for i in perm]
+        req1 = [req1[i] for i in perm]
+
+        payload0 = {"db": str(cfg.db_name), "requests": req0}
+        payload1 = {"db": str(cfg.db_name), "requests": req1}
+        self._do_call(payload0, payload1, batch)
+
+    def _do_call(self, payload0: dict[str, Any], payload1: dict[str, Any], batch: list[tuple[str, list[str], list[str], Future]]) -> None:
+        cfg = self.cfg
+        u0 = str(self.policy0_url).rstrip("/")
+        u1 = str(self.policy1_url).rstrip("/")
+        m0: dict[str, tuple[list[int], dict[str, Any]]] | None = None
+        m1: dict[str, tuple[list[int], dict[str, Any]]] | None = None
         try:
-            f0 = _HTTP_POOL.submit(
-                requests.post,
-                f"{self.policy0_url}/pir/query_batch_multi_signed",
-                json=payload0,
-                timeout=int(cfg.timeout_s),
-            )
-            f1 = _HTTP_POOL.submit(
-                requests.post,
-                f"{self.policy1_url}/pir/query_batch_multi_signed",
-                json=payload1,
-                timeout=int(cfg.timeout_s),
-            )
-            r0 = f0.result()
-            r1 = f1.result()
-            r0.raise_for_status()
-            r1.raise_for_status()
-            j0 = r0.json()
-            j1 = r1.json()
+            if _pir_bin_enabled():
+                try:
+                    reqs0_raw: list[tuple[str, list[bytes]]] = []
+                    reqs1_raw: list[tuple[str, list[bytes]]] = []
+                    for sub0, sub1 in zip((payload0.get("requests") or []), (payload1.get("requests") or [])):
+                        if not isinstance(sub0, dict) or not isinstance(sub1, dict):
+                            raise ValueError("bad_subrequest_shape")
+                        aid0 = str(sub0.get("action_id") or "")
+                        aid1 = str(sub1.get("action_id") or "")
+                        if aid0 != aid1:
+                            raise ValueError("action_id_mismatch")
+                        ks0 = [base64.b64decode(str(x)) for x in (sub0.get("dpf_keys_b64") or [])]
+                        ks1 = [base64.b64decode(str(x)) for x in (sub1.get("dpf_keys_b64") or [])]
+                        reqs0_raw.append((aid0, ks0))
+                        reqs1_raw.append((aid0, ks1))
+                    b0 = _pack_pir_multi_signed_req(db_name=str(cfg.db_name), reqs=reqs0_raw)
+                    b1 = _pack_pir_multi_signed_req(db_name=str(cfg.db_name), reqs=reqs1_raw)
+                    h = {"content-type": "application/octet-stream"}
+                    r0 = session_for(u0).post(f"{u0}/pir/query_batch_multi_signed_bin", data=b0, headers=h, timeout=int(cfg.timeout_s))
+                    r1 = session_for(u1).post(f"{u1}/pir/query_batch_multi_signed_bin", data=b1, headers=h, timeout=int(cfg.timeout_s))
+                    r0.raise_for_status()
+                    r1.raise_for_status()
+                    m0 = _parse_multi_signed_resp(r0.content)
+                    m1 = _parse_multi_signed_resp(r1.content)
+                except Exception:
+                    m0 = None
+                    m1 = None
+
+            if m0 is None or m1 is None:
+                r0 = session_for(u0).post(f"{u0}/pir/query_batch_multi_signed", json=payload0, timeout=int(cfg.timeout_s))
+                r1 = session_for(u1).post(f"{u1}/pir/query_batch_multi_signed", json=payload1, timeout=int(cfg.timeout_s))
+                r0.raise_for_status()
+                r1.raise_for_status()
+                j0 = r0.json()
+                j1 = r1.json()
+                m0 = {}
+                m1 = {}
+                for it in (j0.get("responses") or []):
+                    if not isinstance(it, dict):
+                        continue
+                    aid = str(it.get("action_id") or "")
+                    if not aid:
+                        continue
+                    a = [int(x) & 1 for x in (it.get("ans_shares") or [])]
+                    pr = it.get("proof")
+                    m0[aid] = (a, pr if isinstance(pr, dict) else {})
+                for it in (j1.get("responses") or []):
+                    if not isinstance(it, dict):
+                        continue
+                    aid = str(it.get("action_id") or "")
+                    if not aid:
+                        continue
+                    a = [int(x) & 1 for x in (it.get("ans_shares") or [])]
+                    pr = it.get("proof")
+                    m1[aid] = (a, pr if isinstance(pr, dict) else {})
         except Exception as e:
-            # Fail all *real* futures in this flush.
             for _aid, _k0, _k1, fut in batch:
                 try:
                     fut.set_exception(e)
                 except Exception:
                     pass
             return
-
-        # Build action_id -> (ans_shares, proof)
-        m0: dict[str, tuple[list[int], dict[str, Any]]] = {}
-        m1: dict[str, tuple[list[int], dict[str, Any]]] = {}
-        for it in (j0.get("responses") or []):
-            if not isinstance(it, dict):
-                continue
-            aid = str(it.get("action_id") or "")
-            if not aid:
-                continue
-            a = [int(x) & 1 for x in (it.get("ans_shares") or [])]
-            pr = it.get("proof")
-            m0[aid] = (a, pr if isinstance(pr, dict) else {})
-        for it in (j1.get("responses") or []):
-            if not isinstance(it, dict):
-                continue
-            aid = str(it.get("action_id") or "")
-            if not aid:
-                continue
-            a = [int(x) & 1 for x in (it.get("ans_shares") or [])]
-            pr = it.get("proof")
-            m1[aid] = (a, pr if isinstance(pr, dict) else {})
+        finally:
+            with self._lock:
+                if hasattr(self, "_inflight"):
+                    self._inflight = max(0, int(getattr(self, "_inflight", 0)) - 1)
+        if m0 is None or m1 is None:
+            for _aid, _k0, _k1, fut in batch:
+                try:
+                    fut.set_exception(RuntimeError("pir_mixer_no_response_map"))
+                except Exception:
+                    pass
+            return
 
         for aid, _k0, _k1, fut in batch:
             try:
@@ -557,13 +896,27 @@ class _SignedBitBatchMixer:
                 except Exception:
                     pass
 
-    def _run(self) -> None:
+    def _run_lane(self, lane: int) -> None:
         interval_s = max(0.001, float(self.cfg.interval_ms) / 1000.0)
+        # Stagger lanes to reduce burstiness.
+        if self._lanes > 1:
+            self._stop.wait(timeout=(interval_s * float(int(lane) % int(self._lanes)) / float(self._lanes)))
         while not self._stop.is_set():
             t0 = time.perf_counter()
-            self._flush_once()
+            self._dispatch_tick()
             dt = time.perf_counter() - t0
-            sleep_s = interval_s - dt
+            # Optional eager mode: when queue is full, don't artificially wait.
+            mode = str(getattr(self.cfg, "schedule_mode", "fixed") or "fixed").strip().lower()
+            if mode == "eager":
+                with self._lock:
+                    pending = len(self._pending)
+                    inflight = int(self._inflight)
+                if pending >= int(self.cfg.pad_to) and inflight < int(getattr(self.cfg, "max_inflight", 1) or 1):
+                    sleep_s = 0.0
+                else:
+                    sleep_s = interval_s - dt
+            else:
+                sleep_s = interval_s - dt
             if sleep_s > 0:
                 self._stop.wait(timeout=sleep_s)
 

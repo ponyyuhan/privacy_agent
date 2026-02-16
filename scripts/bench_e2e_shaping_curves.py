@@ -25,7 +25,7 @@ def _run_once(*, repo_root: Path, env: dict[str, str], out_path: Path) -> dict[s
     e = os.environ.copy()
     e.update(env)
     e["PYTHONPATH"] = str(repo_root)
-    e["BENCH_OUT_PATH"] = str(out_path)
+    e["BENCH_OUT_PATH"] = str(out_path.resolve())
     p = subprocess.run(
         [sys.executable, str(repo_root / "scripts" / "bench_e2e_throughput.py")],
         env=e,
@@ -70,6 +70,7 @@ def main() -> None:
         "PIR_COVER_TRAFFIC": "0",
         "MPC_COVER_TRAFFIC": "0",
         "PIR_EVAL_MODE": os.getenv("PIR_EVAL_MODE", "auto"),
+        "PIR_BINARY_TRANSPORT": os.getenv("PIR_BINARY_TRANSPORT", "0"),
     }
     out_path = perf_dir / "bench_e2e.baseline.json"
     res = _run_once(repo_root=repo_root, env=base_env, out_path=out_path)
@@ -93,12 +94,18 @@ def main() -> None:
                 "PIR_MIX_PAD_TO": str(pad_to),
                 "PIR_MIX_INTERVAL_MS": str(pir_interval_ms),
                 "PIR_COVER_TRAFFIC": "1",
+                "PIR_MIX_LANES": os.getenv("PIR_MIX_LANES", "1"),
+                "PIR_MIX_MAX_INFLIGHT": os.getenv("PIR_MIX_MAX_INFLIGHT", "1"),
+                "PIR_MIX_SCHEDULE": os.getenv("PIR_MIX_SCHEDULE", "fixed"),
                 "MPC_MIX_ENABLED": "1",
                 "MPC_MIX_PAD_TO": str(pad_to),
                 "MPC_MIX_INTERVAL_MS": str(mpc_interval_ms),
                 "MPC_COVER_TRAFFIC": "1",
                 # Prefer the multi endpoints when available.
                 "MPC_MIX_MULTI_ENDPOINTS": "1",
+                "MPC_MIX_LANES": os.getenv("MPC_MIX_LANES", "1"),
+                "MPC_MIX_MAX_INFLIGHT": os.getenv("MPC_MIX_MAX_INFLIGHT", "1"),
+                "MPC_MIX_SCHEDULE": os.getenv("MPC_MIX_SCHEDULE", "fixed"),
             }
         )
         out_path = perf_dir / f"bench_e2e.mixed.pad{pad_to}.json"
@@ -138,4 +145,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

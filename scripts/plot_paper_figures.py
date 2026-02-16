@@ -323,6 +323,30 @@ def main() -> None:
         )
         made.append(str(p))
 
+    scaling = _load_json(out_dir / "policy_perf" / "policy_server_scaling.json")
+    if scaling and str(scaling.get("status")) == "OK":
+        rows_s = [r for r in (scaling.get("rows") or []) if isinstance(r, dict)]
+        if rows_s:
+            by_wire: dict[str, list[dict[str, Any]]] = {}
+            for r in rows_s:
+                by_wire.setdefault(str(r.get("wire") or "json"), []).append(r)
+            palette = {"json": "#4a5568", "bin": "#2b6cb0"}
+            ser_s: list[tuple[str, list[float], list[float], str]] = []
+            for w, rs in sorted(by_wire.items()):
+                rs2 = sorted(rs, key=lambda x: int(x.get("threads", 0)))
+                xs = [float(int(x.get("threads", 0))) for x in rs2]
+                ys = [float(x.get("throughput_keys_s", 0.0)) for x in rs2]
+                ser_s.append((f"{w}", xs, ys, palette.get(w, "#2f855a")))
+            p = fig_dir / "policy_server_scaling_keys_s.svg"
+            _svg_line_multi(
+                series=ser_s,
+                title="Policy Server Scaling (Threads vs Throughput)",
+                out_path=p,
+                x_label="Compute threads (RAYON_NUM_THREADS)",
+                y_label="Throughput (keys/s)",
+            )
+            made.append(str(p))
+
     native_eval = _load_json(out_dir / "native_baselines" / "native_guardrail_eval.json")
     if native_eval and str(native_eval.get("status")) == "OK":
         rows2 = [r for r in (native_eval.get("rows") or []) if isinstance(r, dict)]
