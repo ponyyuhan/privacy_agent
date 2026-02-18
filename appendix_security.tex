@@ -64,6 +64,8 @@ and $t_\sigma := \mathsf{Tag}_{K_\sigma}(\mathsf{Canon}(\mathsf{meta}_\sigma))$.
 The artifact computes and verifies these fields in:
 \texttt{policy\_server/server.py:/mpc/finalize} and
 \texttt{executor\_server/server.py:\_verify\_commit\_evidence}.
+The corresponding machine checkable JSON schema for the commit evidence object is
+\texttt{spec/secureclaw\_executor\_accept\_v1.schema.json}.
 
 \paragraph{Executor acceptance.}
 Given an effect request $\mathsf{req}$ and two purported commit proof shares $\pi_0,\pi_1$, the
@@ -181,6 +183,10 @@ must either fail MAC verification/binding checks or imply a hash collision.
 \label{app:proofs:composition}
 
 We state a composition theorem that makes the conjunction of properties explicit.
+For mechanized consistency, the artifact includes an explicit state model checker
+\texttt{formal/secureclaw\_model\_check.py} that enumerates bounded adversary behaviors under idealized
+cryptography and confirms that the event $\mathsf{Bad}_{\mathsf{NBE}}$ cannot occur when the executor
+enforces $\mathsf{Accept}$ and the interface fields match the schema.
 
 \paragraph{Combined experiment.}
 Define a combined experiment $\mathsf{Exp}^{\mathsf{SC}}(\lambda)$ for SecureClaw.

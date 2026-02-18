@@ -268,6 +268,17 @@ def _verify_commit_evidence(commit: dict, *, action_id: str, program_id: str, re
     if not ok1:
         return None, None, code1
 
+    # Interface-level binding: commit evidence must contain one share per server.
+    # We require `policy0.server_id=0` and `policy1.server_id=1` to match the wire format,
+    # and to prevent any ambiguity in audit logs and replay tracking.
+    try:
+        sid0 = int((p0 or {}).get("server_id"))
+        sid1 = int((p1 or {}).get("server_id"))
+    except Exception:
+        return None, None, "bad_server_id"
+    if sid0 != 0 or sid1 != 1 or sid0 == sid1:
+        return None, None, "server_id_mismatch"
+
     outs0 = p0.get("outputs") if isinstance(p0, dict) else None
     outs1 = p1.get("outputs") if isinstance(p1, dict) else None
     if not isinstance(outs0, dict) or not isinstance(outs1, dict):

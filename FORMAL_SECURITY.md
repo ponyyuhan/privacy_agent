@@ -14,6 +14,8 @@ Code-linked checks:
 
 - Formal NBE harness: `scripts/security_game_nbe_check.py`
 - Unit tests: `tests/test_security_games.py`
+- Mechanized bounded model checking of the interface-level event definitions: `formal/secureclaw_model_check.py`
+- Machine-checkable schemas for the executor commit evidence and capsule contract: `spec/`
 
 ---
 

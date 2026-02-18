@@ -233,6 +233,32 @@ class SecurityGameTests(unittest.TestCase):
         self.assertIsNone(tag)
         self.assertNotEqual(code, "OK")
 
+    def test_duplicate_server_id_rejected(self) -> None:
+        action_id = "a_dup_sid"
+        program_id = "policy_unified_v1"
+        req_sha = "aa" * 32
+        p0 = _mk_commit_proof(
+            server_id=0,
+            key_hex=self.k0,
+            action_id=action_id,
+            program_id=program_id,
+            request_sha256=req_sha,
+            outputs={"allow_pre": 1, "need_confirm": 0, "patch0": 0, "patch1": 0},
+        )
+        # Malformed: second share claims the same server_id and key.
+        p1 = _mk_commit_proof(
+            server_id=0,
+            key_hex=self.k0,
+            action_id=action_id,
+            program_id=program_id,
+            request_sha256=req_sha,
+            outputs={"allow_pre": 0, "need_confirm": 0, "patch0": 0, "patch1": 0},
+        )
+        outs, tag, code = ex._verify_commit_evidence({"policy0": p0, "policy1": p1}, action_id=action_id, program_id=program_id, request_sha256=req_sha)
+        self.assertIsNone(outs)
+        self.assertIsNone(tag)
+        self.assertEqual(str(code), "server_id_mismatch")
+
     def test_bad_mac_rejected(self) -> None:
         action_id = "a_test_mac"
         program_id = "policy_unified_v1"
