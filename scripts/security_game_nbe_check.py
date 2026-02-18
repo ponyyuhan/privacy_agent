@@ -13,8 +13,6 @@ from typing import Any, Dict
 
 import requests
 
-from agent.mcp_client import McpStdioClient
-
 
 def pick_port() -> int:
     s = socket.socket()
@@ -62,6 +60,12 @@ def _expect_status(name: str, obj: Dict[str, Any], want: str) -> tuple[bool, Dic
 
 def main() -> None:
     repo_root = Path(__file__).resolve().parents[1]
+    # Ensure repo imports work even when executed as a standalone script.
+    if str(repo_root) not in sys.path:
+        sys.path.insert(0, str(repo_root))
+
+    from agent.mcp_client import McpStdioClient
+
     out_dir = Path(os.getenv("OUT_DIR", str(repo_root / "artifact_out")))
     out_dir.mkdir(parents=True, exist_ok=True)
 

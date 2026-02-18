@@ -1,0 +1,479 @@
+% Paper body sections for SecureClaw.
+% This file is intended to be \input{} from neurips_2025.tex.
+
+\section{Problem statement and scope}
+\label{sec:problem}
+
+\subsection{Setting and objective}
+
+We study agentic tool use systems where an untrusted agent runtime invokes external tools and may install third party skills.
+The untrusted runtime may be compromised by prompt injection, tool parameter injection, and supply chain attacks.
+The system must enforce centralized policy while preserving query privacy against any single policy server.
+The system must also ensure that no external side effect is committed unless the policy enforcement path authorizes that exact request.
+
+The key difficulty is that existing agent platforms often treat policy as advisory.
+A compromised runtime can bypass a policy check by directly calling a tool, by replaying an earlier authorization, or by exfiltrating via a different channel such as inter agent messaging.
+At the same time, naive centralized policy evaluation leaks sensitive query contents to the policy service.
+
+\subsection{System model}
+
+The system consists of five roles.
+
+\paragraph{Untrusted runtime $\mathcal{A}$.}
+The untrusted runtime includes the agent loop, all skills, and all prompt driven logic.
+An adversary controls $\mathcal{A}$ and may arbitrarily choose intents, inputs, and any payload strings.
+The adversary may also attempt to send arbitrary requests directly to the executor.
+
+\paragraph{Trusted gateway $\mathcal{G}$.}
+The gateway exports a single action interface to $\mathcal{A}$ and mediates all sensitive input flows.
+The gateway stores sealed handles that bind secrets to a session and a caller identity.
+The gateway coordinates privacy preserving policy checks with two policy servers and produces a preview transaction that can be committed.
+
+\paragraph{Policy servers $\mathcal{P}_0$ and $\mathcal{P}_1$.}
+Each policy server stores the same logical policy databases and evaluates the same policy program.
+Each policy server is honest for integrity and honest but curious for privacy.
+At least one policy server does not collude with the adversary.
+
+\paragraph{Executor $\mathcal{X}$.}
+The executor is the only component that can perform external side effects.
+Every effectful endpoint must enforce an acceptance predicate that requires dual commit evidence.
+The executor fails closed on any verification error.
+
+\paragraph{User $\mathcal{U}$.}
+The user may confirm some actions.
+User confirmation is treated as an explicit declassification capability that must be recorded in the audit log.
+
+\subsection{Trust assumptions and non goals}
+
+Our baseline claims rely on the following assumptions.
+
+\paragraph{Non collusion of policy servers.}
+At least one policy server is not controlled by the adversary and does not collude with the other policy server.
+If both policy servers collude then single auditor privacy is not achievable in our model.
+
+\paragraph{Trusted gateway and executor.}
+The gateway and executor are the trusted computing base.
+If either is compromised then the system can be subverted.
+We treat this as out of scope and we minimize the trusted code paths to reduce the attack surface.
+
+\paragraph{No kernel side channel guarantees.}
+We do not claim to prevent leakage through kernel level side channels such as cache timing, scheduler effects, or shared resource contention.
+We explicitly quantify and bound only the application level leakage channels in our leakage function.
+
+\paragraph{Not a general secure computation policy engine.}
+The artifact implements a policy evaluation pipeline specialized to membership checks and a fixed policy circuit.
+We do not claim a universal multi party computation framework for arbitrary policies.
+
+\subsection{Contributions as general mechanisms}
+
+SecureClaw contributes three mechanisms that are independently useful and compose cleanly.
+
+\paragraph{Mechanism one non bypassable execution line.}
+We introduce a dual authorization execution line that separates policy evaluation from side effect execution.
+Policy servers issue commit proof shares that are message authentication codes over a request bound commitment.
+The executor verifies two proofs, checks freshness, rejects replays, and binds the authorization to the exact request hash.
+This turns policy from advisory into a non bypassable enforcement line.
+
+\paragraph{Mechanism two leakage aware constant shape compilation.}
+We compile policy queries into a fixed shape plan.
+The gateway uses a unified policy program identifier, a constant number of PIR keys per action, and constant shape microbatch mixing with padding and cover traffic.
+This ensures that a single policy server transcript is simulatable from an explicit leakage function.
+The same compilation principle applies to both PIR membership checks and two party policy circuit evaluation.
+
+\paragraph{Mechanism three oblivious routing and shaping.}
+We reduce intent and database selection leakage by using oblivious bundle selection and unified routing.
+Policy servers observe a single logical database name and a fixed endpoint schedule.
+The gateway performs batching and mixing to reduce timing distinguishability at the policy server boundary.
+
+\subsection{Applicability conditions}
+
+The mechanisms above apply when the deployment satisfies three conditions.
+
+\paragraph{Single effect gate.}
+All external side effects must be committed by a single executor component that can enforce acceptance of commit evidence.
+If tools can directly produce effects without passing through the executor then non bypassable effects cannot be guaranteed.
+
+\paragraph{Two policy servers with a non collusion assumption.}
+Single auditor privacy requires two policy servers and a non collusion assumption.
+If the deployment can tolerate query exposure then a single policy server baseline may be acceptable for performance.
+
+\paragraph{Stable canonical binding.}
+Request binding requires stable canonicalization.
+The gateway and executor must compute identical request hashes for semantically equal inputs.
+
+\section{Protocol and system design}
+\label{sec:protocol}
+
+\subsection{Interface level specification}
+
+The gateway exports a single tool interface.
+Every call has the form
+\[
+r \gets \langle \mathsf{intent\_id},\ \mathsf{inputs},\ \mathsf{constraints},\ \mathsf{caller} \rangle .
+\]
+The gateway returns an observation
+\[
+o \gets \langle \mathsf{status},\ \mathsf{reason\_code},\ \mathsf{summary},\ \mathsf{data},\ \mathsf{artifacts} \rangle .
+\]
+The artifact field may include sealed handles and commit evidence.
+
+The executor exports effectful endpoints such as send message and skill install.
+Each effectful request includes a commit object that contains two policy server commit proofs.
+
+\subsection{Sealed handles}
+
+A sealed handle is an opaque identifier $h$ minted by the gateway.
+The handle store record contains plaintext $s$, a sensitivity label, an allowed sink set, a time to live, and bindings to a session and a caller.
+The untrusted runtime receives only $h$ and non sensitive metadata.
+
+The handle invariants are as follows.
+
+\paragraph{Opaque secrecy.}
+The gateway never returns plaintext $s$ to the untrusted runtime by default.
+
+\paragraph{Session and caller binding.}
+Any attempt to use $h$ from a different session or caller is rejected.
+
+\paragraph{Explicit declassification.}
+Declassification is an explicit operation that requires user confirmation and updates a leakage budget.
+
+These invariants are directly exercised by unit tests in \texttt{tests/test\_mcp\_gateway.py} and \texttt{tests/test\_agentleak\_channels.py}.
+
+\subsection{Preview and commit transaction}
+
+For effectful intents the gateway executes a preview phase and returns a transaction identifier and commit evidence.
+The executor then enforces a commit phase that must verify the evidence.
+
+Let the request binding hash be
+\[
+\mathsf{ReqHash} := \mathrm{SHA256}\bigl(\mathsf{Canon}(\{\texttt{v},\texttt{intent\_id},\texttt{caller},\texttt{session},\texttt{inputs}\})\bigr)
+\]
+where $\mathsf{Canon}$ is a deterministic canonical JSON serialization implemented once and shared by the gateway and executor.
+The artifact uses \texttt{common/canonical.py:request\_sha256\_v1}.
+
+The preview phase performs two actions.
+
+\paragraph{Policy privacy checks.}
+The gateway queries the policy databases using two server PIR and bundles the logical database selection into a single bundle database name when bundling is enabled.
+
+\paragraph{Policy program evaluation.}
+The gateway secret shares predicate inputs and invokes two party computation with a fixed circuit identifier.
+
+The final output of preview is a fresh action identifier and two commit proof shares.
+
+\subsection{Pseudocode and invariants}
+
+The following pseudocode specifies the protocol level behavior of the gateway and executor.
+The artifact code is in \texttt{gateway/mcp\_server.py}, \texttt{gateway/policy\_unified.py}, and
+\texttt{executor\_server/server.py}.
+
+\paragraph{Gateway algorithm.}
+\begin{verbatim}
+GatewayAct(intent_id, inputs, constraints, caller, session):
+  if intent_id not in allowlisted_intents:
+    return DENY
+
+  inputs_eff := handleize_sensitive_fields(inputs, caller, session)
+  h := ReqHash(intent_id, caller, session, inputs_eff)
+
+  a := fresh_action_id()
+  pir_ev := pir_preview(a, inputs_eff)
+  mpc_ev := mpc_preview(a, h, inputs_eff, pir_ev)
+
+  if pir_ev invalid or mpc_ev invalid:
+    return DENY
+
+  return OK with artifacts including commit evidence for a and h
+\end{verbatim}
+
+\paragraph{Executor algorithm.}
+\begin{verbatim}
+ExecutorCommit(req, commit):
+  inputs_eff := effectful_fields(req)
+  h := ReqHash(req.intent_id, req.caller, req.session, inputs_eff)
+
+  if not verify_dual_commit_proofs(commit, action_id=req.action_id, h=h):
+    return DENY
+
+  if replay_guard_seen(req.action_id):
+    return DENY
+
+  outs, commit_tag := reconstruct_policy_outputs(commit)
+  if outs.allow_pre != 1:
+    return DENY
+  if outs.need_confirm == 1 and req.user_confirm != true:
+    return DENY
+
+  apply_required_sanitize_patch(outs, req)
+  perform_side_effect(req)
+
+  audit_log_append(req.action_id, h, commit_tag, outs, reason_code)
+  return OK
+\end{verbatim}
+
+The key invariants are as follows.
+
+\paragraph{Fail closed.}
+Any verification failure causes the gateway or executor to return deny without committing an effect.
+
+\paragraph{Request binding.}
+The executor recomputes the request hash and rejects any mismatch.
+This binds authorization to the exact session, caller, and effectful inputs.
+
+\paragraph{Audit binding.}
+Every committed effect appends an audit record that contains the request hash and the reconstructed
+commit tag.
+These values bind the audit trail to the dual authorization evidence.
+
+\subsection{Executor acceptance predicate}
+
+The executor accepts a commit request if and only if all conditions hold.
+
+\paragraph{Dual proof verification.}
+Two proofs parse and verify under distinct server identities and recognized key identifiers.
+
+\paragraph{Freshness.}
+Both proofs are within a configurable time to live window.
+
+\paragraph{Request binding.}
+Both proofs bind the same action identifier, program identifier, and request hash, and the request hash matches the executor recomputation on the received request.
+
+\paragraph{Replay resistance.}
+The action identifier has not been accepted before in the replay window, optionally backed by persistent storage.
+
+\paragraph{Policy semantics.}
+The reconstructed policy decision bits authorize the effect and enforce confirmation and sanitization requirements.
+
+The acceptance predicate is implemented in \texttt{executor\_server/server.py:\_verify\_commit\_evidence} and is validated by executable checks in \texttt{scripts/security\_game\_nbe\_check.py} and unit tests in \texttt{tests/test\_security\_games.py}.
+
+\subsection{Fail closed invariants}
+
+The system fails closed at every integrity boundary.
+
+\paragraph{Gateway boundary.}
+If any policy server request fails or returns invalid evidence then the gateway returns deny.
+
+\paragraph{Executor boundary.}
+If any proof verification step fails then the executor returns deny and performs no external side effect.
+
+\paragraph{Capsule boundary.}
+If the capsule mediation contract blocks a direct bypass attempt then the attempt fails without reaching any external sink.
+
+\section{Formal security claims and proof chain}
+\label{sec:security}
+
+We state four system properties.
+The full definitions and proofs are provided in Appendix \ref{app:proofs} and the accompanying artifact documents \texttt{FORMAL\_SECURITY.md} and \texttt{appendix\_security.tex}.
+
+\paragraph{Non bypassable effects.}
+No external side effect is committed unless two valid commit proofs exist that are bound to the exact request context, satisfy freshness, and are not replayed.
+
+\paragraph{Secret myopia.}
+Sensitive plaintext is never delivered to the untrusted runtime except through explicit declassification guarded by confirmation and policy.
+
+\paragraph{Single auditor privacy.}
+For each policy server there exists a simulator that can reproduce its view from an explicit leakage function.
+
+\paragraph{Skill confined safety.}
+Under a capsule mediation contract, skills cannot access host secrets, execute arbitrary processes, or access the public network except through the gateway and executor mediation path.
+
+\section{Leakage model and implementation mapping}
+\label{sec:leakage}
+
+Single auditor privacy is defined relative to an explicit leakage function.
+We define two leakage functions.
+
+\paragraph{Policy server leakage $L_{\mathsf{policy}}$.}
+This captures what a single policy server learns from PIR and two party computation transcripts.
+It includes public configuration, fixed shape schedule parameters, coarse timing buckets, and action identifiers.
+It excludes the queried indices and the logical intent category when unified routing is enabled.
+
+\paragraph{System leakage $L_{\mathsf{sys}}$.}
+This captures application level leakage across AgentLeak style channels.
+We represent it as a tuple of per channel leakage functions $L_{C1}$ through $L_{C7}$, covering final output, inter agent messages, tool inputs, tool outputs, memory, logs, and skill ingress.
+
+The formal definitions, per channel decomposition, residual leakage bounds, and a code and configuration mapping are given in Appendix \ref{app:leakage} and in \texttt{LEAKAGE\_MODEL.md}.
+
+\section{Baselines and evaluation methodology}
+\label{sec:eval}
+
+\subsection{Baseline semantics}
+
+We evaluate four SecureClaw modes and two native runtime baselines.
+Each mode corresponds to a different enforcement boundary and a different threat model.
+
+\paragraph{SecureClaw full.}
+Gateway mediation, two policy servers, and dual proof executor enforcement.
+
+\paragraph{policy only.}
+Gateway mediation and policy evaluation, without executor enforcement as an effect boundary.
+This isolates the value of non bypassable effects.
+
+\paragraph{sandbox only.}
+Local sandbox restrictions without policy mediation and without dual proof enforcement.
+This isolates the value of policy enforcement beyond sandboxing.
+
+\paragraph{single server policy.}
+Gateway mediation and a single policy server.
+This isolates the performance and privacy tradeoff by removing single auditor privacy.
+
+\paragraph{codex native and openclaw native.}
+Native runtime guardrails with no SecureClaw components.
+These baselines measure what current platforms prevent under the same benchmark cases and metric definitions.
+
+\paragraph{Compromised runtime sanity check.}
+We distinguish native runtime guardrails from a compromised runtime setting where the runtime logic intentionally leaks on attack cases.
+The latter is useful only to validate that prompt based defenses cannot stop an adversarial runtime that chooses to exfiltrate.
+We do not present that setting as a native baseline.
+The artifact records this separation explicitly in \texttt{BASELINES\_FAIRNESS.md}.
+
+\paragraph{Mode identifiers.}
+The artifact uses the mode identifiers \texttt{mirage\_full}, \texttt{policy\_only},
+\texttt{sandbox\_only}, and \texttt{single\_server\_policy} for the four SecureClaw modes.
+
+\subsection{Fairness protocol}
+
+We enforce a same cases comparison by generating a fixed official case manifest from the benchmark dataset with a fixed random seed.
+All systems are evaluated on that manifest.
+For each case we record a channel, a label indicating attack or benign, a leaked flag, a blocked flag, an allowed flag, a reason code, and a latency.
+
+The artifact implements this protocol in \texttt{scripts/fair\_full\_compare.py} and aggregates to a single report file \texttt{artifact\_out\_compare/fair\_full\_report.json}.
+
+\subsection{Metrics and statistical analysis}
+
+For a system $S$ and a set of attack cases $\mathcal{D}_{\mathsf{atk}}$ we define
+\[
+\mathsf{attack\_leak\_rate}(S) := \frac{\#\{d \in \mathcal{D}_{\mathsf{atk}} : \mathsf{leaked}(d,S)=1\}}{|\mathcal{D}_{\mathsf{atk}}|}.
+\]
+We define attack block rate and benign allow rate analogously.
+
+We compute Wilson confidence intervals with $z=1.96$ for each rate.
+We compute two sided Fisher exact test values for pairwise comparisons of leakage counts and block counts against the full system.
+We decompose error modes by channel, by task vertical, by attack family, and by reason code.
+All statistics are implemented in \texttt{scripts/fair\_full\_stats.py}.
+
+\section{Performance and deployability}
+\label{sec:perf}
+
+\subsection{Cost model under constant shape enforcement}
+
+The dominant cost in the artifact is the policy server kernel for PIR and fixed circuit two party computation.
+Under fixed shape scheduling the policy servers observe a fixed number of subrequests per time tick.
+This induces overhead from three sources.
+
+\paragraph{Dummy compute.}
+Padding and cover traffic add dummy subrequests that perform the same kernel work as real queries.
+
+\paragraph{Mixing and queueing.}
+Microbatch mixing introduces queueing delay that depends on tick interval and batch utilization.
+
+\paragraph{Transport overhead.}
+JSON encoding, copying, and connection setup increase tail latency.
+Binary framing and Unix domain sockets reduce this cost in local deployments.
+
+The artifact provides microbenchmarks and end to end benchmarks that sweep padding and batch parameters and report throughput and latency.
+The narrative and reproduction commands are in \texttt{PERFORMANCE.md}.
+
+\subsection{Why the system is not slow by construction}
+
+The enforcement line adds cryptographic verification and constant shape scheduling, but it does not require general purpose secure computation on large data.
+The executor verification work is constant time in the size of the request and is dominated by two HMAC checks and a small replay table lookup.
+The policy server kernels are amenable to batch evaluation, vectorized inner products, and multi core parallelism.
+Therefore the system can reach production oriented throughput without a two orders of magnitude slowdown.
+
+\subsection{Production oriented specifications}
+
+We specify four production mechanisms that are required for deployment.
+
+\paragraph{Persistent audit log with hash chaining.}
+Every committed effect records a structured audit event that includes the request hash, the reconstructed commit tag, and a hash pointer to the previous event.
+This provides tamper evident auditability.
+
+\paragraph{Key rotation with explicit key identifiers.}
+Each policy server supports a set of MAC keys indexed by a key identifier field.
+The executor accepts any recognized key identifier and can revoke old keys by removing them from its key set.
+
+\paragraph{Session binding and revocation.}
+Every transaction identifier and every sealed handle is bound to a session and caller identity.
+Revocation is implemented by invalidating active transaction identifiers and rotating MAC keys.
+
+\paragraph{Crash recovery and replay semantics.}
+Replay protection can be backed by a persistent store so that replays across executor restarts are rejected within a configured replay window.
+
+\section{Limitations, failure modes, and responsible disclosure}
+\label{sec:limits}
+
+\subsection{Known bypass conditions}
+
+The system does not protect against compromises of the trusted gateway or executor.
+The system does not protect against collusion of both policy servers.
+The system does not protect against operating system sandbox escapes that violate the capsule mediation contract.
+
+\subsection{False positives and utility risks}
+
+False positives arise from policy databases and from conservative declassification rules.
+In the artifact the main sources are recipient allowlist misses, DLP token hits, and leakage budget exhaustion.
+We provide per reason code breakdowns to separate policy errors from implementation errors.
+
+\subsection{Channels not fully covered by official benchmarks}
+
+Official benchmarks cover a subset of leakage channels.
+We provide a synthetic channel suite for channels that lack official cases.
+For paper claims we clearly separate official coverage from synthetic coverage and report them independently.
+
+\subsection{Capsule mediation contract as a verifiable specification}
+
+Skill confined safety is conditional on a capsule mediation contract.
+The contract must enforce the following properties.
+
+\paragraph{Minimal filesystem exposure.}
+The capsule exposes only the skill code directory and a dedicated write only workspace directory.
+Host secret directories are not mounted.
+
+\paragraph{Constrained transport.}
+The capsule permits only a single transport endpoint to the gateway, preferably a Unix domain socket.
+
+\paragraph{Network policy.}
+The capsule denies public network access.
+If the transport uses a network stack then only the gateway address is permitted.
+
+\paragraph{No arbitrary process execution.}
+The capsule denies process creation except for a fixed allowlist required by the runtime.
+
+The artifact provides a capsule smoke test that attempts to violate these properties and asserts denial.
+
+\section{Related work and positioning}
+\label{sec:related}
+
+SecureClaw combines four themes and its contribution is the system level composition.
+
+\paragraph{Reference monitors and effect boundaries.}
+The executor functions as a reference monitor for external side effects.
+Unlike prompt based guardrails, the executor enforcement line is non bypassable because it validates cryptographic authorization tied to the exact request.
+
+\paragraph{Privacy preserving policy evaluation.}
+Two server PIR and two party computation have been used to hide query contents from a single server.
+Our contribution is to apply these primitives to agentic tool use with a fixed shape compilation and a unified routing layer that reduces intent and database selection leakage.
+
+\paragraph{Leakage aware traffic shaping.}
+Prior shaping systems often target network observers or focus on padding sizes alone.
+Our setting includes an application level policy server that sees structured transcripts.
+We therefore define an explicit leakage function and compile the policy check path to a fixed shape schedule that makes the transcript simulatable from that leakage.
+
+\paragraph{Sandboxing and confinement.}
+Operating system sandboxes restrict runtime capabilities but do not enforce semantic policy or prevent exfiltration through allowed channels.
+SecureClaw treats sandboxing as an optional confinement layer and places semantic enforcement at the gateway and executor boundaries.
+
+\paragraph{Platform native safety layers.}
+Native agent platforms provide instruction hierarchy, refusal behavior, and output filtering.
+These mechanisms improve safety but remain advisory in a compromised runtime threat model.
+SecureClaw provides a separate enforcement line that remains effective even when the runtime intentionally attempts to leak, subject to the trusted gateway and executor assumptions.
+
+\paragraph{Positioning relative to policy only and single server policy.}
+A policy only design performs checks but cannot prevent bypass by a runtime that directly invokes tools or replays a previously authorized action.
+A single server policy design can enforce non bypassable effects but exposes sensitive policy queries to that server.
+SecureClaw addresses both issues by combining a non bypassable executor boundary with two server privacy preserving policy evaluation.
+
+\paragraph{Positioning relative to supply chain scanning.}
+Static scanners can flag malicious skills but do not provide an integrity boundary once a skill is installed and executing.
+We treat skill ingress as an effectful action that must pass the same preview and commit transaction and the same dual proof executor enforcement.

@@ -1,23 +1,25 @@
-% Appendix-grade proof chain for MIRAGE-OG++ (artifact-faithful).
+% Appendix grade proof chain for SecureClaw and artifact faithful.
 %
 % This file is intended to be \input{} from neurips_2025.tex. It is also
 % readable standalone as a LaTeX appendix fragment.
 
-\section{Appendix: Proof Chain for Non-Bypassable Effects and Composition}
+\section{Appendix: Proof Chain for Non bypassable Effects and Composition}
 \label{app:proofs}
 
-This appendix formalizes MIRAGE-OG++'s core integrity claim---\emph{no external side effect is
-committed without two independently authenticated commit proofs bound to the exact request}---and
-sketches a compositional argument with the privacy and confinement components. The statements match
-the artifact implementation (\texttt{executor\_server/server.py} and \texttt{policy\_server/server.py})
-and its formal harness (\texttt{scripts/security\_game\_nbe\_check.py}).
+This appendix formalizes SecureClaw's core integrity claim, \emph{no external side effect is
+committed without two independently authenticated commit proofs bound to the exact request}, and it
+sketches a compositional argument with the privacy and confinement components.
+The statements match the artifact implementation in \texttt{executor\_server/server.py} and
+\texttt{policy\_server/server.py}, and the formal harness \texttt{scripts/security\_game\_nbe\_check.py}.
 
 \paragraph{Scope and assumptions.}
 We reason about a PPT adversary that fully controls the untrusted agent runtime and all skill code,
 and may send arbitrary requests to the gateway and the executor. The executor's MAC verification keys
-are not compromised. Policy servers are assumed \emph{honest for integrity} (they compute commit
-proofs according to the protocol) and \emph{honest-but-curious for privacy} (single-server leakage is
-bounded by an explicit leakage function; see \texttt{LEAKAGE\_MODEL.md}).
+are not compromised.
+Policy servers are assumed honest for integrity and they compute commit proofs according to the
+protocol.
+Policy servers are also assumed honest but curious for privacy.
+Single server leakage is bounded by an explicit leakage function defined in \texttt{LEAKAGE\_MODEL.md}.
 
 \subsection{Cryptographic primitives and canonical binding}
 \label{app:proofs:primitives}
@@ -25,14 +27,14 @@ bounded by an explicit leakage function; see \texttt{LEAKAGE\_MODEL.md}).
 \paragraph{MAC.}
 Let $\mathsf{MAC} = (\mathsf{Tag},\mathsf{Vrfy})$ be a message authentication code with key space
 $\mathcal{K}$ and message space $\mathcal{M}$. We assume existential unforgeability under chosen
-message attack (EUF-CMA). The artifact uses HMAC-SHA256:
+message attack, abbreviated EUF CMA. The artifact uses HMAC-SHA256:
 \[
 \mathsf{Tag}_K(m) := \mathrm{HMAC\text{-}SHA256}(K, m), \quad \mathsf{Vrfy}_K(m,t) := [t = \mathsf{Tag}_K(m)].
 \]
 
-\paragraph{Canonical serialization and request-binding hash.}
-Let $\mathsf{Canon}(\cdot)$ be a deterministic canonical JSON serialization (artifact:
-\texttt{common/canonical.py}). Define the request-binding hash:
+\paragraph{Canonical serialization and request binding hash.}
+Let $\mathsf{Canon}(\cdot)$ be a deterministic canonical JSON serialization implemented in
+\texttt{common/canonical.py}. Define the request binding hash:
 \[
 \mathsf{ReqHash}(\mathsf{intent\_id},\mathsf{caller},\mathsf{session},\mathsf{inputs}) :=
 \mathrm{SHA256}\!\left(\mathsf{Canon}\!\left(
@@ -48,8 +50,9 @@ This is an engineering assumption enforced by using the same library routine in 
 \subsection{Commit proof syntax and executor acceptance predicate}
 \label{app:proofs:accept}
 
-Each policy server $\mathcal{P}_\sigma$ ($\sigma\in\{0,1\}$) holds a MAC key $K_\sigma$ (with a key id
-\texttt{kid} for rotation) and issues \emph{commit proof shares}. A commit proof share is a pair
+Each policy server $\mathcal{P}_\sigma$ for $\sigma\in\{0,1\}$ holds a MAC key $K_\sigma$ and uses a
+key identifier field \texttt{kid} for rotation.
+Each policy server issues \emph{commit proof shares}. A commit proof share is a pair
 $\pi_\sigma = (\mathsf{meta}_\sigma, t_\sigma)$, where:
 \begin{align*}
 \mathsf{meta}_\sigma := \{&
@@ -73,21 +76,21 @@ holds, where:
 $\mathsf{Vrfy}_{K_\sigma}(\mathsf{Canon}(\mathsf{meta}_\sigma), t_\sigma)=1$ for $\sigma\in\{0,1\}$,
 using the key for the claimed \texttt{kid}.
 \item Freshness: $\lvert \mathrm{now} - \tau\rvert \leq \mathrm{TTL}_{\mathsf{mac}}$
-(artifact env \texttt{POLICY\_MAC\_TTL\_S}).
+where $\mathrm{TTL}_{\mathsf{mac}}$ is configured by the environment variable \texttt{POLICY\_MAC\_TTL\_S}.
 \item Context agreement: both shares bind the same $(a,p,h)$ tuple.
 \item Request binding: letting $(\mathsf{intent\_id},\mathsf{caller},\mathsf{session},\mathsf{inputs})$
 be the effectful fields of $\mathsf{req}$, we require $h =
 \mathsf{ReqHash}(\mathsf{intent\_id},\mathsf{caller},\mathsf{session},\mathsf{inputs})$.
-\item Replay protection: $(a,p,h)$ (equivalently $a$) has not been accepted before within the replay
-window (artifact: \texttt{\_ReplayGuard.check\_and\_mark}).
+\item Replay protection: the action identifier $a$ has not been accepted before within the replay
+window. The artifact uses \texttt{\_ReplayGuard.check\_and\_mark}.
 \item Policy bits reconstructed from $(y_0,y_1)$ indicate allow; if a confirmation bit is set then
 the request includes explicit user confirmation; and any sanitize patch is applied.
 \end{enumerate}
 
-\subsection{Security game for non-bypassable effects}
+\subsection{Security game for non bypassable effects}
 \label{app:proofs:nbe-game}
 
-We formalize \emph{non-bypassable effects} as an integrity game where the adversary controls the
+We formalize \emph{non bypassable effects} as an integrity game where the adversary controls the
 untrusted runtime and can obtain valid commit proofs for adaptively chosen preview tuples, but must
 not be able to commit an effect outside the authorized set.
 
@@ -198,3 +201,169 @@ enforced at the gateway boundary by handleization and explicit declassification;
 of a single policy server and follows from the transcript design and the DPF/MPC security properties
 up to leakage; and SCS is conditioned on the capsule contract. Since these properties concern
 disjoint attacker views and disjoint enforcement points, a union bound suffices.
+
+\subsection{Executable validation of the acceptance predicate}
+\label{app:proofs:executable}
+
+Theorem \ref{thm:nbe} is a cryptographic statement about any adversary in the model.
+The artifact also provides an executable specification that checks the concrete acceptance predicate
+implemented by the executor.
+
+\paragraph{Validation statement.}
+Let $\mathsf{Accept}$ be the acceptance predicate specified in Section \ref{app:proofs:accept}.
+The artifact implements $\mathsf{Accept}$ in \texttt{executor\_server/server.py} and provides:
+\begin{itemize}
+\item unit tests that directly call the verification routine and assert accept and reject behavior,
+in \texttt{tests/test\_security\_games.py};
+\item an end to end harness that starts two policy servers, a gateway, and an executor and checks a
+suite of mutated requests, in \texttt{scripts/security\_game\_nbe\_check.py}.
+\end{itemize}
+The harness checks rejection under replay, session mismatch, caller mismatch, missing proof share,
+MAC mutation, request hash mutation, action identifier mutation, and timestamp expiration.
+These checks provide code level evidence that the artifact enforces the exact acceptance predicate
+assumed by the reduction in Theorem \ref{thm:nbe}.
+
+\subsection{Secret myopia game and theorem}
+\label{app:proofs:sm}
+
+We formalize secret myopia as a simulation based confidentiality property for the untrusted runtime.
+The definition is implementation oriented.
+It treats the gateway and executor as trusted and asserts that sensitive plaintext does not flow to
+the untrusted runtime except through an explicit declassification interface.
+
+\paragraph{Leakage function for SM.}
+Let $L_{\mathsf{SM}}$ include:
+handle identifiers,
+handle labels,
+handle time to live values,
+policy decision bits,
+sanitization patch identifiers,
+and any explicitly declassified outputs that follow user confirmation.
+It excludes any other function of sensitive plaintext stored inside the gateway.
+
+\paragraph{Experiment $\mathsf{Exp}^{\mathsf{SM}}(\lambda)$.}
+The challenger initializes the gateway and gives the adversary control of the untrusted runtime.
+The adversary interacts with the gateway by issuing arbitrary action requests and receiving gateway
+responses.
+The adversary wins if it outputs a bit indicating which of two challenger chosen secret values was
+stored in a handle, with advantage non negligible over one half, without an allowed declassification
+event that reveals that value.
+
+\paragraph{Theorem.}
+\begin{theorem}[Secret myopia by handleization]\label{thm:sm}
+Assume the gateway never returns sensitive plaintext to the untrusted runtime except through an
+explicit declassification interface that requires confirmation and includes declassified content in
+$L_{\mathsf{SM}}$.
+Assume handle identifiers are sampled independently of plaintext and are not guessable with non
+negligible probability.
+Then the system satisfies secret myopia with leakage $L_{\mathsf{SM}}$.
+\end{theorem}
+
+\paragraph{Proof.}
+We construct a simulator $\mathcal{S}$ that, given $L_{\mathsf{SM}}$, produces a distribution
+indistinguishable from the view of the adversary.
+Whenever the real gateway would mint a handle bound to some plaintext, $\mathcal{S}$ instead mints a
+fresh random handle identifier and records only the public metadata required by $L_{\mathsf{SM}}$.
+All subsequent uses of that handle by the adversary are simulated by lookup on the simulator side.
+Because handle identifiers are sampled independently of plaintext and the adversary never receives
+plaintext unless it appears in the leakage, the simulated responses match the real responses
+distribution exactly up to the declassified outputs that are already included in $L_{\mathsf{SM}}$.
+Therefore any adversary advantage implies a violation of the handle sampling assumption or a direct
+plaintext flow outside the declassification interface, which contradicts the premise.
+\qed
+
+\paragraph{Executable evidence.}
+The artifact includes unit tests that check handleization and declassification behavior for the tool
+surface and for inter agent and memory channels.
+Representative tests are in \texttt{tests/test\_mcp\_gateway.py} and \texttt{tests/test\_agentleak\_channels.py}.
+
+\subsection{Single auditor privacy game and theorem}
+\label{app:proofs:sap}
+
+We formalize single auditor privacy as transcript indistinguishability for a single policy server,
+parameterized by an explicit leakage function.
+The leakage function is defined in Appendix \ref{app:leakage}.
+
+\paragraph{Experiment $\mathsf{Exp}^{\mathsf{SAP}}(\lambda)$.}
+The adversary outputs two action sequences $W_0$ and $W_1$ such that
+$L_{\mathsf{policy}}(W_0) = L_{\mathsf{policy}}(W_1)$.
+The challenger samples a bit $b$ and executes the system on $W_b$.
+The challenger then reveals the full transcript view $\mathsf{View}(\mathcal{P}_\sigma)$ for one
+policy server $\mathcal{P}_\sigma$.
+The adversary outputs a guess $b'$.
+
+\paragraph{Theorem.}
+\begin{theorem}[Single auditor privacy under DPF and two party computation]\label{thm:sap}
+Assume the DPF and FSS based two server PIR scheme is secure against a single server that sees only
+one key share per query.
+Assume the two party computation protocol for the fixed policy program is secure in the honest but
+curious model.
+Assume the gateway uses fixed shape routing and fixed schedule parameters so that the transcript
+shape matches the leakage function $L_{\mathsf{policy}}$.
+Then for each $\sigma \in \{0,1\}$ there exists a probabilistic polynomial time simulator
+$\mathsf{Sim}_\sigma$ such that for all probabilistic polynomial time distinguishers $D$,
+\[
+\bigl|\Pr[D(\mathsf{View}(\mathcal{P}_\sigma))=1] - \Pr[D(\mathsf{Sim}_\sigma(L_{\mathsf{policy}}))=1]\bigr|
+\]
+is negligible in $\lambda$.
+\end{theorem}
+
+\paragraph{Proof.}
+We use a hybrid argument.
+Fix $\sigma$ and consider the real transcript view of $\mathcal{P}_\sigma$.
+
+First replace each PIR key share in the transcript with the output of the single server PIR
+simulator for that scheme given the corresponding PIR leakage terms in $L_{\mathsf{policy}}$.
+By PIR security the transcript remains computationally indistinguishable.
+
+Next replace each two party computation message transcript with the output of the two party
+computation simulator for the honest but curious model given the circuit shape, the program
+identifier, the schedule parameters, and the output bits that are included in $L_{\mathsf{policy}}$.
+By two party computation security the transcript remains computationally indistinguishable.
+
+All remaining transcript components are fully determined by the fixed routing and fixed schedule
+parameters and are therefore computable from $L_{\mathsf{policy}}$.
+Combining the simulators yields $\mathsf{Sim}_\sigma$.
+Applying a union bound over the negligible distinguishing advantages yields the theorem.
+\qed
+
+\paragraph{Executable evidence.}
+The artifact includes fixed shape mixing and padding logic for PIR and for the unified policy program.
+The mixer constant shape property is exercised by unit tests such as
+\texttt{tests/test\_algorithms.py}.
+End to end distinguishability sweeps are implemented in \texttt{scripts/leakage\_model\_sweep.py}.
+
+\subsection{Skill confined safety game and theorem}
+\label{app:proofs:scs}
+
+Skill confined safety is a conditional property.
+It relies on a capsule mediation contract that constrains the untrusted runtime environment.
+The contract is specified in Section \ref{sec:limits}.
+
+\paragraph{Experiment $\mathsf{Exp}^{\mathsf{SCS}}(\lambda)$.}
+The adversary controls the skill code and attempts to perform one of the following forbidden direct
+actions without using the gateway and executor path:
+host secret reads, public network exfiltration, or arbitrary process execution.
+The adversary wins if it succeeds while the capsule mediation contract holds.
+
+\paragraph{Theorem.}
+\begin{theorem}[Skill confined safety under a capsule mediation contract]\label{thm:scs}
+Assume the capsule mediation contract holds and prevents the forbidden direct actions.
+Assume non bypassable effects and secret myopia hold for the gateway and executor path.
+Then the system satisfies skill confined safety.
+\end{theorem}
+
+\paragraph{Proof.}
+By the capsule mediation contract, any forbidden direct action attempt that does not traverse the
+gateway fails and cannot reach an external sink.
+Therefore any external side effect must traverse the executor, which enforces non bypassable effects.
+Any attempted exfiltration of sensitive plaintext through allowed interfaces is prevented by secret
+myopia unless the user explicitly declassifies it, in which case the leakage is intentional and
+auditable.
+Thus the adversary cannot perform forbidden direct actions or unauthorized effects under the stated
+assumptions.
+\qed
+
+\paragraph{Executable evidence.}
+The artifact provides a capsule smoke test that attempts direct filesystem reads, direct network
+access, and direct process execution from within the capsule boundary and asserts denial.

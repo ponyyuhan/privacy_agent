@@ -1,0 +1,171 @@
+% Appendix: leakage functions and mapping to implementation.
+% Intended to be \input{} from neurips_2025.tex.
+
+\section{Appendix: Leakage model and implementation mapping}
+\label{app:leakage}
+
+This appendix defines the explicit leakage functions used by our single auditor privacy claim and by our end to end channel analysis.
+The definitions are artifact faithful and correspond to the implementation in \texttt{LEAKAGE\_MODEL.md}.
+
+\subsection{Notation}
+
+Let $\lambda$ be the security parameter.
+Let $\mathcal{G}$ be the gateway, let $\mathcal{P}_0$ and $\mathcal{P}_1$ be the policy servers, and let $\mathcal{X}$ be the executor.
+Let an action be identified by an action identifier $a$.
+Let the policy program identifier be $p$.
+Let the request binding hash be $h := \mathsf{ReqHash}$ as defined in Appendix \ref{app:proofs:primitives}.
+
+We write $\mathsf{View}(\mathcal{P}_\sigma)$ for the full transcript observed by policy server $\mathcal{P}_\sigma$, including request paths, message sizes, coarse timing buckets, and application layer fields.
+
+\subsection{Policy server leakage function $L_{\mathsf{policy}}$}
+
+Single auditor privacy is defined relative to a leakage function that captures the intentionally revealed metadata to one policy server.
+We define
+\[
+L_{\mathsf{policy}} := \langle L_{\mathsf{pir}},\ L_{\mathsf{mpc}},\ L_{\mathsf{confirm}},\ L_{\mathsf{time}} \rangle .
+\]
+
+\subsubsection{PIR leakage $L_{\mathsf{pir}}$}
+
+The gateway queries membership databases using two server PIR based on DPF and FSS.
+A single policy server observes a key share per query and cannot infer the queried index under the DPF security assumption.
+
+We capture the remaining metadata leakage as follows.
+
+\paragraph{Public configuration.}
+The domain size $N$ and the fixed number of keys per subrequest are public.
+Bundling configuration is public.
+
+\paragraph{Constant shape schedule.}
+If mixing is enabled then the gateway sends exactly $\mathsf{pad\_to}$ subrequests per tick and may fill slack with dummy subrequests.
+A single policy server learns the tick index and the fixed number of subrequests per tick.
+
+\paragraph{Database name exposure.}
+If bundling is enabled then the policy server sees a single bundle database name for all membership checks.
+Otherwise the policy server sees the database name per request.
+
+Therefore we define $L_{\mathsf{pir}}$ as the tuple containing
+the public domain size,
+the fixed keys per subrequest,
+the observed database name,
+the tick schedule parameters,
+and the multiset of action identifiers included in each tick.
+
+\subsubsection{Two party computation leakage $L_{\mathsf{mpc}}$}
+
+The policy program is evaluated using two party computation over XOR shared inputs.
+We assume honest but curious privacy for the two party computation protocol.
+In unified mode the circuit and program identifier are fixed and do not depend on the intent category.
+
+We define $L_{\mathsf{mpc}}$ as the tuple containing
+the program identifier,
+the circuit shape metadata which is constant in unified mode,
+the tick schedule parameters,
+and the multiset of action identifiers included in each tick.
+
+\subsubsection{Confirm path leakage $L_{\mathsf{confirm}}$}
+
+When confirm path scanning is enabled the gateway may execute block PIR queries for a deterministic finite automaton transition table.
+If the confirm path is invoked conditionally then a single policy server may learn whether a scan occurred.
+If step padding is disabled then a single policy server may learn the number of steps.
+
+We define $L_{\mathsf{confirm}}$ to include
+the scan invocation bit,
+the number of scan steps after any configured padding,
+the public block size,
+and the public transition table parameters.
+
+\subsubsection{Timing leakage $L_{\mathsf{time}}$}
+
+The policy server can observe coarse arrival times and response times.
+We do not model kernel side channels.
+We define a quantized timing bucket function and include only the bucket index per tick.
+This is enforced by fixed interval mixing when enabled.
+Concretely, if the tick interval is $\Delta$ then the policy server learns at most the number of
+ticks in a window and the bucketed offset within each interval.
+
+\subsection{System leakage function $L_{\mathsf{sys}}$}
+
+We define application level leakage across seven channels inspired by AgentLeak.
+For an execution trace we define
+\[
+L_{\mathsf{sys}} := \langle L_{C1}, L_{C2}, L_{C3}, L_{C4}, L_{C5}, L_{C6}, L_{C7} \rangle .
+\]
+
+\subsubsection{Channel definitions}
+
+\paragraph{$C1$ final output.}
+$L_{C1}$ includes the final decision type, a coarse output length, a reason code, and a timing bucket.
+It excludes sensitive plaintext unless explicitly declassified.
+
+\paragraph{$C2$ inter agent messages.}
+$L_{C2}$ includes message counts, coarse timing, and handle identifiers used as payload references.
+It excludes sensitive plaintext because payloads are handleized.
+
+\paragraph{$C3$ tool inputs.}
+$L_{C3}$ includes the intent identifier or a shadow class identifier, the set of input key names, a reason code, and a timing bucket.
+It excludes sensitive plaintext because sensitive fields are represented as handles.
+
+\paragraph{$C4$ tool outputs.}
+$L_{C4}$ includes a tool status code, a coarse output summary length, handle identifiers returned as artifacts, and a timing bucket.
+It excludes sensitive plaintext unless explicitly declassified.
+
+\paragraph{$C5$ memory.}
+$L_{C5}$ includes the memory namespace, a key identifier, a record count, handle identifiers stored, and a timing bucket.
+It excludes plaintext memory values because memory stores handle records.
+
+\paragraph{$C6$ logs and audit.}
+$L_{C6}$ includes audit event type, caller identity, session identity, reason codes, and hash chain metadata.
+It excludes plaintext secrets.
+
+\paragraph{$C7$ skill supply chain ingress.}
+$L_{C7}$ includes a skill digest, membership hit bits for known bad indicators, an install marker bit, a reason code, and a timing bucket.
+It excludes raw skill content unless explicitly declassified.
+
+\subsection{Residual leakage and allowed leakage items}
+
+We list the allowed leakage items and their sources.
+Each item is either required for correctness or explicitly accepted as leakage.
+
+\begin{itemize}
+\item Action identifier exposure to policy servers through fixed shape batching.
+\item Program identifier exposure to policy servers through unified routing.
+\item Tick schedule parameters such as interval and pad size.
+\item Coarse timing buckets at tick granularity.
+\item Audit metadata such as reason codes and hash chain pointers.
+\end{itemize}
+
+We treat the following as residual risks that are not eliminated by default configuration.
+
+\begin{itemize}
+\item Conditional confirm path invocation may leak a branch bit.
+\item Low entropy guessing attacks against unkeyed request hashes are possible in principle when an attacker can enumerate candidates.
+\end{itemize}
+
+\subsection{Mapping to implementation and configuration}
+
+Table \ref{tab:leakmap} maps the major leakage controls to code paths and configuration keys.
+
+\begin{table}[t]
+\centering
+\small
+\begin{tabular}{lll}
+\toprule
+Control & Code path & Configuration \\
+\midrule
+Request binding hash & \texttt{common/canonical.py} & none \\
+Commit proof verify & \texttt{executor\_server/server.py} & \texttt{POLICY\_MAC\_TTL\_S} \\
+Unified routing and program id & \texttt{gateway/policy\_unified.py} & \texttt{UNIFIED\_POLICY}, \texttt{MIRAGE\_POLICY\_PROGRAM\_ID} \\
+PIR bundling & \texttt{gateway/fss\_pir.py} & \texttt{USE\_POLICY\_BUNDLE} \\
+Oblivious bundle selection & \texttt{policy\_server/build\_dbs.py} & \texttt{POLICY\_BUNDLE\_NAME} \\
+PIR mixing and padding & \texttt{gateway/fss\_pir.py} & \texttt{PIR\_MIX\_ENABLED}, \texttt{PIR\_MIX\_PAD\_TO} \\
+PIR cover traffic & \texttt{gateway/fss\_pir.py} & \texttt{PIR\_COVER\_TRAFFIC} \\
+MPC mixing and padding & \texttt{gateway/policy\_unified.py} & \texttt{MPC\_MIX\_ENABLED}, \texttt{MPC\_MIX\_PAD\_TO} \\
+MPC cover traffic & \texttt{gateway/policy\_unified.py} & \texttt{MPC\_COVER\_TRAFFIC} \\
+Confirm path DFA scan & \texttt{gateway/guardrails.py} & \texttt{DLP\_MODE}, \texttt{PAD\_DFA\_STEPS} \\
+Leakage budgets & \texttt{gateway/leakage\_budget.py} & \texttt{LEAKAGE\_BUDGET\_*} \\
+\bottomrule
+\end{tabular}
+\caption{Leakage controls and their implementation mapping.}
+\label{tab:leakmap}
+\end{table}
