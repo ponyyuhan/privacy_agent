@@ -469,6 +469,11 @@ Native agent platforms provide instruction hierarchy, refusal behavior, and outp
 These mechanisms improve safety but remain advisory in a compromised runtime threat model.
 SecureClaw provides a separate enforcement line that remains effective even when the runtime intentionally attempts to leak, subject to the trusted gateway and executor assumptions.
 
+\paragraph{Practitioner perspective.}
+A practitioner perspective has argued that attempts to secure an agent runtime that retains user level powers can be self defeating because the restrictions required for safety also remove the utility of the runtime.\footnote{\url{https://www.aikido.dev/blog/why-trying-to-secure-openclaw-is-ridiculous}}
+SecureClaw agrees with this diagnosis for models where the runtime is treated as trusted and effectful.
+SecureClaw instead treats the runtime as adversarial and moves enforcement to a small gateway and an executor.
+
 \paragraph{Positioning relative to policy only and single server policy.}
 A policy only design performs checks but cannot prevent bypass by a runtime that directly invokes tools or replays a previously authorized action.
 A single server policy design can enforce non bypassable effects but exposes sensitive policy queries to that server.
