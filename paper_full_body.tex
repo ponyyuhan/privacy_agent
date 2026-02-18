@@ -1,6 +1,18 @@
 % Paper body sections for SecureClaw.
 % This file is intended to be \input{} from neurips_2025.tex.
 
+\section{Introduction}
+\label{sec:intro}
+
+Agentic tool use systems combine language model planning with tool invocation and skill supply chains.
+The runtime processes untrusted content and can be manipulated by prompt injection, tool parameter injection, and malicious skills.
+A practitioner perspective has argued that securing an agent runtime that retains user level powers can be self defeating because the restrictions required for safety also remove the utility of the runtime.
+We cite \url{https://www.aikido.dev/blog/why-trying-to-secure-openclaw-is-ridiculous} as an example of this view.
+
+SecureClaw follows a different strategy.
+It treats the runtime as adversarial and moves policy enforcement and effect authorization into a small trusted gateway and a separate executor.
+The runtime retains planning utility, but it cannot directly commit external side effects without cryptographic authorization that is verified at the executor.
+
 \section{Problem statement and scope}
 \label{sec:problem}
 
@@ -468,11 +480,6 @@ SecureClaw treats sandboxing as an optional confinement layer and places semanti
 Native agent platforms provide instruction hierarchy, refusal behavior, and output filtering.
 These mechanisms improve safety but remain advisory in a compromised runtime threat model.
 SecureClaw provides a separate enforcement line that remains effective even when the runtime intentionally attempts to leak, subject to the trusted gateway and executor assumptions.
-
-\paragraph{Practitioner perspective.}
-A practitioner perspective has argued that attempts to secure an agent runtime that retains user level powers can be self defeating because the restrictions required for safety also remove the utility of the runtime.\footnote{\url{https://www.aikido.dev/blog/why-trying-to-secure-openclaw-is-ridiculous}}
-SecureClaw agrees with this diagnosis for models where the runtime is treated as trusted and effectful.
-SecureClaw instead treats the runtime as adversarial and moves enforcement to a small gateway and an executor.
 
 \paragraph{Positioning relative to policy only and single server policy.}
 A policy only design performs checks but cannot prevent bypass by a runtime that directly invokes tools or replays a previously authorized action.
