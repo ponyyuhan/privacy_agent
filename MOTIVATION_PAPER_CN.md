@@ -403,7 +403,7 @@ MIRAGE-OG++ 解决的是另一个正交问题：对副作用授权做可加密�
 1. `OUT_DIR=artifact_out BENCH_ITERS=12 BENCH_CONCURRENCY=3 bash scripts/run_artifact.sh`  
 2. `PYTHONPATH=. BENCH_ITERS=12 BENCH_CONCURRENCY=3 POLICY_BACKEND=python BENCH_OUT_PATH=/Users/yuhan/PycharmProjects/privacy_agent/artifact_out/bench_e2e.json python scripts/bench_e2e_throughput.py`  
 3. `PYTHONPATH=. BENCH_ITERS=12 BENCH_CONCURRENCY=3 POLICY_BACKEND=rust BENCH_OUT_PATH=/Users/yuhan/PycharmProjects/privacy_agent/artifact_out/bench_e2e.rust.json python scripts/bench_e2e_throughput.py`  
-4. `OPENCLAW_STATE_DIR=artifact_out/openclaw_state OPENCLAW_MODEL_PRIMARY=openai-codex/gpt-5.2 bash scripts/run_openclaw.sh`
+4. `OPENCLAW_STATE_DIR=artifact_out/openclaw_state OPENCLAW_MODEL_PRIMARY=openai-codex/gpt-5.1-codex-mini bash scripts/run_openclaw.sh`
 
 本节引用的实际产物：
 

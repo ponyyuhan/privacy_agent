@@ -13,7 +13,12 @@ from pathlib import Path
 
 import requests
 
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
 from gateway.fss_pir import PirClient, MixedPirClient, PirMixConfig
+from gateway.http_session import session_for
 from gateway.handles import HandleStore
 from gateway.executors.msgexec import MsgExec
 from gateway.egress_policy import EgressPolicyEngine
@@ -31,7 +36,7 @@ def pick_port() -> int:
 def wait_http_ok(url: str, tries: int = 80) -> None:
     for _ in range(tries):
         try:
-            r = requests.get(url, timeout=0.5)
+            r = session_for(url).get(url, timeout=0.5)
             if r.status_code == 200:
                 return
         except Exception:
@@ -113,6 +118,30 @@ def main() -> None:
         if backend == "rust" and not rust_bin.exists():
             subprocess.run(["cargo", "build", "--release"], check=True, cwd=str(repo_root / "policy_server_rust"))
 
+        # Same-host optimization: enable UDS transport when using the Rust policy server.
+        use_uds = bool(int(os.getenv("MIRAGE_USE_UDS", "1"))) and (backend == "rust") and (os.name == "posix")
+        uds0 = ""
+        uds1 = ""
+        if use_uds:
+            uds_base = Path(os.getenv("MIRAGE_UDS_DIR", "/tmp/mirage_uds")).expanduser()
+            uds_dir = uds_base / f"bench_{os.getpid()}"
+            uds_dir.mkdir(parents=True, exist_ok=True)
+            uds0_path = uds_dir / f"p0_{p0_port}.sock"
+            uds1_path = uds_dir / f"p1_{p1_port}.sock"
+            for p in (uds0_path, uds1_path):
+                try:
+                    p.unlink()
+                except FileNotFoundError:
+                    pass
+                except Exception:
+                    pass
+            uds0 = str(uds0_path)
+            uds1 = str(uds1_path)
+            env_common["POLICY0_UDS_PATH"] = uds0
+            env_common["POLICY1_UDS_PATH"] = uds1
+            os.environ["POLICY0_UDS_PATH"] = uds0
+            os.environ["POLICY1_UDS_PATH"] = uds1
+
         # Start policy servers
         env0 = env_common.copy()
         env0["SERVER_ID"] = "0"
@@ -120,6 +149,8 @@ def main() -> None:
         env0["POLICY_MAC_KEY"] = policy0_mac_key
         if backend == "rust":
             env0["DATA_DIR"] = str(repo_root / "policy_server" / "data")
+            if uds0:
+                env0["POLICY_UDS_PATH"] = uds0
             p0 = subprocess.Popen([str(rust_bin)], env=env0, text=True)
         else:
             p0 = subprocess.Popen([sys.executable, "-m", "policy_server.server"], env=env0, text=True)
@@ -131,6 +162,8 @@ def main() -> None:
         env1["POLICY_MAC_KEY"] = policy1_mac_key
         if backend == "rust":
             env1["DATA_DIR"] = str(repo_root / "policy_server" / "data")
+            if uds1:
+                env1["POLICY_UDS_PATH"] = uds1
             p1 = subprocess.Popen([str(rust_bin)], env=env1, text=True)
         else:
             p1 = subprocess.Popen([sys.executable, "-m", "policy_server.server"], env=env1, text=True)
@@ -148,13 +181,19 @@ def main() -> None:
 
         # Gateway objects (in-process). These still do network calls to policy servers + executor.
         handles = HandleStore()
-        base_pir = PirClient(policy0_url=policy0_url, policy1_url=policy1_url, domain_size=int(os.getenv("FSS_DOMAIN_SIZE", "4096")))
+        base_pir = PirClient(
+            policy0_url=policy0_url,
+            policy1_url=policy1_url,
+            domain_size=int(os.getenv("FSS_DOMAIN_SIZE", "4096")),
+            policy0_uds_path=(os.getenv("POLICY0_UDS_PATH") or "").strip() or None,
+            policy1_uds_path=(os.getenv("POLICY1_UDS_PATH") or "").strip() or None,
+        )
         pir = base_pir
 
         # Optional PIR mixing / cover traffic (constant-shape ticks). This matches the MCP server behavior.
         if bool(int(os.getenv("PIR_MIX_ENABLED", "0"))):
             try:
-                meta = requests.get(f"{base_pir.policy0_url}/meta", timeout=1.5).json()
+                meta = session_for(base_pir.policy0_url).get(f"{base_pir.policy0_url}/meta", timeout=1.5).json()
                 b = (meta.get("bundle") or {}) if isinstance(meta, dict) else {}
                 if isinstance(b, dict) and bool(b.get("enabled")):
                     bundle_db = str(b.get("db") or os.getenv("POLICY_BUNDLE_DB", "policy_bundle"))

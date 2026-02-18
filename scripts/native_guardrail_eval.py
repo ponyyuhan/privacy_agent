@@ -85,7 +85,7 @@ def _openclaw_native_once(
                 # Use an isolated workspace under artifact_out so the baseline does not
                 # write OpenClaw state files into the repo root.
                 "workspace": str(workspace_dir),
-                "model": {"primary": os.getenv("OPENCLAW_NATIVE_MODEL", "openai-codex/gpt-5.2")},
+                "model": {"primary": os.getenv("OPENCLAW_NATIVE_MODEL", "openai-codex/gpt-5.1-codex-mini")},
             }
         },
     }

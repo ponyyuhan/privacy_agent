@@ -16,6 +16,7 @@ from concurrent.futures import Future
 import requests
 
 from fss.dpf import gen_dpf_keys
+from common.uds_http import uds_http_request, uds_post_json
 from .http_session import session_for
 
 
@@ -35,7 +36,8 @@ _BIN_MSG_PIR_MULTI_SIGNED = 3
 
 
 def _pir_bin_enabled() -> bool:
-    return bool(int(os.getenv("PIR_BINARY_TRANSPORT", "0")))
+    # Default to binary transport when available; falls back to JSON automatically on error.
+    return bool(int(os.getenv("PIR_BINARY_TRANSPORT", "1")))
 
 
 def _u16(x: int) -> bytes:
@@ -257,6 +259,58 @@ def _trace_pir(
             f.write(line + "\n")
 
 
+def _uds_or_http_post_octet(
+    *,
+    uds_path: str | None,
+    base_url: str,
+    path: str,
+    body: bytes,
+    timeout_s: int,
+    headers: dict[str, str] | None = None,
+) -> bytes:
+    if uds_path:
+        st, _hdrs, resp = uds_http_request(
+            uds_path=str(uds_path),
+            method="POST",
+            path=str(path),
+            headers=headers or {},
+            body=body,
+            timeout_s=float(timeout_s),
+        )
+        if int(st) != 200:
+            raise RuntimeError(f"uds_http_status_{st}")
+        return resp
+    u = str(base_url).rstrip("/")
+    r = session_for(u).post(f"{u}{path}", data=body, headers=headers, timeout=timeout_s)
+    r.raise_for_status()
+    return bytes(r.content)
+
+
+def _uds_or_http_post_json(
+    *,
+    uds_path: str | None,
+    base_url: str,
+    path: str,
+    obj: dict[str, Any],
+    timeout_s: int,
+) -> dict[str, Any]:
+    if uds_path:
+        st, _hdrs, resp = uds_post_json(
+            uds_path=str(uds_path),
+            path=str(path),
+            obj={str(k): v for k, v in (obj or {}).items()},
+            timeout_s=float(timeout_s),
+        )
+        if int(st) != 200:
+            raise RuntimeError(f"uds_http_status_{st}")
+        return resp if isinstance(resp, dict) else {"_resp": resp}
+    u = str(base_url).rstrip("/")
+    r = session_for(u).post(f"{u}{path}", json=obj, timeout=timeout_s)
+    r.raise_for_status()
+    j = r.json()
+    return j if isinstance(j, dict) else {"_resp": j}
+
+
 @dataclass(frozen=True, slots=True)
 class PirClient:
     """
@@ -270,6 +324,10 @@ class PirClient:
     policy0_url: str
     policy1_url: str
     domain_size: int
+    # Optional UDS (Unix domain socket) transport for same-host deployments.
+    # When set, PIR requests are sent over HTTP/1.1 via UDS rather than TCP loopback.
+    policy0_uds_path: str | None = None
+    policy1_uds_path: str | None = None
 
     def query_bit(self, db_name: str, idx: int, timeout_s: int = 10, *, domain_size: int | None = None) -> int:
         return self.query_bits(db_name, [idx], timeout_s=timeout_s, domain_size=domain_size)[0]
@@ -309,26 +367,50 @@ class PirClient:
                 b0 = _pack_pir_batch_req(msg_type=_BIN_MSG_PIR_BATCH, db_name=db_name, keys=keys0_raw)
                 b1 = _pack_pir_batch_req(msg_type=_BIN_MSG_PIR_BATCH, db_name=db_name, keys=keys1_raw)
                 h = {"content-type": "application/octet-stream"}
-                f0 = _HTTP_POOL.submit(session_for(u0).post, f"{u0}/pir/query_batch_bin", data=b0, headers=h, timeout=timeout_s)
-                f1 = _HTTP_POOL.submit(session_for(u1).post, f"{u1}/pir/query_batch_bin", data=b1, headers=h, timeout=timeout_s)
-                r0 = f0.result()
-                r1 = f1.result()
-                r0.raise_for_status()
-                r1.raise_for_status()
-                a0 = _parse_batch_resp(r0.content, expect_msg=_BIN_MSG_PIR_BATCH)
-                a1 = _parse_batch_resp(r1.content, expect_msg=_BIN_MSG_PIR_BATCH)
+                f0 = _HTTP_POOL.submit(
+                    _uds_or_http_post_octet,
+                    uds_path=self.policy0_uds_path,
+                    base_url=u0,
+                    path="/pir/query_batch_bin",
+                    body=b0,
+                    timeout_s=timeout_s,
+                    headers=h,
+                )
+                f1 = _HTTP_POOL.submit(
+                    _uds_or_http_post_octet,
+                    uds_path=self.policy1_uds_path,
+                    base_url=u1,
+                    path="/pir/query_batch_bin",
+                    body=b1,
+                    timeout_s=timeout_s,
+                    headers=h,
+                )
+                a0 = _parse_batch_resp(f0.result(), expect_msg=_BIN_MSG_PIR_BATCH)
+                a1 = _parse_batch_resp(f1.result(), expect_msg=_BIN_MSG_PIR_BATCH)
             except Exception:
                 a0 = None
                 a1 = None
         if a0 is None or a1 is None:
-            f0 = _HTTP_POOL.submit(session_for(u0).post, f"{u0}/pir/query_batch", json=payload0, timeout=timeout_s)
-            f1 = _HTTP_POOL.submit(session_for(u1).post, f"{u1}/pir/query_batch", json=payload1, timeout=timeout_s)
-            r0 = f0.result()
-            r1 = f1.result()
-            r0.raise_for_status()
-            r1.raise_for_status()
-            a0 = [int(x) & 1 for x in r0.json()["ans_shares"]]
-            a1 = [int(x) & 1 for x in r1.json()["ans_shares"]]
+            f0 = _HTTP_POOL.submit(
+                _uds_or_http_post_json,
+                uds_path=self.policy0_uds_path,
+                base_url=u0,
+                path="/pir/query_batch",
+                obj=payload0,
+                timeout_s=timeout_s,
+            )
+            f1 = _HTTP_POOL.submit(
+                _uds_or_http_post_json,
+                uds_path=self.policy1_uds_path,
+                base_url=u1,
+                path="/pir/query_batch",
+                obj=payload1,
+                timeout_s=timeout_s,
+            )
+            j0 = f0.result()
+            j1 = f1.result()
+            a0 = [int(x) & 1 for x in (j0.get("ans_shares") or [])]
+            a1 = [int(x) & 1 for x in (j1.get("ans_shares") or [])]
         if len(a0) != len(idx_list) or len(a1) != len(idx_list):
             raise ValueError("policy server returned wrong batch size")
         return [(x ^ y) & 1 for x, y in zip(a0, a1)]
@@ -362,15 +444,27 @@ class PirClient:
 
         u0 = str(self.policy0_url).rstrip("/")
         u1 = str(self.policy1_url).rstrip("/")
-        f0 = _HTTP_POOL.submit(session_for(u0).post, f"{u0}/pir/query_block_batch", json=payload0, timeout=timeout_s)
-        f1 = _HTTP_POOL.submit(session_for(u1).post, f"{u1}/pir/query_block_batch", json=payload1, timeout=timeout_s)
-        r0 = f0.result()
-        r1 = f1.result()
-        r0.raise_for_status()
-        r1.raise_for_status()
+        f0 = _HTTP_POOL.submit(
+            _uds_or_http_post_json,
+            uds_path=self.policy0_uds_path,
+            base_url=u0,
+            path="/pir/query_block_batch",
+            obj=payload0,
+            timeout_s=timeout_s,
+        )
+        f1 = _HTTP_POOL.submit(
+            _uds_or_http_post_json,
+            uds_path=self.policy1_uds_path,
+            base_url=u1,
+            path="/pir/query_block_batch",
+            obj=payload1,
+            timeout_s=timeout_s,
+        )
+        j0 = f0.result()
+        j1 = f1.result()
 
-        s0 = [base64.b64decode(x) for x in (r0.json().get("block_shares_b64") or [])]
-        s1 = [base64.b64decode(x) for x in (r1.json().get("block_shares_b64") or [])]
+        s0 = [base64.b64decode(x) for x in (j0.get("block_shares_b64") or [])]
+        s1 = [base64.b64decode(x) for x in (j1.get("block_shares_b64") or [])]
         if len(s0) != len(idx_list) or len(s1) != len(idx_list):
             raise ValueError("policy server returned wrong batch size")
         out: list[bytes] = []
@@ -419,28 +513,50 @@ class PirClient:
                 b0 = _pack_pir_batch_req(msg_type=_BIN_MSG_PIR_BATCH_SIGNED, db_name=db_name, keys=keys0_raw, action_id=action_id)
                 b1 = _pack_pir_batch_req(msg_type=_BIN_MSG_PIR_BATCH_SIGNED, db_name=db_name, keys=keys1_raw, action_id=action_id)
                 h = {"content-type": "application/octet-stream"}
-                f0 = _HTTP_POOL.submit(session_for(u0).post, f"{u0}/pir/query_batch_signed_bin", data=b0, headers=h, timeout=timeout_s)
-                f1 = _HTTP_POOL.submit(session_for(u1).post, f"{u1}/pir/query_batch_signed_bin", data=b1, headers=h, timeout=timeout_s)
-                r0 = f0.result()
-                r1 = f1.result()
-                r0.raise_for_status()
-                r1.raise_for_status()
-                a0_bin, p0_bin = _parse_batch_signed_resp(r0.content)
-                a1_bin, p1_bin = _parse_batch_signed_resp(r1.content)
+                f0 = _HTTP_POOL.submit(
+                    _uds_or_http_post_octet,
+                    uds_path=self.policy0_uds_path,
+                    base_url=u0,
+                    path="/pir/query_batch_signed_bin",
+                    body=b0,
+                    timeout_s=timeout_s,
+                    headers=h,
+                )
+                f1 = _HTTP_POOL.submit(
+                    _uds_or_http_post_octet,
+                    uds_path=self.policy1_uds_path,
+                    base_url=u1,
+                    path="/pir/query_batch_signed_bin",
+                    body=b1,
+                    timeout_s=timeout_s,
+                    headers=h,
+                )
+                a0_bin, p0_bin = _parse_batch_signed_resp(f0.result())
+                a1_bin, p1_bin = _parse_batch_signed_resp(f1.result())
                 j0 = {"ans_shares": a0_bin, "proof": p0_bin}
                 j1 = {"ans_shares": a1_bin, "proof": p1_bin}
             except Exception:
                 j0 = None
                 j1 = None
         if j0 is None or j1 is None:
-            f0 = _HTTP_POOL.submit(session_for(u0).post, f"{u0}/pir/query_batch_signed", json=payload0, timeout=timeout_s)
-            f1 = _HTTP_POOL.submit(session_for(u1).post, f"{u1}/pir/query_batch_signed", json=payload1, timeout=timeout_s)
-            r0 = f0.result()
-            r1 = f1.result()
-            r0.raise_for_status()
-            r1.raise_for_status()
-            j0 = r0.json()
-            j1 = r1.json()
+            f0 = _HTTP_POOL.submit(
+                _uds_or_http_post_json,
+                uds_path=self.policy0_uds_path,
+                base_url=u0,
+                path="/pir/query_batch_signed",
+                obj=payload0,
+                timeout_s=timeout_s,
+            )
+            f1 = _HTTP_POOL.submit(
+                _uds_or_http_post_json,
+                uds_path=self.policy1_uds_path,
+                base_url=u1,
+                path="/pir/query_batch_signed",
+                obj=payload1,
+                timeout_s=timeout_s,
+            )
+            j0 = f0.result()
+            j1 = f1.result()
 
         a0 = [int(x) & 1 for x in j0.get("ans_shares", [])]
         a1 = [int(x) & 1 for x in j1.get("ans_shares", [])]
@@ -476,14 +592,24 @@ class PirClient:
 
         u0 = str(self.policy0_url).rstrip("/")
         u1 = str(self.policy1_url).rstrip("/")
-        f0 = _HTTP_POOL.submit(session_for(u0).post, f"{u0}/pir/query_block_batch_signed", json=payload0, timeout=timeout_s)
-        f1 = _HTTP_POOL.submit(session_for(u1).post, f"{u1}/pir/query_block_batch_signed", json=payload1, timeout=timeout_s)
-        r0 = f0.result()
-        r1 = f1.result()
-        r0.raise_for_status()
-        r1.raise_for_status()
-        j0 = r0.json()
-        j1 = r1.json()
+        f0 = _HTTP_POOL.submit(
+            _uds_or_http_post_json,
+            uds_path=self.policy0_uds_path,
+            base_url=u0,
+            path="/pir/query_block_batch_signed",
+            obj=payload0,
+            timeout_s=timeout_s,
+        )
+        f1 = _HTTP_POOL.submit(
+            _uds_or_http_post_json,
+            uds_path=self.policy1_uds_path,
+            base_url=u1,
+            path="/pir/query_block_batch_signed",
+            obj=payload1,
+            timeout_s=timeout_s,
+        )
+        j0 = f0.result()
+        j1 = f1.result()
         s0 = [base64.b64decode(x) for x in (j0.get("block_shares_b64") or [])]
         s1 = [base64.b64decode(x) for x in (j1.get("block_shares_b64") or [])]
         if len(s0) != len(idx_list) or len(s1) != len(idx_list):
@@ -528,14 +654,16 @@ class PirClient:
             action_id=None,
             signed=False,
         )
+        uds = self.policy0_uds_path if int(server_id) == 0 else self.policy1_uds_path
         u = str(url).rstrip("/")
-        r = session_for(u).post(
-            f"{u}/pir/query_idx_batch",
-            json={"db": db_name, "idxs": idx_list},
-            timeout=timeout_s,
+        j = _uds_or_http_post_json(
+            uds_path=uds,
+            base_url=u,
+            path="/pir/query_idx_batch",
+            obj={"db": db_name, "idxs": idx_list},
+            timeout_s=timeout_s,
         )
-        r.raise_for_status()
-        bits = [int(x) & 1 for x in (r.json().get("ans_bits") or [])]
+        bits = [int(x) & 1 for x in (j.get("ans_bits") or [])]
         if len(bits) != len(idx_list):
             raise ValueError("policy server returned wrong batch size")
         return bits
@@ -572,13 +700,14 @@ class PirClient:
             signed=True,
         )
         u = str(url).rstrip("/")
-        r = session_for(u).post(
-            f"{u}/pir/query_idx_batch_signed",
-            json={"db": db_name, "idxs": idx_list, "action_id": str(action_id)},
-            timeout=timeout_s,
+        uds = self.policy0_uds_path if sid == 0 else self.policy1_uds_path
+        j = _uds_or_http_post_json(
+            uds_path=uds,
+            base_url=u,
+            path="/pir/query_idx_batch_signed",
+            obj={"db": db_name, "idxs": idx_list, "action_id": str(action_id)},
+            timeout_s=timeout_s,
         )
-        r.raise_for_status()
-        j = r.json()
         bits = [int(x) & 1 for x in (j.get("ans_bits") or [])]
         if len(bits) != len(idx_list):
             raise ValueError("policy server returned wrong batch size")
@@ -630,14 +759,25 @@ class PirMixConfig:
 
 
 class _SignedBitBatchMixer:
-    def __init__(self, *, policy0_url: str, policy1_url: str, cfg: PirMixConfig) -> None:
+    def __init__(
+        self,
+        *,
+        policy0_url: str,
+        policy1_url: str,
+        cfg: PirMixConfig,
+        policy0_uds_path: str | None = None,
+        policy1_uds_path: str | None = None,
+    ) -> None:
         self.policy0_url = str(policy0_url)
         self.policy1_url = str(policy1_url)
+        self.policy0_uds_path = (str(policy0_uds_path).strip() if policy0_uds_path else "") or None
+        self.policy1_uds_path = (str(policy1_uds_path).strip() if policy1_uds_path else "") or None
         self.cfg = cfg
         self._lock = threading.Lock()
         self._pending: list[tuple[str, list[str], list[str], Future]] = []
         self._inflight = 0
         self._stop = threading.Event()
+        self._wakeup = threading.Event()
         lanes = int(getattr(cfg, "lanes", 1) or 1)
         if lanes < 1:
             lanes = 1
@@ -652,6 +792,7 @@ class _SignedBitBatchMixer:
 
     def close(self) -> None:
         self._stop.set()
+        self._wakeup.set()
         for t in list(self._threads):
             try:
                 t.join(timeout=1.0)
@@ -668,6 +809,15 @@ class _SignedBitBatchMixer:
             return fut
         with self._lock:
             self._pending.append((str(action_id), list(keys0_b64), list(keys1_b64), fut))
+        # Wake scheduler lanes and, in eager-ish modes, dispatch immediately to avoid
+        # adding the full tick interval of queuing latency under low load.
+        self._wakeup.set()
+        mode = str(getattr(self.cfg, "schedule_mode", "fixed") or "fixed").strip().lower()
+        if mode in ("eager", "on_demand", "ondemand"):
+            try:
+                self._dispatch_tick()
+            except Exception:
+                pass
         return fut
 
     def _mk_dummy_req(self) -> tuple[str, list[str], list[str]]:
@@ -796,6 +946,10 @@ class _SignedBitBatchMixer:
         cfg = self.cfg
         u0 = str(self.policy0_url).rstrip("/")
         u1 = str(self.policy1_url).rstrip("/")
+        # Unit tests sometimes construct mixers via __new__ (to avoid background threads) and
+        # don't populate UDS attributes. Default to HTTP-only in that case.
+        uds0 = (str(getattr(self, "policy0_uds_path", "") or "").strip() or None)
+        uds1 = (str(getattr(self, "policy1_uds_path", "") or "").strip() or None)
         m0: dict[str, tuple[list[int], dict[str, Any]]] | None = None
         m1: dict[str, tuple[list[int], dict[str, Any]]] | None = None
         try:
@@ -817,23 +971,49 @@ class _SignedBitBatchMixer:
                     b0 = _pack_pir_multi_signed_req(db_name=str(cfg.db_name), reqs=reqs0_raw)
                     b1 = _pack_pir_multi_signed_req(db_name=str(cfg.db_name), reqs=reqs1_raw)
                     h = {"content-type": "application/octet-stream"}
-                    r0 = session_for(u0).post(f"{u0}/pir/query_batch_multi_signed_bin", data=b0, headers=h, timeout=int(cfg.timeout_s))
-                    r1 = session_for(u1).post(f"{u1}/pir/query_batch_multi_signed_bin", data=b1, headers=h, timeout=int(cfg.timeout_s))
-                    r0.raise_for_status()
-                    r1.raise_for_status()
-                    m0 = _parse_multi_signed_resp(r0.content)
-                    m1 = _parse_multi_signed_resp(r1.content)
+                    f0 = _HTTP_POOL.submit(
+                        _uds_or_http_post_octet,
+                        uds_path=uds0,
+                        base_url=u0,
+                        path="/pir/query_batch_multi_signed_bin",
+                        body=b0,
+                        timeout_s=int(cfg.timeout_s),
+                        headers=h,
+                    )
+                    f1 = _HTTP_POOL.submit(
+                        _uds_or_http_post_octet,
+                        uds_path=uds1,
+                        base_url=u1,
+                        path="/pir/query_batch_multi_signed_bin",
+                        body=b1,
+                        timeout_s=int(cfg.timeout_s),
+                        headers=h,
+                    )
+                    m0 = _parse_multi_signed_resp(f0.result())
+                    m1 = _parse_multi_signed_resp(f1.result())
                 except Exception:
                     m0 = None
                     m1 = None
 
             if m0 is None or m1 is None:
-                r0 = session_for(u0).post(f"{u0}/pir/query_batch_multi_signed", json=payload0, timeout=int(cfg.timeout_s))
-                r1 = session_for(u1).post(f"{u1}/pir/query_batch_multi_signed", json=payload1, timeout=int(cfg.timeout_s))
-                r0.raise_for_status()
-                r1.raise_for_status()
-                j0 = r0.json()
-                j1 = r1.json()
+                f0 = _HTTP_POOL.submit(
+                    _uds_or_http_post_json,
+                    uds_path=uds0,
+                    base_url=u0,
+                    path="/pir/query_batch_multi_signed",
+                    obj=payload0,
+                    timeout_s=int(cfg.timeout_s),
+                )
+                f1 = _HTTP_POOL.submit(
+                    _uds_or_http_post_json,
+                    uds_path=uds1,
+                    base_url=u1,
+                    path="/pir/query_batch_multi_signed",
+                    obj=payload1,
+                    timeout_s=int(cfg.timeout_s),
+                )
+                j0 = f0.result()
+                j1 = f1.result()
                 m0 = {}
                 m1 = {}
                 for it in (j0.get("responses") or []):
@@ -918,7 +1098,9 @@ class _SignedBitBatchMixer:
             else:
                 sleep_s = interval_s - dt
             if sleep_s > 0:
-                self._stop.wait(timeout=sleep_s)
+                # Wait until the next tick, but wake early when new real work arrives.
+                self._wakeup.wait(timeout=sleep_s)
+                self._wakeup.clear()
 
 
 class MixedPirClient:
@@ -933,7 +1115,13 @@ class MixedPirClient:
         self._mix_cfg = mix
         self._mixer: _SignedBitBatchMixer | None = None
         if mix and mix.enabled:
-            self._mixer = _SignedBitBatchMixer(policy0_url=base.policy0_url, policy1_url=base.policy1_url, cfg=mix)
+            self._mixer = _SignedBitBatchMixer(
+                policy0_url=base.policy0_url,
+                policy1_url=base.policy1_url,
+                cfg=mix,
+                policy0_uds_path=getattr(base, "policy0_uds_path", None),
+                policy1_uds_path=getattr(base, "policy1_uds_path", None),
+            )
 
     @property
     def policy0_url(self) -> str:

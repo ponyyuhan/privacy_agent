@@ -1,15 +1,18 @@
 import re
 import hmac
 import hashlib
+import os
 from typing import Dict, Any
 from ..handles import HandleStore
 from ..secret_store import SecretStore
 from ..tx_store import TxStore
+from ..leakage_budget import LeakageBudget
 
 class CryptoExec:
-    def __init__(self, handles: HandleStore, tx_store: TxStore | None = None):
+    def __init__(self, handles: HandleStore, tx_store: TxStore | None = None, budget: LeakageBudget | None = None):
         self.handles = handles
         self.tx_store = tx_store
+        self.budget = budget
         self.secrets = SecretStore()
         # Best-effort redaction for demo output. The real design would use structured declassification.
         self._redact_res = [
@@ -17,6 +20,8 @@ class CryptoExec:
             re.compile(r"xoxb-[A-Za-z0-9-]+"),
             re.compile(r"-----BEGIN[ -].*?PRIVATE KEY-----"),
         ]
+        raw = (os.getenv("DECLASSIFY_CONFIRM_LABELS", "MEMORY_ENTRY,WORKSPACE_FILE,FILE_CONTENT") or "").strip()
+        self._confirm_labels = {x.strip().upper() for x in raw.split(",") if x.strip()}
 
     def describe_handle(self, inputs: Dict[str, Any], session: str, caller: str = "unknown") -> Dict[str, Any]:
         hid = str(inputs.get("handle", ""))
@@ -151,6 +156,7 @@ class CryptoExec:
         hid = str(inputs.get("handle", ""))
         purpose = str(inputs.get("purpose", ""))
         user_confirm = bool(constraints.get("user_confirm", False))
+        leakage_channel = str((constraints or {}).get("leakage_channel", "")).strip().upper()
         max_chars = int(constraints.get("max_chars", 400))
         if max_chars < 50:
             max_chars = 50
@@ -182,10 +188,12 @@ class CryptoExec:
                 "artifacts": [],
                 "reason_code": "DECLASSIFY_BLOCKED",
             }
-        if rec.sensitivity.upper() == "HIGH" and not user_confirm:
+        label = str(rec.label or "").upper()
+        require_confirm = rec.sensitivity.upper() == "HIGH" or (label in self._confirm_labels)
+        if require_confirm and not user_confirm:
             return {
                 "status": "DENY",
-                "summary": "Declassification requires explicit user confirmation for HIGH sensitivity handles.",
+                "summary": "Declassification requires explicit user confirmation.",
                 "data": {"label": rec.label, "purpose": purpose},
                 "artifacts": [],
                 "reason_code": "REQUIRE_CONFIRM",
@@ -201,11 +209,35 @@ class CryptoExec:
         redacted = text
         for r in self._redact_res:
             redacted = r.sub("[REDACTED]", redacted)
+        preview = redacted[:max_chars]
+
+        # C2/C5/C1 leakage accounting for explicit declassification.
+        channel = leakage_channel
+        if not channel:
+            lab = str(rec.label or "").upper()
+            if lab.startswith("INTER_AGENT"):
+                channel = "C2"
+            elif lab.startswith("MEMORY_"):
+                channel = "C5"
+            else:
+                channel = "C1"
+        budget_data: dict[str, Any] = {}
+        if self.budget is not None:
+            dec = self.budget.consume(session=session, caller=caller, channel=channel, units=len(preview))
+            budget_data = dec.to_dict()
+            if not dec.ok:
+                return {
+                    "status": "DENY",
+                    "summary": "Declassification blocked by leakage budget.",
+                    "data": {"purpose": purpose, "channel": channel, "budget": budget_data},
+                    "artifacts": [],
+                    "reason_code": "LEAKAGE_BUDGET_EXCEEDED",
+                }
 
         return {
             "status": "OK",
             "summary": "Declassified preview returned (demo; redaction applied).",
-            "data": {"purpose": purpose, "text_preview": redacted[:max_chars]},
+            "data": {"purpose": purpose, "channel": channel, "text_preview": preview, "budget": budget_data},
             "artifacts": [],
             "reason_code": "ALLOW",
         }

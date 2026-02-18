@@ -24,6 +24,7 @@ from .guardrails import fourgram_indices, stable_idx
 from .handles import HandleStore
 from .tx_store import TxStore
 from .policy_unified import UnifiedPolicyEngine
+from .http_session import session_for
 
 
 _HTTP_POOL = ThreadPoolExecutor(max_workers=8)
@@ -345,7 +346,8 @@ class EgressPolicyEngine:
             self._bundle_cache = None
             return None
         try:
-            meta = requests.get(f"{self.pir.policy0_url}/meta", timeout=2.0).json()
+            u0 = str(self.pir.policy0_url).rstrip("/")
+            meta = session_for(u0).get(f"{u0}/meta", timeout=2.0).json()
         except Exception:
             self._bundle_cache = None
             return None
@@ -411,8 +413,10 @@ class EgressPolicyEngine:
         payload1 = dict(payload0)
         payload1["input_shares"] = {str(k): int(v) & 1 for k, v in (input1 or {}).items()}
 
-        f0 = _HTTP_POOL.submit(requests.post, f"{self.pir.policy0_url}/mpc/init", json=payload0, timeout=10)
-        f1 = _HTTP_POOL.submit(requests.post, f"{self.pir.policy1_url}/mpc/init", json=payload1, timeout=10)
+        u0 = str(self.pir.policy0_url).rstrip("/")
+        u1 = str(self.pir.policy1_url).rstrip("/")
+        f0 = _HTTP_POOL.submit(session_for(u0).post, f"{u0}/mpc/init", json=payload0, timeout=10)
+        f1 = _HTTP_POOL.submit(session_for(u1).post, f"{u1}/mpc/init", json=payload1, timeout=10)
         r0 = f0.result()
         r1 = f1.result()
         r0.raise_for_status()
@@ -421,6 +425,8 @@ class EgressPolicyEngine:
             raise RuntimeError("mpc_init_failed")
 
     def _mpc_eval_and_gates(self, *, action_id: str) -> None:
+        u0 = str(self.pir.policy0_url).rstrip("/")
+        u1 = str(self.pir.policy1_url).rstrip("/")
         for gi in self._circuit.and_gate_indices:
             # Beaver triple (a,b,c=a&b) secret shared across parties.
             a = secrets.randbits(1) & 1
@@ -432,8 +438,8 @@ class EgressPolicyEngine:
 
             m0 = {"action_id": action_id, "gate_index": int(gi), "a_share": a0, "b_share": b0, "c_share": c0}
             m1 = {"action_id": action_id, "gate_index": int(gi), "a_share": a1, "b_share": b1, "c_share": c1}
-            f0 = _HTTP_POOL.submit(requests.post, f"{self.pir.policy0_url}/mpc/and_mask", json=m0, timeout=10)
-            f1 = _HTTP_POOL.submit(requests.post, f"{self.pir.policy1_url}/mpc/and_mask", json=m1, timeout=10)
+            f0 = _HTTP_POOL.submit(session_for(u0).post, f"{u0}/mpc/and_mask", json=m0, timeout=10)
+            f1 = _HTTP_POOL.submit(session_for(u1).post, f"{u1}/mpc/and_mask", json=m1, timeout=10)
             r0 = f0.result()
             r1 = f1.result()
             r0.raise_for_status()
@@ -444,8 +450,8 @@ class EgressPolicyEngine:
             e = (int(j0.get("e_share", 0)) ^ int(j1.get("e_share", 0))) & 1
 
             fin = {"action_id": action_id, "gate_index": int(gi), "d": int(d), "e": int(e)}
-            f0 = _HTTP_POOL.submit(requests.post, f"{self.pir.policy0_url}/mpc/and_finish", json=fin, timeout=10)
-            f1 = _HTTP_POOL.submit(requests.post, f"{self.pir.policy1_url}/mpc/and_finish", json=fin, timeout=10)
+            f0 = _HTTP_POOL.submit(session_for(u0).post, f"{u0}/mpc/and_finish", json=fin, timeout=10)
+            f1 = _HTTP_POOL.submit(session_for(u1).post, f"{u1}/mpc/and_finish", json=fin, timeout=10)
             r0 = f0.result()
             r1 = f1.result()
             r0.raise_for_status()
@@ -454,8 +460,10 @@ class EgressPolicyEngine:
 
     def _mpc_finalize(self, *, action_id: str) -> dict[str, Any]:
         payload = {"action_id": action_id}
-        f0 = _HTTP_POOL.submit(requests.post, f"{self.pir.policy0_url}/mpc/finalize", json=payload, timeout=10)
-        f1 = _HTTP_POOL.submit(requests.post, f"{self.pir.policy1_url}/mpc/finalize", json=payload, timeout=10)
+        u0 = str(self.pir.policy0_url).rstrip("/")
+        u1 = str(self.pir.policy1_url).rstrip("/")
+        f0 = _HTTP_POOL.submit(session_for(u0).post, f"{u0}/mpc/finalize", json=payload, timeout=10)
+        f1 = _HTTP_POOL.submit(session_for(u1).post, f"{u1}/mpc/finalize", json=payload, timeout=10)
         r0 = f0.result()
         r1 = f1.result()
         r0.raise_for_status()

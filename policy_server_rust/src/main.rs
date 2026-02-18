@@ -21,6 +21,11 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use tower::ServiceExt as _;
+use hyper::body::Incoming;
+use hyper_util::rt::{TokioExecutor, TokioIo};
+use hyper_util::server::conn::auto::Builder;
+use hyper_util::service::TowerToHyperService;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -377,11 +382,9 @@ fn decode_dpf_key(data: &[u8]) -> Result<DpfKey, String> {
 
 #[inline]
 fn xor16(a: &[u8; SEED_BYTES], b: &[u8; SEED_BYTES]) -> [u8; SEED_BYTES] {
-    let mut out = [0u8; SEED_BYTES];
-    for i in 0..SEED_BYTES {
-        out[i] = a[i] ^ b[i];
-    }
-    out
+    // 16-byte XOR: use u128 so LLVM can map it to efficient vector ops.
+    let x = u128::from_le_bytes(*a) ^ u128::from_le_bytes(*b);
+    x.to_le_bytes()
 }
 
 #[inline]
@@ -2032,5 +2035,41 @@ async fn main() {
 
     let addr = format!("0.0.0.0:{}", port);
     let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
-    axum::serve(listener, app).await.unwrap();
+
+    // Optional Unix-domain-socket listener for same-host deployments.
+    // This is best-effort and does not replace the TCP listener (keeps the artifact
+    // scripts backwards-compatible).
+    if let Ok(p) = env::var("POLICY_UDS_PATH") {
+        let uds_path = p.trim().to_string();
+        if !uds_path.is_empty() {
+            let app2 = app.clone();
+            tokio::spawn(async move {
+                if let Err(e) = serve_unix(uds_path, app2).await {
+                    eprintln!("[policy_server] uds serve error: {}", e);
+                }
+            });
+        }
+    }
+
+    axum::serve(listener, app).tcp_nodelay(true).await.unwrap();
+}
+
+async fn serve_unix(uds_path: String, app: Router) -> std::io::Result<()> {
+    // Clean up stale socket file (common when a previous run crashed).
+    if let Some(parent) = Path::new(&uds_path).parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let _ = fs::remove_file(&uds_path);
+    let listener = tokio::net::UnixListener::bind(&uds_path)?;
+    loop {
+        let (stream, _addr) = listener.accept().await?;
+        let io = TokioIo::new(stream);
+        let tower_service = app.clone().map_request(|req: axum::http::Request<Incoming>| req.map(Body::new));
+        let hyper_service = TowerToHyperService::new(tower_service);
+        tokio::spawn(async move {
+            let _ = Builder::new(TokioExecutor::new())
+                .serve_connection_with_upgrades(io, hyper_service)
+                .await;
+        });
+    }
 }

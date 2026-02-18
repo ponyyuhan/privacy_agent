@@ -1,7 +1,8 @@
 import { emptyPluginConfigSchema } from "openclaw/plugin-sdk";
 import { loginOpenAICodex, refreshOpenAICodexToken } from "@mariozechner/pi-ai";
 
-const DEFAULT_MODEL = "openai-codex/gpt-5.3-codex";
+// Default to the lowest-cost Codex OAuth model. Callers can override via OpenClaw config.
+const DEFAULT_MODEL = "openai-codex/gpt-5.1-codex-mini";
 
 const plugin = {
   id: "openai-codex-auth",
@@ -89,4 +90,3 @@ const plugin = {
 };
 
 export default plugin;
-

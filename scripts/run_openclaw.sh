@@ -126,7 +126,7 @@ OPENCLAW_CONFIG_PATH="${OPENCLAW_CONFIG_PATH:-$ROOT/artifact_out/openclaw.demo.j
 PLUGIN_FILE="$ROOT/integrations/openclaw_plugin/mirage_ogpp.ts"
 PROVIDER_PLUGIN_DIR="$ROOT/integrations/openclaw_runner/extensions/openai-codex-auth"
 WORKSPACE_DIR="$ROOT/integrations/openclaw_workspace"
-MODEL_PRIMARY="${OPENCLAW_MODEL_PRIMARY:-openai-codex/gpt-5.2}"
+MODEL_PRIMARY="${OPENCLAW_MODEL_PRIMARY:-openai-codex/gpt-5.1-codex-mini}"
 
 cat >"$OPENCLAW_CONFIG_PATH" <<JSON5
 {

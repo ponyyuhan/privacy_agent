@@ -17,6 +17,8 @@ pir = PirClient(
     policy0_url=settings.policy_servers[0],
     policy1_url=settings.policy_servers[1],
     domain_size=settings.fss_domain_size,
+    policy0_uds_path=(os.getenv("POLICY0_UDS_PATH") or "").strip() or None,
+    policy1_uds_path=(os.getenv("POLICY1_UDS_PATH") or "").strip() or None,
 )
 guardrails = ObliviousGuardrails(
     pir=pir,

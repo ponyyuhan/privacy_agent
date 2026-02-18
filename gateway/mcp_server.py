@@ -12,6 +12,7 @@ from .config import settings
 from .fss_pir import PirClient, MixedPirClient, PirMixConfig
 from .guardrails import ObliviousGuardrails
 from .handles import HandleStore
+from .http_session import session_for
 from .router import IntentRouter
 
 
@@ -100,6 +101,8 @@ class MirageMcpServer:
             policy0_url=settings.policy_servers[0],
             policy1_url=settings.policy_servers[1],
             domain_size=settings.fss_domain_size,
+            policy0_uds_path=(os.getenv("POLICY0_UDS_PATH") or "").strip() or None,
+            policy1_uds_path=(os.getenv("POLICY1_UDS_PATH") or "").strip() or None,
         )
         pir = base_pir
 
@@ -107,7 +110,7 @@ class MirageMcpServer:
         # Best-effort: if policy servers aren't reachable yet, fall back to the direct client.
         if bool(int(os.getenv("PIR_MIX_ENABLED", "1"))):
             try:
-                meta = requests.get(f"{base_pir.policy0_url}/meta", timeout=1.5).json()
+                meta = session_for(base_pir.policy0_url).get(f"{base_pir.policy0_url}/meta", timeout=1.5).json()
                 b = (meta.get("bundle") or {}) if isinstance(meta, dict) else {}
                 bundle_enabled = bool(b.get("enabled")) if isinstance(b, dict) else False
                 if bundle_enabled:

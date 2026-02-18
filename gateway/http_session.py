@@ -31,4 +31,3 @@ def session_for(_base_url: str) -> requests.Session:
         s.mount("https://", adapter)
         d[key] = s
     return s
-

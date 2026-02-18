@@ -565,7 +565,13 @@ def main() -> None:
                 action_labels: dict[str, str] = {}
 
                 with TempEnv(env):
-                    pir2 = PirClient(policy0_url=policy0_url, policy1_url=policy1_url, domain_size=domain_size)
+                    pir2 = PirClient(
+                        policy0_url=policy0_url,
+                        policy1_url=policy1_url,
+                        domain_size=domain_size,
+                        policy0_uds_path=(os.getenv("POLICY0_UDS_PATH") or "").strip() or None,
+                        policy1_uds_path=(os.getenv("POLICY1_UDS_PATH") or "").strip() or None,
+                    )
                     hs = HandleStore()
                     txs = TxStore()
                     eng = EgressPolicyEngine(pir=pir2, handles=hs, tx_store=txs, domain_size=domain_size, max_tokens=int(os.getenv("MAX_TOKENS_PER_MESSAGE", "32")))
@@ -693,7 +699,13 @@ def main() -> None:
                 pass
             action_to_label: dict[str, str] = {}
             with TempEnv({"MIRAGE_TRANSCRIPT_PATH": str(tpath)}):
-                pir_local = PirClient(policy0_url=policy0_url, policy1_url=policy1_url, domain_size=domain_size)
+                pir_local = PirClient(
+                    policy0_url=policy0_url,
+                    policy1_url=policy1_url,
+                    domain_size=domain_size,
+                    policy0_uds_path=(os.getenv("POLICY0_UDS_PATH") or "").strip() or None,
+                    policy1_uds_path=(os.getenv("POLICY1_UDS_PATH") or "").strip() or None,
+                )
                 for r, idx in zip(candidates, idxs):
                     aid = f"outsourcing-pir-{hashlib.sha256(r.encode('utf-8')).hexdigest()[:8]}"
                     action_to_label[aid] = r

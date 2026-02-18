@@ -1,0 +1,200 @@
+% Appendix-grade proof chain for MIRAGE-OG++ (artifact-faithful).
+%
+% This file is intended to be \input{} from neurips_2025.tex. It is also
+% readable standalone as a LaTeX appendix fragment.
+
+\section{Appendix: Proof Chain for Non-Bypassable Effects and Composition}
+\label{app:proofs}
+
+This appendix formalizes MIRAGE-OG++'s core integrity claim---\emph{no external side effect is
+committed without two independently authenticated commit proofs bound to the exact request}---and
+sketches a compositional argument with the privacy and confinement components. The statements match
+the artifact implementation (\texttt{executor\_server/server.py} and \texttt{policy\_server/server.py})
+and its formal harness (\texttt{scripts/security\_game\_nbe\_check.py}).
+
+\paragraph{Scope and assumptions.}
+We reason about a PPT adversary that fully controls the untrusted agent runtime and all skill code,
+and may send arbitrary requests to the gateway and the executor. The executor's MAC verification keys
+are not compromised. Policy servers are assumed \emph{honest for integrity} (they compute commit
+proofs according to the protocol) and \emph{honest-but-curious for privacy} (single-server leakage is
+bounded by an explicit leakage function; see \texttt{LEAKAGE\_MODEL.md}).
+
+\subsection{Cryptographic primitives and canonical binding}
+\label{app:proofs:primitives}
+
+\paragraph{MAC.}
+Let $\mathsf{MAC} = (\mathsf{Tag},\mathsf{Vrfy})$ be a message authentication code with key space
+$\mathcal{K}$ and message space $\mathcal{M}$. We assume existential unforgeability under chosen
+message attack (EUF-CMA). The artifact uses HMAC-SHA256:
+\[
+\mathsf{Tag}_K(m) := \mathrm{HMAC\text{-}SHA256}(K, m), \quad \mathsf{Vrfy}_K(m,t) := [t = \mathsf{Tag}_K(m)].
+\]
+
+\paragraph{Canonical serialization and request-binding hash.}
+Let $\mathsf{Canon}(\cdot)$ be a deterministic canonical JSON serialization (artifact:
+\texttt{common/canonical.py}). Define the request-binding hash:
+\[
+\mathsf{ReqHash}(\mathsf{intent\_id},\mathsf{caller},\mathsf{session},\mathsf{inputs}) :=
+\mathrm{SHA256}\!\left(\mathsf{Canon}\!\left(
+\begin{array}{l}
+\{\texttt{"intent\_id"}:\mathsf{intent\_id},\ \texttt{"caller"}:\mathsf{caller},\ \texttt{"session"}:\mathsf{session},\\
+\ \texttt{"inputs"}:\mathsf{inputs}\}
+\end{array}\right)\right).
+\]
+We assume SHA-256 collision resistance and \emph{binding hash consistency}: both gateway and executor
+compute identical byte strings under $\mathsf{Canon}(\cdot)$ for semantically equal JSON objects.
+This is an engineering assumption enforced by using the same library routine in both places.
+
+\subsection{Commit proof syntax and executor acceptance predicate}
+\label{app:proofs:accept}
+
+Each policy server $\mathcal{P}_\sigma$ ($\sigma\in\{0,1\}$) holds a MAC key $K_\sigma$ (with a key id
+\texttt{kid} for rotation) and issues \emph{commit proof shares}. A commit proof share is a pair
+$\pi_\sigma = (\mathsf{meta}_\sigma, t_\sigma)$, where:
+\begin{align*}
+\mathsf{meta}_\sigma := \{&
+\texttt{"v"}:1,\ \texttt{"kind"}:\texttt{"commit"},\ \texttt{"server\_id"}:\sigma,\ \texttt{"kid"}:\mathrm{kid},\ \texttt{"ts"}:\tau,\\
+&\texttt{"action\_id"}:a,\ \texttt{"program\_id"}:p,\ \texttt{"request\_sha256"}:h,\\
+&\texttt{"outputs"}:y_\sigma,\ \texttt{"commit\_tag\_share"}:\mathrm{tag}_\sigma\},
+\end{align*}
+and $t_\sigma := \mathsf{Tag}_{K_\sigma}(\mathsf{Canon}(\mathsf{meta}_\sigma))$.
+The artifact computes and verifies these fields in:
+\texttt{policy\_server/server.py:/mpc/finalize} and
+\texttt{executor\_server/server.py:\_verify\_commit\_evidence}.
+
+\paragraph{Executor acceptance.}
+Given an effect request $\mathsf{req}$ and two purported commit proof shares $\pi_0,\pi_1$, the
+executor $\mathcal{X}$ accepts if and only if the predicate $\mathsf{Accept}(\mathsf{req},\pi_0,\pi_1)$
+holds, where:
+\begin{enumerate}
+\item Both shares parse, have \texttt{v=1} and \texttt{kind="commit"}, and claim distinct
+\texttt{server\_id} values in $\{0,1\}$.
+\item MAC verification succeeds:
+$\mathsf{Vrfy}_{K_\sigma}(\mathsf{Canon}(\mathsf{meta}_\sigma), t_\sigma)=1$ for $\sigma\in\{0,1\}$,
+using the key for the claimed \texttt{kid}.
+\item Freshness: $\lvert \mathrm{now} - \tau\rvert \leq \mathrm{TTL}_{\mathsf{mac}}$
+(artifact env \texttt{POLICY\_MAC\_TTL\_S}).
+\item Context agreement: both shares bind the same $(a,p,h)$ tuple.
+\item Request binding: letting $(\mathsf{intent\_id},\mathsf{caller},\mathsf{session},\mathsf{inputs})$
+be the effectful fields of $\mathsf{req}$, we require $h =
+\mathsf{ReqHash}(\mathsf{intent\_id},\mathsf{caller},\mathsf{session},\mathsf{inputs})$.
+\item Replay protection: $(a,p,h)$ (equivalently $a$) has not been accepted before within the replay
+window (artifact: \texttt{\_ReplayGuard.check\_and\_mark}).
+\item Policy bits reconstructed from $(y_0,y_1)$ indicate allow; if a confirmation bit is set then
+the request includes explicit user confirmation; and any sanitize patch is applied.
+\end{enumerate}
+
+\subsection{Security game for non-bypassable effects}
+\label{app:proofs:nbe-game}
+
+We formalize \emph{non-bypassable effects} as an integrity game where the adversary controls the
+untrusted runtime and can obtain valid commit proofs for adaptively chosen preview tuples, but must
+not be able to commit an effect outside the authorized set.
+
+\paragraph{Oracles.}
+The challenger provides a \emph{commit oracle} $\mathcal{O}_{\mathsf{commit}}(\rho)$ that, on input
+$\rho = (\mathsf{intent\_id},\mathsf{caller},\mathsf{session},\mathsf{inputs})$, returns a fresh
+action id $a$ and valid proof shares $(\pi_0,\pi_1)$ whose \texttt{request\_sha256} equals
+$\mathsf{ReqHash}(\rho)$. The challenger records the authorized binding tuple
+$(a,p,\mathsf{ReqHash}(\rho),\rho)$ in a set $\mathcal{S}$.
+
+\paragraph{Experiment $\mathsf{Exp}^{\mathsf{NBE}}(\lambda)$.}
+\begin{enumerate}
+\item The challenger samples independent MAC keys $K_0,K_1 \leftarrow \mathcal{K}$ and initializes
+replay state empty.
+\item The adversary $\mathcal{A}$ may adaptively query $\mathcal{O}_{\mathsf{commit}}(\rho)$.
+\item $\mathcal{A}$ outputs an effect request $\mathsf{req}^\star$ and two shares
+$(\pi_0^\star,\pi_1^\star)$.
+\item $\mathcal{A}$ wins if $\mathsf{Accept}(\mathsf{req}^\star,\pi_0^\star,\pi_1^\star)=1$ and at
+least one of the following holds:
+\begin{enumerate}
+\item \textbf{No-auth:} the accepted $(a^\star,p^\star,h^\star)$ tuple is not in $\mathcal{S}$.
+\item \textbf{Binding break:} $(a^\star,p^\star,h^\star)$ is in $\mathcal{S}$, but the request
+tuple $\rho(\mathsf{req}^\star)$ differs from the $\rho$ recorded for that context.
+\item \textbf{Replay:} the executor accepts the same $a^\star$ twice within the replay window.
+\end{enumerate}
+\end{enumerate}
+
+\subsection{Main theorem: no side effects without dual proofs}
+\label{app:proofs:nbe-thm}
+
+\begin{theorem}[No side effects without dual commit proofs]\label{thm:nbe}
+Assume (i) $\mathsf{MAC}$ is EUF-CMA secure; (ii) SHA-256 is collision resistant and
+$\mathsf{Canon}(\cdot)$ is consistent; (iii) the executor enforces $\mathsf{Accept}$ as specified and
+its replay state does not lose entries within the replay window. Then for any PPT adversary
+$\mathcal{A}$ there exist PPT reductions $\mathcal{B}_0,\mathcal{B}_1,\mathcal{C}$ such that:
+\[
+\Pr[\mathsf{Exp}^{\mathsf{NBE}}(\lambda)=1]
+\le \mathrm{Adv}^{\mathrm{euf\text{-}cma}}_{\mathsf{MAC}}(\mathcal{B}_0)
+ + \mathrm{Adv}^{\mathrm{euf\text{-}cma}}_{\mathsf{MAC}}(\mathcal{B}_1)
+ + \mathrm{Adv}^{\mathrm{coll}}_{\mathrm{SHA256}}(\mathcal{C})
+ + \varepsilon_{\mathrm{replay}}(\lambda),
+\]
+where $\varepsilon_{\mathrm{replay}}$ captures only non-cryptographic replay-store failures excluded
+from the model.
+\end{theorem}
+
+\paragraph{Proof (reduction by cases).}
+Fix an adversary $\mathcal{A}$ that wins the experiment and consider the accepting transcript
+$(\mathsf{req}^\star,\pi_0^\star,\pi_1^\star)$.
+By acceptance, both MACs verify and both meta records bind the same context
+$(a^\star,p^\star,h^\star)$ with fresh timestamps, and $h^\star$ equals the executor's recomputed
+$\mathsf{ReqHash}(\rho(\mathsf{req}^\star))$.
+
+\emph{Case 1 (No-auth).} Suppose $(a^\star,p^\star,h^\star)\not\in\mathcal{S}$. The challenger never
+queried its own commit oracle on the message $\mathsf{Canon}(\mathsf{meta}_0^\star)$ or
+$\mathsf{Canon}(\mathsf{meta}_1^\star)$ for this context. Since both tags verify, at least one share
+is a fresh valid tag on a message not previously tagged under the corresponding key. We build a UF-CMA
+forger $\mathcal{B}_0$ (symmetrically $\mathcal{B}_1$) that embeds its UF-CMA challenge key as $K_0$,
+answers $\mathcal{O}_{\mathsf{commit}}$ by querying its signing oracle for $\mathsf{Canon}(\mathsf{meta}_0)$,
+and outputs $(\mathsf{Canon}(\mathsf{meta}_0^\star),t_0^\star)$ when $\mathcal{A}$ wins in this case.
+
+\emph{Case 2 (Binding break).} Suppose $(a^\star,p^\star,h^\star)\in\mathcal{S}$, but
+$\rho(\mathsf{req}^\star)\neq \rho$ recorded for that context. Acceptance implies:
+\[
+h^\star = \mathsf{ReqHash}(\rho(\mathsf{req}^\star)) = \mathsf{ReqHash}(\rho).
+\]
+If $\rho(\mathsf{req}^\star)\neq \rho$ then we have found a collision in SHA-256 \emph{under the
+canonical encoding} (or an inconsistency in $\mathsf{Canon}$). A reduction $\mathcal{C}$ outputs the
+two distinct canonical inputs whose hashes are equal. This contradicts collision resistance or the
+engineering consistency assumption.
+
+\emph{Case 3 (Replay).} If the executor accepts a previously accepted $a^\star$ within the replay
+window, then the replay guard's check-and-mark failed due to loss/corruption of replay state or lack
+of atomicity. This is outside the cryptographic model and is captured by $\varepsilon_{\mathrm{replay}}$.
+
+Taking a union bound over the cases yields the theorem.
+\qed
+
+\subsection{Session, caller, TTL binding}
+\label{app:proofs:binding}
+
+Theorem~\ref{thm:nbe} already incorporates binding of $\mathsf{caller}$ and $\mathsf{session}$ because
+they are included in $\mathsf{ReqHash}$. Freshness (TTL) is enforced by the executor's timestamp
+check. Thus, any attempt to reuse a commit proof for a different caller, session, or effectful input
+must either fail MAC verification/binding checks or imply a hash collision.
+
+\subsection{Composition with privacy and confinement}
+\label{app:proofs:composition}
+
+We briefly state a modular composition claim that matches the artifact's design.
+
+\begin{theorem}[Modular composition sketch]\label{thm:composition}
+Assume:
+(i) NBE holds as in Theorem~\ref{thm:nbe};
+(ii) secret myopia holds for the handle store with explicit declassification (formalized in
+\texttt{FORMAL\_SECURITY.md});
+(iii) each policy server transcript is simulatable from an explicit leakage function $L_{\mathsf{policy}}$
+(\texttt{LEAKAGE\_MODEL.md}) under the DPF/FSS and MPC security assumptions; and
+(iv) a capsule mediation contract $MC$ holds that makes the gateway the unique I/O path for skills.
+Then the composed system simultaneously satisfies NBE, SM, SAP$(L_{\mathsf{policy}})$, and conditional
+SCS (conditioned on $MC$), with overall failure probability at most the sum of the component failure
+probabilities.
+\end{theorem}
+
+\paragraph{Discussion.}
+The proof is a standard hybrid argument: integrity (NBE) is enforced at the executor boundary; SM is
+enforced at the gateway boundary by handleization and explicit declassification; SAP is about the view
+of a single policy server and follows from the transcript design and the DPF/MPC security properties
+up to leakage; and SCS is conditioned on the capsule contract. Since these properties concern
+disjoint attacker views and disjoint enforcement points, a union bound suffices.

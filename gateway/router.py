@@ -8,11 +8,18 @@ from .executors.cryptoexec import CryptoExec
 from .executors.netexec import NetExec
 from .executors.webhookexec import WebhookExec
 from .executors.skillexec import SkillExec
+from .executors.interagentexec import InterAgentExec
+from .executors.memoryexec import MemoryExec
+from .executors.outputexec import OutputExec
 from .guardrails import ObliviousGuardrails
 from .egress_policy import EgressPolicyEngine
 from .skill_policy import SkillIngressPolicyEngine
 from .skill_store import SkillStore
 from .tx_store import TxStore
+from .memory_service import MemoryService
+from .interagent_store import InterAgentStore
+from .leakage_budget import LeakageBudget
+from .turn_gate import TurnGate
 from .capabilities import get_capabilities
 from .audit import AuditEvent, get_audit_logger, now_ts
 from common.workload_token import verify_workload_token
@@ -22,15 +29,22 @@ class IntentRouter:
         self.handles = handles
         self.guardrails = guardrails
         self.tx_store = TxStore()
+        self.budget = LeakageBudget()
         self.policy = EgressPolicyEngine(pir=guardrails.pir, handles=handles, tx_store=self.tx_store, domain_size=guardrails.domain_size, max_tokens=guardrails.max_tokens)
         self.skill_policy = SkillIngressPolicyEngine(pir=guardrails.pir, tx_store=self.tx_store, domain_size=guardrails.domain_size, max_tokens=guardrails.max_tokens)
         self.skill_store = SkillStore()
+        self.memory_service = MemoryService()
+        self.inter_agent_store = InterAgentStore()
         self.fs = FSExec(handles)
         self.msg = MsgExec(handles, self.policy)
-        self.crypto = CryptoExec(handles, self.tx_store)
+        self.crypto = CryptoExec(handles, self.tx_store, budget=self.budget)
         self.net = NetExec(handles, self.policy)
         self.webhook = WebhookExec(handles, self.policy)
         self.skill = SkillExec(handles, self.skill_policy, self.skill_store)
+        self.inter_agent = InterAgentExec(handles, self.inter_agent_store)
+        self.memory = MemoryExec(handles, self.memory_service)
+        self.output = OutputExec(self.policy, self.budget)
+        self.turn_gate = TurnGate()
 
     def act(self, intent_id: str, inputs: Dict[str, Any], constraints: Dict[str, Any], caller: str, session: str) -> Dict[str, Any]:
         audit = get_audit_logger()
@@ -81,6 +95,33 @@ class IntentRouter:
             }
             audit.log(AuditEvent(ts=now_ts(), event="act_result", session=session, caller=caller, intent_id=intent_id, status=str(obs.get("status", "")), reason_code=str(obs.get("reason_code", ""))))
             return obs
+
+        if intent_id != "FinalizeOutput":
+            ok_turn, code_turn, turn_data = self.turn_gate.on_non_finalize(
+                session=session,
+                caller=caller,
+                turn_id=str((constraints or {}).get("turn_id", "")),
+            )
+            if not ok_turn:
+                obs = {
+                    "status": "DENY",
+                    "summary": "Per-turn final output gate not satisfied.",
+                    "data": turn_data,
+                    "artifacts": [],
+                    "reason_code": code_turn,
+                }
+                audit.log(
+                    AuditEvent(
+                        ts=now_ts(),
+                        event="act_result",
+                        session=session,
+                        caller=caller,
+                        intent_id=intent_id,
+                        status=str(obs.get("status", "")),
+                        reason_code=str(obs.get("reason_code", "")),
+                    )
+                )
+                return obs
 
         # Level 2: the agent cannot choose low-level tools; only intents exist.
         if intent_id == "ReadFile":
@@ -165,6 +206,48 @@ class IntentRouter:
             return obs
         if intent_id == "ListEnabledSkills":
             obs = self.skill.list_enabled_skills(inputs, session=session, caller=caller)
+            audit.log(AuditEvent(ts=now_ts(), event="act_result", session=session, caller=caller, intent_id=intent_id, status=str(obs.get("status", "")), reason_code=str(obs.get("reason_code", ""))))
+            return obs
+        if intent_id == "SendInterAgentMessage":
+            obs = self.inter_agent.send(inputs, session=session, caller=caller)
+            audit.log(AuditEvent(ts=now_ts(), event="act_result", session=session, caller=caller, intent_id=intent_id, status=str(obs.get("status", "")), reason_code=str(obs.get("reason_code", ""))))
+            return obs
+        if intent_id == "ReceiveInterAgentMessages":
+            obs = self.inter_agent.receive(inputs, session=session, caller=caller)
+            audit.log(AuditEvent(ts=now_ts(), event="act_result", session=session, caller=caller, intent_id=intent_id, status=str(obs.get("status", "")), reason_code=str(obs.get("reason_code", ""))))
+            return obs
+        if intent_id == "MemoryWrite":
+            obs = self.memory.write(inputs, session=session, caller=caller)
+            audit.log(AuditEvent(ts=now_ts(), event="act_result", session=session, caller=caller, intent_id=intent_id, status=str(obs.get("status", "")), reason_code=str(obs.get("reason_code", ""))))
+            return obs
+        if intent_id == "MemoryRead":
+            obs = self.memory.read(inputs, session=session, caller=caller)
+            audit.log(AuditEvent(ts=now_ts(), event="act_result", session=session, caller=caller, intent_id=intent_id, status=str(obs.get("status", "")), reason_code=str(obs.get("reason_code", ""))))
+            return obs
+        if intent_id == "MemoryList":
+            obs = self.memory.list_keys(inputs, session=session, caller=caller)
+            audit.log(AuditEvent(ts=now_ts(), event="act_result", session=session, caller=caller, intent_id=intent_id, status=str(obs.get("status", "")), reason_code=str(obs.get("reason_code", ""))))
+            return obs
+        if intent_id == "MemoryDelete":
+            obs = self.memory.delete(inputs, session=session, caller=caller)
+            audit.log(AuditEvent(ts=now_ts(), event="act_result", session=session, caller=caller, intent_id=intent_id, status=str(obs.get("status", "")), reason_code=str(obs.get("reason_code", ""))))
+            return obs
+        if intent_id == "FinalizeOutput":
+            obs = self.output.finalize_output(inputs, constraints, session=session, caller=caller)
+            if str(obs.get("status", "")) == "OK":
+                okf, codef, dataf = self.turn_gate.on_finalize(
+                    session=session,
+                    caller=caller,
+                    turn_id=str((constraints or {}).get("turn_id", "")),
+                )
+                if not okf:
+                    obs = {
+                        "status": "DENY",
+                        "summary": "Final output gate metadata mismatch.",
+                        "data": dataf,
+                        "artifacts": [],
+                        "reason_code": codef,
+                    }
             audit.log(AuditEvent(ts=now_ts(), event="act_result", session=session, caller=caller, intent_id=intent_id, status=str(obs.get("status", "")), reason_code=str(obs.get("reason_code", ""))))
             return obs
         return {

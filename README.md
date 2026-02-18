@@ -36,6 +36,16 @@
 - 生产级抗流量分析（cover traffic、多租户混洗、常时延整形）。
 - 生产级跨平台沙箱硬化（完整 seccomp/AppContainer/内核逃逸对抗）。
 
+### 1.4 论文/Artifact 关键文档索引（建议按此顺序阅读）
+- `FORMAL_SECURITY.md`：形式化安全主张（NBE/SM/SAP/SCS）的游戏/定理框架与代码映射。
+- `appendix_security.tex`：附录级归约证明链（无双证明不可提交副作用，归约到 MAC 不可伪造 + 哈希绑定一致性 + replay/TTL/session/caller 绑定）。
+- `LEAKAGE_MODEL.md`：允许泄露函数 `L_policy`/`L_sys` 的严格定义与 shaping/bundling/confirm-path 的通道分解。
+- `LEAKAGE_EVIDENCE.md`：逐通道 `L_Ci` 的官方/合成实证索引（含复现实验路径）。
+- `BASELINES_FAIRNESS.md`：强基线同口径对比的语义、威胁模型与公平性说明。
+- `PERFORMANCE.md`：固定形状（pad+cover+mixer）下的吞吐/延迟曲线与多核 scaling 叙事。
+- `ALGORITHMS.md` / `ALGORITHMS_CN.md`：协议与算法描述（含稀疏 PIR 快路径等）。
+- `MOTIVATION_PAPER.md` / `MOTIVATION_PAPER_CN.md`：论文级动机与问题定义（中英文）。
+
 ---
 
 ## 2. 快速开始
@@ -71,6 +81,17 @@ python main.py paper-artifact
 - 可复现 manifest（`artifact_out/repro_manifest.json`）
 
 注意：其中 native/real-agent 相关步骤可能需要外部模型/凭据；脚本会尽量 `SKIP/continue`，不把整个流水线跑挂。
+
+可选（更论文级、但更耗时）：
+- official AgentLeak `C1..C5` 同口径 fair compare（MIRAGE + Codex + OpenClaw）：
+  - 设置 `RUN_FAIR_FULL=1`
+  - 输出：`artifact_out_compare/fair_full_report.json` 与 `artifact_out_compare/stats/fair_full_stats.json`
+  - 提示：这一步会调用外部模型，可能非常耗 token。可用环境变量降低成本/缩短运行时间：
+    - `CODEX_BASELINE_MODEL=gpt-5.1-codex-mini`（默认）
+    - `CODEX_BASELINE_REASONING=low`（默认）
+    - `OPENCLAW_NATIVE_MODEL=openai-codex/gpt-5.1-codex-mini`（默认）
+    - `CODEX_BASELINE_CONCURRENCY=4`（并发，视限流而定）
+    - `NATIVE_BASELINE_MAX_GROUPS=50`（只评测前 50 个 scenario，用于快速 sanity-check）
 
 ### 2.4 真实 agent（OpenClaw + OpenAI OAuth）
 ```bash
@@ -466,6 +487,16 @@ Router 已实现的 intent（是否可用取决于 capability 配置）：
   - `FetchResource`
   - `CheckWebhookPolicy`
   - `PostWebhook`
+- C2 inter-agent 中介
+  - `SendInterAgentMessage`
+  - `ReceiveInterAgentMessages`
+- C5 memory 服务
+  - `MemoryWrite`
+  - `MemoryRead`
+  - `MemoryList`
+  - `MemoryDelete`
+- C1 最终输出闸门
+  - `FinalizeOutput`
 - skill ingress
   - `ImportSkill`
   - `DescribeSkill`
@@ -561,15 +592,19 @@ Router 已实现的 intent（是否可用取决于 capability 配置）：
 1. 单元测试
 2. NBE 形式化检查（见 `FORMAL_SECURITY.md` 与 `scripts/security_game_nbe_check.py`）
 3. baselines + 大规模评测（`scripts/paper_eval.py`）
-4. policy server 吞吐曲线（`scripts/bench_policy_server_curves.py`）
-5. policy server 单核/多核 scaling + JSON/Binary 传输对比（`scripts/bench_policy_server_scaling.py`）
-6. 端到端吞吐 benches（python + rust，可选）
-7. 端到端 shaping 曲线（`scripts/bench_e2e_shaping_curves.py`）
-8. native runtime baselines（`scripts/native_guardrail_eval.py`）
-9. real-agent campaign（`scripts/real_agent_campaign.py`）
-10. 审计日志 hash-chain 校验（`scripts/verify_audit_log.py`）
-11. 自动产图（`artifact_out/figures/*.svg`）
-12. 可复现 manifest（`artifact_out/repro_manifest.json`）
+4. AgentLeak-style 逐通道评测（`C1..C7`，synthetic suite；`scripts/agentleak_channel_eval.py`）
+5. official AgentLeak `C1..C5` 的同口径 fair compare（可选，MIRAGE + Codex + OpenClaw；见 `BASELINES_FAIRNESS.md`）
+   - 默认跳过；设置 `RUN_FAIR_FULL=1`
+   - 输出：`artifact_out_compare/fair_full_report.json` 与 `artifact_out_compare/stats/fair_full_stats.json`
+6. policy server 吞吐曲线（`scripts/bench_policy_server_curves.py`）
+7. policy server 单核/多核 scaling + JSON/Binary 传输对比（`scripts/bench_policy_server_scaling.py`）
+8. 端到端吞吐 benches（python + rust，可选）
+9. 端到端 shaping 曲线（`scripts/bench_e2e_shaping_curves.py`）
+10. native runtime baselines（`scripts/native_guardrail_eval.py`）
+11. real-agent campaign（`scripts/real_agent_campaign.py`）
+12. 审计日志 hash-chain 校验（`scripts/verify_audit_log.py`）
+13. 自动产图（`artifact_out/figures/*.svg`）
+14. 可复现 manifest（`artifact_out/repro_manifest.json`）
 
 ---
 
@@ -665,6 +700,73 @@ Router 已实现的 intent（是否可用取决于 capability 配置）：
   - `unshaped.n_unique_features=17`
   - `shaped.n_unique_features=1`
 
+### 16.1 AgentLeak 风格 C1..C7 复现评测
+运行：
+```bash
+PYTHONPATH=. python scripts/agentleak_channel_eval.py
+```
+
+输出：
+- `artifact_out/agentleak_eval/agentleak_channel_summary.json`
+- `artifact_out/agentleak_eval/agentleak_eval_rows.csv`
+
+该评测会：
+- 使用统一泄露函数 `L_sys(C1..C7)`（见 `LEAKAGE_MODEL.md`）
+- 按通道报告 `attack_block_rate / attack_leak_rate / benign_allow_rate`
+- 与 AgentLeak 公开数值（`C1/C2/C5`）做差值对照
+
+### 16.2 AgentLeak 官方数据集模式（C1..C5）
+运行（推荐）：
+```bash
+AGENTLEAK_CASESET=official \
+AGENTLEAK_ATTACKS_PER_CHANNEL=20 \
+AGENTLEAK_BENIGNS_PER_CHANNEL=20 \
+PYTHONPATH=. python scripts/agentleak_channel_eval.py
+```
+
+可选参数：
+- `AGENTLEAK_DATASET_PATH=/path/to/scenarios_full_1000.jsonl`
+- `MIRAGE_SEED=7`
+- `AGENTLEAK_ISOLATE_CASE_CONTEXT=1`（默认 1；按 case 隔离 caller，避免跨 case 预算/turn gate 污染）
+- `AGENTLEAK_BENIGN_AUTO_CONFIRM=1`（默认 1；良性样本自动走 confirm path）
+
+该模式使用官方 `scenarios_full_1000.jsonl`，按官方 target channel 映射：
+- `final_output -> C1`
+- `inter_agent -> C2`
+- `tool_input -> C3`
+- `tool_output -> C4`
+- `memory_write -> C5`
+
+结果文件 `artifact_out/agentleak_eval/agentleak_channel_summary.json` 中的 `case_meta` 会记录：
+- 官方数据集规模、攻击家族分布（F1/F2/F3/F4）、垂类分布
+- 每个通道最终抽样到的 attack/benign 数量
+
+### 16.3 Official 全量（同口径）结果快照（`artifact_out_full_official_v3`）
+
+运行：
+```bash
+OUT_DIR=artifact_out_full_official_v3 \
+AGENTLEAK_CASESET=official \
+AGENTLEAK_ATTACKS_PER_CHANNEL=100000 \
+AGENTLEAK_BENIGNS_PER_CHANNEL=100000 \
+MIRAGE_SEED=7 \
+POLICY_BACKEND=rust \
+PYTHONPATH=. python scripts/agentleak_channel_eval.py
+```
+
+关键结果（以 `artifact_out_full_official_v3/agentleak_eval/agentleak_channel_summary.json` 为准）：
+
+| mode | attack_block_rate | attack_leak_rate | benign_allow_rate |
+|---|---:|---:|---:|
+| `mirage_full` | 1.000 | 0.000 | 1.000 |
+| `policy_only` | 1.000 | 0.000 | 1.000 |
+| `sandbox_only` | 0.827 | 0.173 | 1.000 |
+| `single_server_policy` | 1.000 | 0.000 | 1.000 |
+
+说明：
+- 旧版本中 `benign_allow_rate≈0.102` 主要由跨 case 状态耦合（预算 + turn gate）导致；现已通过 case 级上下文隔离修复。
+- `sandbox_only` 依然在 C3 出现显著泄露，符合“无策略/无双证明执行线”的预期基线表现。
+
 ---
 
 ## 17. OpenClaw / OAuth 专项说明
@@ -727,6 +829,11 @@ OPENCLAW_STATE_DIR="artifact_out/openclaw_state" \
 - `TX_DB_PATH`
 - `TX_TTL_S`
 - `AUDIT_LOG_PATH`
+- `MEMORY_DB_PATH`
+- `INTER_AGENT_DB_PATH`
+- `LEAKAGE_BUDGET_DB_PATH`
+- `LEAKAGE_BUDGET_ENABLED=1`
+- `LEAKAGE_BUDGET_C1` .. `LEAKAGE_BUDGET_C7`
 
 ### 18.5 Capsule / HTTP / UDS
 - `MIRAGE_HTTP_UDS`
@@ -738,6 +845,20 @@ OPENCLAW_STATE_DIR="artifact_out/openclaw_state" \
 ### 18.6 workload identity
 - `WORKLOAD_TOKEN_KEY`
 - `WORKLOAD_TOKEN_TTL_S`
+
+### 18.7 strict turn output gate
+- `MIRAGE_ENFORCE_FINAL_OUTPUT_GATE=1`
+- 启用后每轮需提供 `constraints.turn_id`，并在切换到下一轮前成功调用 `FinalizeOutput`
+
+### 18.8 C1/C4/C5 硬化开关（默认安全）
+- `MIRAGE_FINAL_OUTPUT_CONFIRM_ALWAYS=1`
+  - C1：`FinalizeOutput` 默认每次都要求 `constraints.user_confirm=true`
+- `MIRAGE_HANDLEIZE_FS_OUTPUT=1`
+  - C4：`ReadFile/ReadWorkspaceFile` 默认返回 opaque handle，不返回明文
+- `WORKSPACE_READ_DEFAULT_SENSITIVITY=HIGH`
+  - C4：工作区读取句柄默认高敏，走显式解密审批
+- `DECLASSIFY_CONFIRM_LABELS=MEMORY_ENTRY,WORKSPACE_FILE,FILE_CONTENT`
+  - C5/C4：上述标签句柄解密默认必须确认（即使不是 `HIGH`）
 
 ---
 
@@ -937,6 +1058,20 @@ native runtime baselines（无 MIRAGE）：
 - `scripts/native_guardrail_eval.py`
 - 输出：`artifact_out/native_baselines/native_guardrail_eval.json`
 
+强基线汇总（同口径 + runtime + 官方模型统计汇总）：
+- `scripts/build_strong_baseline_report.py`
+- 输出：`artifact_out_compare/strong_baseline_report.json`
+- 汇总来源：
+  - `artifact_out_full_official_v3/agentleak_eval/agentleak_channel_summary.json`
+  - `artifact_out_tmp/native_smoke2/native_baselines/native_guardrail_eval.json`
+  - `third_party/agentleak_official/benchmarks/ieee_repro/results/model_stats.json`
+
+official AgentLeak `C1..C5` 同口径 fair compare（MIRAGE + Codex + OpenClaw）：
+- `scripts/fair_full_compare.py`
+- 输出：`artifact_out_compare/fair_full_report.json`
+- 统计分解与显著性：`scripts/fair_full_stats.py` -> `artifact_out_compare/stats/fair_full_stats.json`
+- 语义与威胁模型解释：`BASELINES_FAIRNESS.md`
+
 ### 24.7 自动产图与复现清单（必须）
 
 - Figures（SVG）：`artifact_out/figures/*.svg` 与 `artifact_out/figures/figures_index.json`
@@ -980,3 +1115,25 @@ native runtime baselines（无 MIRAGE）：
 - NanoClaw：若缺少凭据会被标记为 `SKIPPED`（不影响流水线其他部分）
 
 本 README 的第 16 节仍保留了 demo artifact 的样例数值；paper-grade 结果以第 24 节这些输出为准（可在论文中引用并附上 seed/commit）。
+
+### 24.9 生产量级性能章节建议引用（本仓库最新一组）
+
+参见：
+- `artifact_out_perf_v3/shaping_perf/e2e_shaping_curves.json`
+- `artifact_out_perf_v3/policy_perf/policy_server_scaling.json`
+- `artifact_out_perf_v3/policy_perf/policy_server_curves.json`
+
+可直接引用的结论（该机型短测）：
+
+1. 端到端（official full harness）`mirage_full` 相对 `single_server_policy`：
+   - `p50` 约 `3.88x`
+   - `p95` 约 `3.63x`
+   - 吞吐慢化约 `4.48x`
+   - 不是“慢 100x”的量级。
+2. 固定形状（`pad+cover+mixer`）曲线：
+   - `pad_to=2/4` 时吞吐约为 baseline 的 `0.90x`，`p50` 开销约 `1.05x~1.06x`。
+   - `pad_to=16` 会明显放大尾延迟（`p95` 增大显著），应仅用于更强隐匿需求。
+3. policy server 内核扩展（Rust + binary transport）：
+   - 1 线程约 `2.63e5 keys/s`
+   - 8 线程约 `5.05e5 keys/s`
+   - 1->8 线程 speedup 约 `1.92x`（当前瓶颈已部分转向调度/IO，而非纯算子）。

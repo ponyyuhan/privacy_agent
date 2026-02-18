@@ -386,12 +386,15 @@ dependencies = [
  "base64",
  "hex",
  "hmac",
+ "hyper",
+ "hyper-util",
  "rand",
  "rayon",
  "serde",
  "serde_json",
  "sha2",
  "tokio",
+ "tower",
 ]
 
 [[package]]

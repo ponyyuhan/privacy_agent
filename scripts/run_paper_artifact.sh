@@ -34,6 +34,28 @@ else
   POLICY_BACKEND="${POLICY_BACKEND:-python}" PYTHONPATH=. python scripts/paper_eval.py | tee "$OUT_DIR/paper_eval_path.txt"
 fi
 
+echo "[paper] 3b) AgentLeak-style C1..C7 channel evaluation"
+if command -v cargo >/dev/null 2>&1; then
+  POLICY_BACKEND="${POLICY_BACKEND:-rust}" PYTHONPATH=. python scripts/agentleak_channel_eval.py | tee "$OUT_DIR/agentleak_eval_path.txt"
+else
+  POLICY_BACKEND="${POLICY_BACKEND:-python}" PYTHONPATH=. python scripts/agentleak_channel_eval.py | tee "$OUT_DIR/agentleak_eval_path.txt"
+fi
+
+echo "[paper] 3c) official AgentLeak C1..C5 fair comparison (MIRAGE + native Codex/OpenClaw baselines)"
+if [[ "${RUN_FAIR_FULL:-0}" == "1" ]]; then
+  OUT_DIR_COMPARE="${OUT_DIR_COMPARE:-$ROOT/artifact_out_compare}"
+  mkdir -p "$OUT_DIR_COMPARE"
+	  # Codex/OpenClaw baselines can be slow and may require external credentials; keep optional.
+	  CODEX_BASELINE_CONCURRENCY="${CODEX_BASELINE_CONCURRENCY:-4}" \
+	    CODEX_BASELINE_REASONING="${CODEX_BASELINE_REASONING:-low}" \
+	    OUT_DIR="$OUT_DIR_COMPARE" \
+	    PYTHONPATH=. python scripts/fair_full_compare.py | tee "$OUT_DIR_COMPARE/fair_full_compare_path.txt"
+  PYTHONPATH=. python scripts/fair_full_stats.py --report "$OUT_DIR_COMPARE/fair_full_report.json" --out "$OUT_DIR_COMPARE/stats/fair_full_stats.json" \
+    | tee "$OUT_DIR_COMPARE/fair_full_stats_path.txt"
+else
+  echo "[paper] skip fair_full_compare (set RUN_FAIR_FULL=1)" | tee "$OUT_DIR/fair_full_compare_skipped.txt"
+fi
+
 echo "[paper] 4) policy server throughput curves (batch/padding, python+rust)"
 PYTHONPATH=. python scripts/bench_policy_server_curves.py | tee "$OUT_DIR/policy_curve_path.txt"
 

@@ -100,13 +100,20 @@ Define the context tuple:
 
 - `ctx = (action_id, program_id, request_sha256)`.
 
+Define the bound request tuple:
+
+- `rho = (intent_id, caller, session, inputs_eff)`, where `inputs_eff` are the
+  effectful fields hashed by `request_sha256_v1` (commit-phase flags like
+  `user_confirm` are intentionally excluded).
+
 Given an effect request `req` and two commit proofs `(pi_0, pi_1)`, the executor accepts iff:
 
 1. **Both proofs parse** and have `v=1`, `kind="commit"`.
 2. **MAC keys are known** for the claimed `server_id` and `kid` (rotation supported).
 3. **MACs verify** under those keys.
 4. **Freshness**: `abs(now - ts) <= POLICY_MAC_TTL_S`.
-5. **Binding**: both proofs bind exactly the same `ctx`, and `request_sha256` equals the executor's recomputed `ReqHash(...)` on the request.
+5. **Binding**: both proofs bind exactly the same `ctx`, and `request_sha256`
+   equals the executor's recomputed `ReqHash(rho)` on the request.
 6. **Replay resistance**: `action_id` has not been used before (best-effort replay cache, optionally persistent).
 7. **Policy decision bits** reconstruct to `allow_pre=1`, and `need_confirm` implies user confirmation; sanitize patches are enforced.
 
@@ -125,16 +132,25 @@ Implementation:
 
 Goal: the adversary cannot cause a side effect without dual authorization bound to the exact request context, and cannot replay it.
 
-Let `CommitOracle(ctx)` return valid commit proofs for a context `ctx = (action_id, program_id, request_sha256)`. The challenger records a set `S` of all contexts for which **both** proofs were issued by the oracle.
+Let `CommitOracle(rho)` return valid commit proofs for:
+
+- `ctx(rho) = (action_id, program_id, request_sha256)` with `request_sha256 = ReqHash(rho)`.
+
+The challenger records:
+
+- `S_ctx`: contexts for which **both** proofs were issued,
+- `S_rho`: authorized tuples `(intent_id, caller, session, inputs_eff)`,
+- `U`: contexts already accepted by executor (for replay checks).
 
 Experiment `Exp^{NBE}_{Pi,A}(lambda)`:
 
-1. Challenger samples independent MAC keys for policy servers and initializes `S = empty`.
-2. `A` adaptively queries `CommitOracle(ctx)`; challenger returns `(pi_0, pi_1)` and records `ctx in S`.
+1. Challenger samples independent MAC keys for policy servers and initializes `S_ctx = empty`, `U = empty`.
+2. `A` adaptively queries `CommitOracle(rho)`; challenger returns `(pi_0, pi_1)` and records `ctx(rho) in S_ctx` plus `rho in S_rho`.
 3. `A` outputs a side-effect request `req*` plus `(pi_0*, pi_1*)`.
-4. `A` wins iff `Accept_E(req*, pi_0*, pi_1*) = 1` and either:
-   - `ctx(req*)` is not in `S` (no dual authorization was obtained for that exact context), or
-   - `ctx(req*)` (equivalently `action_id*`) was already accepted before (replay).
+4. `A` wins iff `Accept_E(req*, pi_0*, pi_1*) = 1` and at least one holds:
+   - **No-auth success**: `ctx(req*)` is not in `S_ctx`.
+   - **Binding break**: `ctx(req*) in S_ctx`, but `rho(req*)` differs from every authorized tuple in `S_rho` bound to that context.
+   - **Replay success**: `ctx(req*) in U` and the executor accepts it again before replay expiry.
 
 ### 3.2 Game `G_SM` (Secret Myopia)
 
@@ -212,8 +228,15 @@ Then there exist PPT reductions `B0, B1, C` such that for any PPT adversary `A`:
 
 ```
 Pr[Exp^{NBE}_{Pi,A}(lambda)=1]
-  <= Adv^{euf-cma}_{HMAC}(B0) + Adv^{euf-cma}_{HMAC}(B1) + Adv^{coll}_{ReqHash}(C) + negl(lambda)
+  <= Adv^{euf-cma}_{HMAC}(B0)
+   + Adv^{euf-cma}_{HMAC}(B1)
+   + Adv^{coll}_{ReqHash}(C)
+   + epsilon_replay_store
+   + negl(lambda)
 ```
+
+where `epsilon_replay_store` captures only non-cryptographic replay-store failure
+(crash/loss/corruption outside the cryptographic model).
 
 Proof (case analysis, reduction-level detail):
 
@@ -223,7 +246,7 @@ By definition of `Accept_E`, both proofs verify and bind to the same context
 
 We consider two exhaustive possibilities for the win condition:
 
-**Case 1: ctx* not in S (no dual authorization was issued by the oracle).**
+**Case 1 (No-auth success): `ctx*` not in `S_ctx`.**
 
 Because acceptance requires both MAC-valid proofs, at least one of `pi_0*` or `pi_1*`
 is a fresh MAC forgery relative to the corresponding server's signing oracle.
@@ -231,12 +254,18 @@ Construct `B0` (similarly `B1`) that embeds its UF-CMA challenge key as policy0'
 answers `CommitOracle` queries by using the UF-CMA signing oracle to MAC canonical payloads,
 and outputs `pi_0*` as the forgery when `A` wins in Case 1.
 
-**Case 2: ctx* in S, but req* differs in any bound field from the request whose hash was authorized.**
+**Case 2 (Binding break): `ctx* in S_ctx`, but `rho(req*)` is not an authorized bound tuple for `ctx*`.**
 
 Executor acceptance implies `request_sha256*` equals the executor recomputation on `req*`.
-If `req*` differs in any bound field (`caller`, `session`, or effectful inputs), Lemma L1 yields
+If `req*` differs in any bound field (`intent_id`, `caller`, `session`, or effectful inputs), Lemma L1 yields
 a collision in `ReqHash` or canonicalization inconsistency. Construct collision finder `C`
 by outputting the two distinct canonical inputs producing the same `request_sha256*`.
+
+**Case 3 (Replay success):** `ctx*` was already accepted once in `U`, but accepted again.
+
+Within model assumptions (replay guard check-and-mark is atomic and store remains live for replay TTL),
+Case 3 is impossible except negligible implementation-failure probability. Thus replay contributes only
+the non-cryptographic failure term captured by system assumptions.
 
 Combining the cases yields the bound.
 
@@ -246,14 +275,20 @@ Implementation mapping:
 - Context binding: `executor_server/server.py:_validate_commit_proof_common`
 - Request hash recomputation: `common/canonical.py:request_sha256_v1`
 
-### Theorem T2 (Replay: No Double-Commit of the Same action_id)
+### Corollary T1.1 (No Dual Proof, No Effect)
+
+Under T1 assumptions, any accepted side effect implies existence of two MAC-valid commit proofs
+bound to the exact accepted tuple `rho = (intent_id, caller, session, inputs_eff)`.
+Equivalently, there is no successful proofless or single-proof commit.
+
+### Theorem T2 (Replay: No Double-Commit of the Same action_id Within TTL)
 
 Assume the executor runs the replay guard check-and-mark on `action_id` exactly when
 an effect commit is accepted, and rejects any future commit with that `action_id`
 within the replay TTL (`EXECUTOR_REPLAY_TTL_S`).
 
 Then an adversary cannot cause the executor to accept the same `(action_id, program_id, request_sha256)`
-twice within the replay TTL (except with probability due to replay store failure/crash).
+twice within replay TTL (except with probability due to replay-store failure/crash).
 
 Implementation:
 
@@ -280,6 +315,21 @@ the composed system satisfies NBE, SM, SAP(L), and conditional SCS simultaneousl
 The combination argument is a standard hybrid: each property is enforced at a different trust boundary
 (executor for NBE; gateway handle store for SM; PIR/MPC transcript design for SAP; capsule for SCS),
 so the overall failure probability is bounded by the sum of component advantages.
+
+### Theorem T4 (Session/Caller/TTL Binding Soundness)
+
+Let `rho = (intent_id, caller, session, inputs_eff)` and let PREVIEW mint `tx_id` with `TX_TTL_S`,
+while commit proofs are freshness-checked by `POLICY_MAC_TTL_S`.
+
+If an adversary causes an accepted side effect for tuple `rho*`, then at least one is true:
+
+1. `rho*` equals an actually authorized tuple at PREVIEW/COMMIT time;
+2. a MAC forgery occurred (EUF-CMA break);
+3. a request-binding hash collision/canonicalization break occurred;
+4. trusted-state failure occurred (tx/replay store failure beyond model assumptions).
+
+This theorem explicitly brings replay window, proof freshness, and session/caller binding into the
+formal contract.
 
 ---
 
@@ -309,4 +359,3 @@ Expected:
   authorizing an unsafe action (out of scope in this artifact's model).
 - Traffic analysis is only addressed up to the explicit leakage function `L(.)` (see `LEAKAGE_MODEL.md`).
 - If the executor is misconfigured into insecure allow mode, NBE is intentionally disabled.
-

@@ -15,6 +15,7 @@ import requests
 import yaml
 
 from common.canonical import request_sha256_v1
+from common.uds_http import uds_post_json
 from common.sanitize import (
     PATCH_CLAMP_LEN,
     PATCH_NOOP,
@@ -33,6 +34,31 @@ from .http_session import session_for
 
 _HTTP_POOL = ThreadPoolExecutor(max_workers=8)
 _TRACE_LOCK = threading.Lock()
+
+
+def _uds_or_http_post_json(
+    *,
+    uds_path: str | None,
+    base_url: str,
+    path: str,
+    obj: dict[str, Any],
+    timeout_s: int,
+) -> dict[str, Any]:
+    if uds_path:
+        st, _hdrs, resp = uds_post_json(
+            uds_path=str(uds_path),
+            path=str(path),
+            obj={str(k): v for k, v in (obj or {}).items()},
+            timeout_s=float(timeout_s),
+        )
+        if int(st) != 200:
+            raise RuntimeError(f"uds_http_status_{st}")
+        return resp if isinstance(resp, dict) else {"_resp": resp}
+    u = str(base_url).rstrip("/")
+    r = session_for(u).post(f"{u}{path}", json=obj, timeout=int(timeout_s))
+    r.raise_for_status()
+    j = r.json()
+    return j if isinstance(j, dict) else {"_resp": j}
 
 
 def _trace_mpc(
@@ -433,7 +459,8 @@ def _load_bundle_cfg(pir: PirClient, *, domain_size: int) -> BundleConfig | None
     if not bool(int(os.getenv("USE_POLICY_BUNDLE", "1"))):
         return None
     try:
-        meta = requests.get(f"{pir.policy0_url}/meta", timeout=2.0).json()
+        u0 = str(pir.policy0_url).rstrip("/")
+        meta = session_for(u0).get(f"{u0}/meta", timeout=2.0).json()
     except Exception:
         return None
     b = (meta.get("bundle") or {}) if isinstance(meta, dict) else {}
@@ -506,9 +533,21 @@ class _MpcReq:
 
 
 class _MpcBatchMixer:
-    def __init__(self, *, policy0_url: str, policy1_url: str, cfg: MpcMixConfig, circuit: Circuit, program_id: str) -> None:
+    def __init__(
+        self,
+        *,
+        policy0_url: str,
+        policy1_url: str,
+        cfg: MpcMixConfig,
+        circuit: Circuit,
+        program_id: str,
+        policy0_uds_path: str | None = None,
+        policy1_uds_path: str | None = None,
+    ) -> None:
         self.policy0_url = str(policy0_url)
         self.policy1_url = str(policy1_url)
+        self.policy0_uds_path = (str(policy0_uds_path).strip() if policy0_uds_path else "") or None
+        self.policy1_uds_path = (str(policy1_uds_path).strip() if policy1_uds_path else "") or None
         self.cfg = cfg
         self.circuit = circuit
         self.program_id = str(program_id)
@@ -517,6 +556,7 @@ class _MpcBatchMixer:
         self._pending: list[_MpcReq] = []
         self._inflight = 0
         self._stop = threading.Event()
+        self._wakeup = threading.Event()
         lanes = int(getattr(cfg, "lanes", 1) or 1)
         if lanes < 1:
             lanes = 1
@@ -534,6 +574,7 @@ class _MpcBatchMixer:
 
     def close(self) -> None:
         self._stop.set()
+        self._wakeup.set()
         for t in list(self._threads):
             try:
                 t.join(timeout=1.0)
@@ -548,6 +589,15 @@ class _MpcBatchMixer:
         fut: Future = Future()
         with self._lock:
             self._pending.append(_MpcReq(action_id=action_id, request_sha256=request_sha256, input0=input0, input1=input1, future=fut, is_dummy=False))
+        # Wake lanes and, in eager-ish modes, try dispatch immediately to avoid
+        # adding the full tick interval of queueing latency under low load.
+        self._wakeup.set()
+        mode = str(getattr(self.cfg, "schedule_mode", "fixed") or "fixed").strip().lower()
+        if mode in ("eager", "on_demand", "ondemand"):
+            try:
+                self._dispatch_tick()
+            except Exception:
+                pass
         return fut
 
     def _mk_dummy_req(self) -> _MpcReq:
@@ -589,10 +639,9 @@ class _MpcBatchMixer:
                 "ttl_seconds": ttl,
             }
             _trace_mpc(server_id=(0 if url == self.policy0_url else 1), endpoint="/mpc/init", action_id=req.action_id, program_id=str(self.program_id), request_sha256=req.request_sha256, n_wires=int(self.circuit.n_wires), n_gates=len(gates), multi=False)
+            uds = self.policy0_uds_path if url == self.policy0_url else self.policy1_uds_path
             u = str(url).rstrip("/")
-            r = session_for(u).post(f"{u}/mpc/init", json=payload, timeout=int(self.cfg.timeout_s))
-            r.raise_for_status()
-            j = r.json()
+            j = _uds_or_http_post_json(uds_path=uds, base_url=u, path="/mpc/init", obj=payload, timeout_s=int(self.cfg.timeout_s))
             if not j.get("ok"):
                 raise RuntimeError("mpc_init_failed")
             return j
@@ -628,14 +677,24 @@ class _MpcBatchMixer:
         _trace_mpc(server_id=1, endpoint="/mpc/and_mask_multi", action_id=None, program_id=str(self.program_id), and_round=int(round_index), n_items=len(batch) * len(gate_indices), multi=True)
         u0 = str(self.policy0_url).rstrip("/")
         u1 = str(self.policy1_url).rstrip("/")
-        f0 = _HTTP_POOL.submit(session_for(u0).post, f"{u0}/mpc/and_mask_multi", json={"requests": reqs0}, timeout=int(self.cfg.timeout_s))
-        f1 = _HTTP_POOL.submit(session_for(u1).post, f"{u1}/mpc/and_mask_multi", json={"requests": reqs1}, timeout=int(self.cfg.timeout_s))
-        r0 = f0.result()
-        r1 = f1.result()
-        r0.raise_for_status()
-        r1.raise_for_status()
-        j0 = r0.json()
-        j1 = r1.json()
+        f0 = _HTTP_POOL.submit(
+            _uds_or_http_post_json,
+            uds_path=self.policy0_uds_path,
+            base_url=u0,
+            path="/mpc/and_mask_multi",
+            obj={"requests": reqs0},
+            timeout_s=int(self.cfg.timeout_s),
+        )
+        f1 = _HTTP_POOL.submit(
+            _uds_or_http_post_json,
+            uds_path=self.policy1_uds_path,
+            base_url=u1,
+            path="/mpc/and_mask_multi",
+            obj={"requests": reqs1},
+            timeout_s=int(self.cfg.timeout_s),
+        )
+        j0 = f0.result()
+        j1 = f1.result()
 
         # action_id -> shares
         m0: dict[str, tuple[list[int], list[int]]] = {}
@@ -679,12 +738,24 @@ class _MpcBatchMixer:
 
         _trace_mpc(server_id=0, endpoint="/mpc/and_finish_multi", action_id=None, program_id=str(self.program_id), and_round=int(round_index), n_items=len(batch) * len(gate_indices), multi=True)
         _trace_mpc(server_id=1, endpoint="/mpc/and_finish_multi", action_id=None, program_id=str(self.program_id), and_round=int(round_index), n_items=len(batch) * len(gate_indices), multi=True)
-        f0 = _HTTP_POOL.submit(session_for(u0).post, f"{u0}/mpc/and_finish_multi", json={"requests": fin_reqs}, timeout=int(self.cfg.timeout_s))
-        f1 = _HTTP_POOL.submit(session_for(u1).post, f"{u1}/mpc/and_finish_multi", json={"requests": fin_reqs}, timeout=int(self.cfg.timeout_s))
-        r0 = f0.result()
-        r1 = f1.result()
-        r0.raise_for_status()
-        r1.raise_for_status()
+        f0 = _HTTP_POOL.submit(
+            _uds_or_http_post_json,
+            uds_path=self.policy0_uds_path,
+            base_url=u0,
+            path="/mpc/and_finish_multi",
+            obj={"requests": fin_reqs},
+            timeout_s=int(self.cfg.timeout_s),
+        )
+        f1 = _HTTP_POOL.submit(
+            _uds_or_http_post_json,
+            uds_path=self.policy1_uds_path,
+            base_url=u1,
+            path="/mpc/and_finish_multi",
+            obj={"requests": fin_reqs},
+            timeout_s=int(self.cfg.timeout_s),
+        )
+        _ = f0.result()
+        _ = f1.result()
         # We don't need z_shares for correctness at gateway (servers update wires internally).
 
     def _mpc_and_round_single(self, batch: list[_MpcReq], *, round_index: int, gate_indices: list[int]) -> None:
@@ -706,14 +777,24 @@ class _MpcBatchMixer:
             _trace_mpc(server_id=1, endpoint="/mpc/and_mask_batch", action_id=req.action_id, program_id=str(self.program_id), and_round=int(round_index), n_items=len(gate_indices), multi=False)
             u0 = str(self.policy0_url).rstrip("/")
             u1 = str(self.policy1_url).rstrip("/")
-            f0 = _HTTP_POOL.submit(session_for(u0).post, f"{u0}/mpc/and_mask_batch", json={"action_id": req.action_id, "triples": triples0}, timeout=int(self.cfg.timeout_s))
-            f1 = _HTTP_POOL.submit(session_for(u1).post, f"{u1}/mpc/and_mask_batch", json={"action_id": req.action_id, "triples": triples1}, timeout=int(self.cfg.timeout_s))
-            r0 = f0.result()
-            r1 = f1.result()
-            r0.raise_for_status()
-            r1.raise_for_status()
-            j0 = r0.json()
-            j1 = r1.json()
+            f0 = _HTTP_POOL.submit(
+                _uds_or_http_post_json,
+                uds_path=self.policy0_uds_path,
+                base_url=u0,
+                path="/mpc/and_mask_batch",
+                obj={"action_id": req.action_id, "triples": triples0},
+                timeout_s=int(self.cfg.timeout_s),
+            )
+            f1 = _HTTP_POOL.submit(
+                _uds_or_http_post_json,
+                uds_path=self.policy1_uds_path,
+                base_url=u1,
+                path="/mpc/and_mask_batch",
+                obj={"action_id": req.action_id, "triples": triples1},
+                timeout_s=int(self.cfg.timeout_s),
+            )
+            j0 = f0.result()
+            j1 = f1.result()
             d0s = j0.get("d_shares") or []
             e0s = j0.get("e_shares") or []
             d1s = j1.get("d_shares") or []
@@ -728,22 +809,33 @@ class _MpcBatchMixer:
 
             _trace_mpc(server_id=0, endpoint="/mpc/and_finish_batch", action_id=req.action_id, program_id=str(self.program_id), and_round=int(round_index), n_items=len(gate_indices), multi=False)
             _trace_mpc(server_id=1, endpoint="/mpc/and_finish_batch", action_id=req.action_id, program_id=str(self.program_id), and_round=int(round_index), n_items=len(gate_indices), multi=False)
-            f0 = _HTTP_POOL.submit(session_for(u0).post, f"{u0}/mpc/and_finish_batch", json={"action_id": req.action_id, "opens": opens}, timeout=int(self.cfg.timeout_s))
-            f1 = _HTTP_POOL.submit(session_for(u1).post, f"{u1}/mpc/and_finish_batch", json={"action_id": req.action_id, "opens": opens}, timeout=int(self.cfg.timeout_s))
-            r0 = f0.result()
-            r1 = f1.result()
-            r0.raise_for_status()
-            r1.raise_for_status()
+            f0 = _HTTP_POOL.submit(
+                _uds_or_http_post_json,
+                uds_path=self.policy0_uds_path,
+                base_url=u0,
+                path="/mpc/and_finish_batch",
+                obj={"action_id": req.action_id, "opens": opens},
+                timeout_s=int(self.cfg.timeout_s),
+            )
+            f1 = _HTTP_POOL.submit(
+                _uds_or_http_post_json,
+                uds_path=self.policy1_uds_path,
+                base_url=u1,
+                path="/mpc/and_finish_batch",
+                obj={"action_id": req.action_id, "opens": opens},
+                timeout_s=int(self.cfg.timeout_s),
+            )
+            _ = f0.result()
+            _ = f1.result()
 
     def _mpc_finalize_many(self, batch: list[_MpcReq]) -> dict[str, dict[str, Any]]:
         out: dict[str, dict[str, Any]] = {}
 
         def one(url: str, req: _MpcReq) -> dict[str, Any]:
             _trace_mpc(server_id=(0 if url == self.policy0_url else 1), endpoint="/mpc/finalize", action_id=req.action_id, program_id=str(self.program_id), request_sha256=req.request_sha256, multi=False)
+            uds = self.policy0_uds_path if url == self.policy0_url else self.policy1_uds_path
             u = str(url).rstrip("/")
-            r = session_for(u).post(f"{u}/mpc/finalize", json={"action_id": req.action_id}, timeout=int(self.cfg.timeout_s))
-            r.raise_for_status()
-            j = r.json()
+            j = _uds_or_http_post_json(uds_path=uds, base_url=u, path="/mpc/finalize", obj={"action_id": req.action_id}, timeout_s=int(self.cfg.timeout_s))
             if not j.get("ok"):
                 raise RuntimeError("mpc_finalize_failed")
             return j
@@ -843,7 +935,8 @@ class _MpcBatchMixer:
             else:
                 sleep_s = interval_s - dt
             if sleep_s > 0:
-                self._stop.wait(timeout=sleep_s)
+                self._wakeup.wait(timeout=sleep_s)
+                self._wakeup.clear()
 
 
 class MixedMpcClient:
@@ -853,11 +946,29 @@ class MixedMpcClient:
     When enabled, MPC sessions are executed in constant-shape ticks.
     """
 
-    def __init__(self, *, policy0_url: str, policy1_url: str, cfg: MpcMixConfig, circuit: Circuit, program_id: str) -> None:
+    def __init__(
+        self,
+        *,
+        policy0_url: str,
+        policy1_url: str,
+        cfg: MpcMixConfig,
+        circuit: Circuit,
+        program_id: str,
+        policy0_uds_path: str | None = None,
+        policy1_uds_path: str | None = None,
+    ) -> None:
         self._cfg = cfg
         self._mixer: _MpcBatchMixer | None = None
         if cfg.enabled:
-            self._mixer = _MpcBatchMixer(policy0_url=policy0_url, policy1_url=policy1_url, cfg=cfg, circuit=circuit, program_id=program_id)
+            self._mixer = _MpcBatchMixer(
+                policy0_url=policy0_url,
+                policy1_url=policy1_url,
+                cfg=cfg,
+                circuit=circuit,
+                program_id=program_id,
+                policy0_uds_path=policy0_uds_path,
+                policy1_uds_path=policy1_uds_path,
+            )
 
     def close(self) -> None:
         if self._mixer:
@@ -932,6 +1043,8 @@ class UnifiedPolicyEngine:
                 cfg=mcfg,
                 circuit=self._circuit,
                 program_id=str(self.program_id),
+                policy0_uds_path=(os.getenv("POLICY0_UDS_PATH") or "").strip() or None,
+                policy1_uds_path=(os.getenv("POLICY1_UDS_PATH") or "").strip() or None,
             )
 
     def _query_bits_signed_or_single_server(
@@ -1059,8 +1172,10 @@ class UnifiedPolicyEngine:
 
         _trace_mpc(server_id=0, endpoint="/mpc/init", action_id=str(action_id), program_id=str(self.program_id), request_sha256=str(request_sha256), n_wires=int(self._circuit.n_wires), n_gates=len(gates), multi=False)
         _trace_mpc(server_id=1, endpoint="/mpc/init", action_id=str(action_id), program_id=str(self.program_id), request_sha256=str(request_sha256), n_wires=int(self._circuit.n_wires), n_gates=len(gates), multi=False)
-        f0 = _HTTP_POOL.submit(requests.post, f"{self.pir.policy0_url}/mpc/init", json=payload0, timeout=10)
-        f1 = _HTTP_POOL.submit(requests.post, f"{self.pir.policy1_url}/mpc/init", json=payload1, timeout=10)
+        u0 = str(self.pir.policy0_url).rstrip("/")
+        u1 = str(self.pir.policy1_url).rstrip("/")
+        f0 = _HTTP_POOL.submit(session_for(u0).post, f"{u0}/mpc/init", json=payload0, timeout=10)
+        f1 = _HTTP_POOL.submit(session_for(u1).post, f"{u1}/mpc/init", json=payload1, timeout=10)
         r0 = f0.result()
         r1 = f1.result()
         r0.raise_for_status()
@@ -1069,6 +1184,8 @@ class UnifiedPolicyEngine:
             raise RuntimeError("mpc_init_failed")
 
     def _mpc_eval_and_rounds(self, *, action_id: str) -> None:
+        u0 = str(self.pir.policy0_url).rstrip("/")
+        u1 = str(self.pir.policy1_url).rstrip("/")
         for ridx, round_gates in enumerate(self._circuit.and_rounds):
             triples0: list[dict[str, Any]] = []
             triples1: list[dict[str, Any]] = []
@@ -1086,8 +1203,8 @@ class UnifiedPolicyEngine:
             m1 = {"action_id": action_id, "triples": triples1}
             _trace_mpc(server_id=0, endpoint="/mpc/and_mask_batch", action_id=str(action_id), program_id=str(self.program_id), and_round=int(ridx), n_items=len(round_gates), multi=False)
             _trace_mpc(server_id=1, endpoint="/mpc/and_mask_batch", action_id=str(action_id), program_id=str(self.program_id), and_round=int(ridx), n_items=len(round_gates), multi=False)
-            f0 = _HTTP_POOL.submit(requests.post, f"{self.pir.policy0_url}/mpc/and_mask_batch", json=m0, timeout=10)
-            f1 = _HTTP_POOL.submit(requests.post, f"{self.pir.policy1_url}/mpc/and_mask_batch", json=m1, timeout=10)
+            f0 = _HTTP_POOL.submit(session_for(u0).post, f"{u0}/mpc/and_mask_batch", json=m0, timeout=10)
+            f1 = _HTTP_POOL.submit(session_for(u1).post, f"{u1}/mpc/and_mask_batch", json=m1, timeout=10)
             r0 = f0.result()
             r1 = f1.result()
             r0.raise_for_status()
@@ -1111,8 +1228,8 @@ class UnifiedPolicyEngine:
             fin = {"action_id": action_id, "opens": opens}
             _trace_mpc(server_id=0, endpoint="/mpc/and_finish_batch", action_id=str(action_id), program_id=str(self.program_id), and_round=int(ridx), n_items=len(round_gates), multi=False)
             _trace_mpc(server_id=1, endpoint="/mpc/and_finish_batch", action_id=str(action_id), program_id=str(self.program_id), and_round=int(ridx), n_items=len(round_gates), multi=False)
-            f0 = _HTTP_POOL.submit(requests.post, f"{self.pir.policy0_url}/mpc/and_finish_batch", json=fin, timeout=10)
-            f1 = _HTTP_POOL.submit(requests.post, f"{self.pir.policy1_url}/mpc/and_finish_batch", json=fin, timeout=10)
+            f0 = _HTTP_POOL.submit(session_for(u0).post, f"{u0}/mpc/and_finish_batch", json=fin, timeout=10)
+            f1 = _HTTP_POOL.submit(session_for(u1).post, f"{u1}/mpc/and_finish_batch", json=fin, timeout=10)
             r0 = f0.result()
             r1 = f1.result()
             r0.raise_for_status()
@@ -1122,8 +1239,10 @@ class UnifiedPolicyEngine:
         payload = {"action_id": action_id}
         _trace_mpc(server_id=0, endpoint="/mpc/finalize", action_id=str(action_id), program_id=str(self.program_id), multi=False)
         _trace_mpc(server_id=1, endpoint="/mpc/finalize", action_id=str(action_id), program_id=str(self.program_id), multi=False)
-        f0 = _HTTP_POOL.submit(requests.post, f"{self.pir.policy0_url}/mpc/finalize", json=payload, timeout=10)
-        f1 = _HTTP_POOL.submit(requests.post, f"{self.pir.policy1_url}/mpc/finalize", json=payload, timeout=10)
+        u0 = str(self.pir.policy0_url).rstrip("/")
+        u1 = str(self.pir.policy1_url).rstrip("/")
+        f0 = _HTTP_POOL.submit(session_for(u0).post, f"{u0}/mpc/finalize", json=payload, timeout=10)
+        f1 = _HTTP_POOL.submit(session_for(u1).post, f"{u1}/mpc/finalize", json=payload, timeout=10)
         r0 = f0.result()
         r1 = f1.result()
         r0.raise_for_status()

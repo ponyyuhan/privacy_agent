@@ -7,6 +7,7 @@ import requests
 
 from .fss_pir import PirClient
 from .handles import HandleStore
+from .http_session import session_for
 
 def stable_idx(s: str, domain_size: int) -> int:
     d = hashlib.sha256(s.encode("utf-8")).digest()
@@ -74,7 +75,7 @@ class ObliviousGuardrails:
         if self._dfa is not None:
             return self._dfa
         try:
-            r = requests.get(f"{self.pir.policy0_url}/meta", timeout=2.0)
+            r = session_for(self.pir.policy0_url).get(f"{self.pir.policy0_url}/meta", timeout=2.0)
             r.raise_for_status()
             meta = r.json()
             dfa = (meta.get("dfa") or {}) if isinstance(meta, dict) else {}
@@ -112,7 +113,7 @@ class ObliviousGuardrails:
             self._bundle = None
             return None
         try:
-            r = requests.get(f"{self.pir.policy0_url}/meta", timeout=2.0)
+            r = session_for(self.pir.policy0_url).get(f"{self.pir.policy0_url}/meta", timeout=2.0)
             r.raise_for_status()
             meta = r.json()
             b = (meta.get("bundle") or {}) if isinstance(meta, dict) else {}

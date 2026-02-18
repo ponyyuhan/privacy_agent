@@ -30,6 +30,13 @@ default:
     - CheckSkillInstallPolicy
     - CommitSkillInstall
     - ListEnabledSkills
+    - SendInterAgentMessage
+    - ReceiveInterAgentMessages
+    - MemoryWrite
+    - MemoryRead
+    - MemoryList
+    - MemoryDelete
+    - FinalizeOutput
   egress:
     send_message: true
     fetch_resource: true
@@ -50,6 +57,13 @@ callers:
       - WriteWorkspaceFile
       - ListWorkspaceFiles
       - DescribeHandle
+      - SendInterAgentMessage
+      - ReceiveInterAgentMessages
+      - MemoryWrite
+      - MemoryRead
+      - MemoryList
+      - MemoryDelete
+      - FinalizeOutput
     egress:
       send_message: false
       fetch_resource: true
@@ -73,6 +87,13 @@ callers:
       - DescribeSkill
       - CheckSkillInstallPolicy
       - ListEnabledSkills
+      - SendInterAgentMessage
+      - ReceiveInterAgentMessages
+      - MemoryWrite
+      - MemoryRead
+      - MemoryList
+      - MemoryDelete
+      - FinalizeOutput
     egress:
       send_message: false
       fetch_resource: true
@@ -102,6 +123,13 @@ callers:
       - CheckSkillInstallPolicy
       - CommitSkillInstall
       - ListEnabledSkills
+      - SendInterAgentMessage
+      - ReceiveInterAgentMessages
+      - MemoryWrite
+      - MemoryRead
+      - MemoryList
+      - MemoryDelete
+      - FinalizeOutput
     egress:
       send_message: true
       fetch_resource: true
@@ -131,6 +159,51 @@ callers:
       - CheckSkillInstallPolicy
       - CommitSkillInstall
       - ListEnabledSkills
+      - SendInterAgentMessage
+      - ReceiveInterAgentMessages
+      - MemoryWrite
+      - MemoryRead
+      - MemoryList
+      - MemoryDelete
+      - FinalizeOutput
+    egress:
+      send_message: true
+      fetch_resource: true
+      post_webhook: true
+      skill_install: true
+
+  # When the evaluation harness isolates case context, it appends `:{case_id}` to the caller.
+  # Use a prefix wildcard so capability projection remains stable under `AGENTLEAK_ISOLATE_CASE_CONTEXT=1`.
+  "artifact:*":
+    allow_intents:
+      - ReadFile
+      - ReadSecret
+      - UseCredential
+      - Declassify
+      - DescribeHandle
+      - RevokeHandle
+      - RevokeSession
+      - ListWorkspaceFiles
+      - ReadWorkspaceFile
+      - WriteWorkspaceFile
+      - CheckMessagePolicy
+      - SendMessage
+      - FetchResource
+      - CheckFetchPolicy
+      - PostWebhook
+      - CheckWebhookPolicy
+      - ImportSkill
+      - DescribeSkill
+      - CheckSkillInstallPolicy
+      - CommitSkillInstall
+      - ListEnabledSkills
+      - SendInterAgentMessage
+      - ReceiveInterAgentMessages
+      - MemoryWrite
+      - MemoryRead
+      - MemoryList
+      - MemoryDelete
+      - FinalizeOutput
     egress:
       send_message: true
       fetch_resource: true
