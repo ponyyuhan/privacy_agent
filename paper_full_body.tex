@@ -452,40 +452,40 @@ If the transport uses a network stack then only the gateway address is permitted
 \paragraph{No arbitrary process execution.}
 The capsule denies process creation except for a fixed allowlist required by the runtime.
 
-The artifact provides a capsule smoke test that attempts to violate these properties and asserts denial.
+The artifact provides cross platform minimal realizations and a smoke test with testable assertions.
+
+\paragraph{Cross platform minimal realizations.}
+On macOS the artifact uses \texttt{sandbox-exec} with policy file \texttt{capsule/capsule.sb}.
+On Linux the artifact uses \texttt{bubblewrap} with a network namespace, read only binds for system
+paths, and a Unix domain socket gateway transport in \texttt{capsule/run\_smoke\_linux.sh}.
+
+\paragraph{Testable assertions.}
+The smoke test in \texttt{capsule/smoke.py} produces a structured JSON report.
+It asserts that direct reads of a host secret path fail, that direct public network requests fail,
+that direct HTTP posts to a local exfiltration endpoint fail when a netless transport is used, that
+direct process execution is denied in the macOS capsule configuration, and that a gateway action
+request succeeds through the constrained transport.
 
 \section{Related work and positioning}
 \label{sec:related}
 
-SecureClaw combines four themes and its contribution is the system level composition.
+Recent work has established that tool integrated agents are vulnerable to prompt injection and indirect prompt injection.
+These attacks can originate from the user, from external content, or from tool outputs, and can steer the runtime toward unauthorized tool use or data exfiltration \citep{greshake2023indirect,injecagent2024,toolselect2025}.
+Beyond single step attacks, multi step tool chaining can cause benign tools to compose into dangerous sequences that bypass simple safeguards \citep{stac2025}.
 
-\paragraph{Reference monitors and effect boundaries.}
-The executor functions as a reference monitor for external side effects.
-Unlike prompt based guardrails, the executor enforcement line is non bypassable because it validates cryptographic authorization tied to the exact request.
+Benchmarks and evaluation suites have been developed to characterize these risks and to enable comparable measurement across systems.
+AgentDojo provides a dynamic environment for prompt injection attacks and defenses \citep{agentdojo2024}.
+ASB formalizes attacks and defenses for LLM based agents \citep{asb2024}.
+AgentLeak focuses on privacy leakage in multi agent systems and defines channel structured leakage targets \citep{agentleak2026}.
+AgentHarm evaluates harmful behavior in LLM agents and complements leakage oriented benchmarks with harm oriented measurement \citep{agentharm2024}.
 
-\paragraph{Privacy preserving policy evaluation.}
-Two server PIR and two party computation have been used to hide query contents from a single server.
-Our contribution is to apply these primitives to agentic tool use with a fixed shape compilation and a unified routing layer that reduces intent and database selection leakage.
+Defense work has proposed runtime monitoring, tool dependency analysis, and end to end security frameworks for agent execution.
+AgentArmor enforces policy by program analysis on runtime traces \citep{agentarmor2025}.
+IPIGuard defends against indirect prompt injection via tool dependency graphs \citep{ipiguard2025}.
+AgentSentinel and ASTRA propose end to end risk and security frameworks for computer use agents and related deployments \citep{agentsentinel2025,astra2025}.
 
-\paragraph{Leakage aware traffic shaping.}
-Prior shaping systems often target network observers or focus on padding sizes alone.
-Our setting includes an application level policy server that sees structured transcripts.
-We therefore define an explicit leakage function and compile the policy check path to a fixed shape schedule that makes the transcript simulatable from that leakage.
-
-\paragraph{Sandboxing and confinement.}
-Operating system sandboxes restrict runtime capabilities but do not enforce semantic policy or prevent exfiltration through allowed channels.
-SecureClaw treats sandboxing as an optional confinement layer and places semantic enforcement at the gateway and executor boundaries.
-
-\paragraph{Platform native safety layers.}
-Native agent platforms provide instruction hierarchy, refusal behavior, and output filtering.
-These mechanisms improve safety but remain advisory in a compromised runtime threat model.
-SecureClaw provides a separate enforcement line that remains effective even when the runtime intentionally attempts to leak, subject to the trusted gateway and executor assumptions.
-
-\paragraph{Positioning relative to policy only and single server policy.}
-A policy only design performs checks but cannot prevent bypass by a runtime that directly invokes tools or replays a previously authorized action.
-A single server policy design can enforce non bypassable effects but exposes sensitive policy queries to that server.
-SecureClaw addresses both issues by combining a non bypassable executor boundary with two server privacy preserving policy evaluation.
-
-\paragraph{Positioning relative to supply chain scanning.}
-Static scanners can flag malicious skills but do not provide an integrity boundary once a skill is installed and executing.
-We treat skill ingress as an effectful action that must pass the same preview and commit transaction and the same dual proof executor enforcement.
+SecureClaw is positioned for a threat model where the runtime and skills are adversarial.
+Its core contribution is a non bypassable effect boundary at the executor that verifies dual commit proofs bound to the exact request context.
+This differs from policy only approaches that can be bypassed by a compromised runtime and from sandbox only approaches that do not enforce semantic authorization.
+SecureClaw also differs from single server policy enforcement designs by preserving query privacy against any single policy server under an explicit leakage function.
+Finally, SecureClaw treats skill supply chain ingress as an effectful action protected by the same preview and commit transaction and the same dual proof executor verification.

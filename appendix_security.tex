@@ -180,27 +180,96 @@ must either fail MAC verification/binding checks or imply a hash collision.
 \subsection{Composition with privacy and confinement}
 \label{app:proofs:composition}
 
-We briefly state a modular composition claim that matches the artifact's design.
+We state a composition theorem that makes the conjunction of properties explicit.
 
-\begin{theorem}[Modular composition sketch]\label{thm:composition}
-Assume:
-(i) NBE holds as in Theorem~\ref{thm:nbe};
-(ii) secret myopia holds for the handle store with explicit declassification (formalized in
-\texttt{FORMAL\_SECURITY.md});
-(iii) each policy server transcript is simulatable from an explicit leakage function $L_{\mathsf{policy}}$
-(\texttt{LEAKAGE\_MODEL.md}) under the DPF/FSS and MPC security assumptions; and
-(iv) a capsule mediation contract $MC$ holds that makes the gateway the unique I/O path for skills.
-Then the composed system simultaneously satisfies NBE, SM, SAP$(L_{\mathsf{policy}})$, and conditional
-SCS (conditioned on $MC$), with overall failure probability at most the sum of the component failure
-probabilities.
+\paragraph{Combined experiment.}
+Define a combined experiment $\mathsf{Exp}^{\mathsf{SC}}(\lambda)$ for SecureClaw.
+The adversary controls the untrusted runtime and all skills and may send arbitrary requests to the
+gateway and the executor.
+The adversary may also corrupt at most one policy server and obtain its full internal view.
+The experiment outputs $1$ if any of the following bad events occurs.
+
+\begin{itemize}
+\item $\mathsf{Bad}_{\mathsf{NBE}}$: an external side effect is committed without two valid commit proofs
+bound to the exact request hash, within the freshness window, and not replayed.
+\item $\mathsf{Bad}_{\mathsf{SM}}$: the adversary learns a sensitive plaintext value that is not in the
+explicit declassification leakage $L_{\mathsf{SM}}$.
+\item $\mathsf{Bad}_{\mathsf{SAP}}$: the adversary distinguishes two action sequences with equal leakage
+under $L_{\mathsf{policy}}$ by observing the full transcript view of one policy server.
+\item $\mathsf{Bad}_{\mathsf{SCS}}$: while the capsule mediation contract holds, the adversary performs a
+forbidden direct action that bypasses the gateway and executor.
+\end{itemize}
+
+\begin{theorem}[Composition of SecureClaw properties]\label{thm:composition}
+Assume the conditions of Theorems \ref{thm:nbe}, \ref{thm:sm}, \ref{thm:sap}, and \ref{thm:scs}.
+Then for any probabilistic polynomial time adversary $\mathcal{A}$ the winning probability in the
+combined experiment satisfies
+\[
+\Pr[\mathsf{Exp}^{\mathsf{SC}}(\lambda)=1]
+\le
+\Pr[\mathsf{Bad}_{\mathsf{NBE}}]
+\;+\;
+\Pr[\mathsf{Bad}_{\mathsf{SM}}]
+\;+\;
+\Pr[\mathsf{Bad}_{\mathsf{SAP}}]
+\;+\;
+\Pr[\mathsf{Bad}_{\mathsf{SCS}}].
+\]
+Moreover, each term is negligible in $\lambda$ under the corresponding theorem assumptions.
 \end{theorem}
 
-\paragraph{Discussion.}
-The proof is a standard hybrid argument: integrity (NBE) is enforced at the executor boundary; SM is
-enforced at the gateway boundary by handleization and explicit declassification; SAP is about the view
-of a single policy server and follows from the transcript design and the DPF/MPC security properties
-up to leakage; and SCS is conditioned on the capsule contract. Since these properties concern
-disjoint attacker views and disjoint enforcement points, a union bound suffices.
+\paragraph{Proof.}
+The combined experiment outputs $1$ if and only if at least one bad event occurs.
+By the union bound,
+\[
+\Pr[\mathsf{Bad}_{\mathsf{NBE}} \lor \mathsf{Bad}_{\mathsf{SM}} \lor \mathsf{Bad}_{\mathsf{SAP}} \lor \mathsf{Bad}_{\mathsf{SCS}}]
+\le
+\Pr[\mathsf{Bad}_{\mathsf{NBE}}] + \Pr[\mathsf{Bad}_{\mathsf{SM}}] + \Pr[\mathsf{Bad}_{\mathsf{SAP}}] + \Pr[\mathsf{Bad}_{\mathsf{SCS}}].
+\]
+Theorem \ref{thm:nbe} bounds $\Pr[\mathsf{Bad}_{\mathsf{NBE}}]$ by MAC unforgeability, hash collision
+resistance, and replay store reliability.
+Theorem \ref{thm:sm} bounds $\Pr[\mathsf{Bad}_{\mathsf{SM}}]$ by the handleization and declassification
+assumptions.
+Theorem \ref{thm:sap} bounds $\Pr[\mathsf{Bad}_{\mathsf{SAP}}]$ by PIR and two party computation
+security up to the stated leakage.
+Theorem \ref{thm:scs} bounds $\Pr[\mathsf{Bad}_{\mathsf{SCS}}]$ by the capsule mediation contract and
+the integrity and confidentiality properties of the gateway and executor path.
+\qed
+
+\subsection{Capsule mediation contract as a system assumption}
+\label{app:proofs:mc}
+
+We define the capsule mediation contract as an explicit system assumption that can be validated by
+platform specific configurations and tests.
+
+\paragraph{Contract definition.}
+Let $MC$ be a predicate over the runtime environment and its execution.
+The contract requires the following properties.
+
+\begin{itemize}
+\item Filesystem confinement. The runtime can read only its code and a dedicated workspace directory.
+The runtime cannot read host secret paths such as SSH keys or application credential stores.
+\item Network confinement. The runtime cannot initiate public network connections.
+If a network stack is used for transport then only the gateway address is reachable.
+\item Process confinement. The runtime cannot spawn arbitrary processes.
+Only a fixed allowlist required for the runtime operation is permitted.
+\item Transport confinement. The runtime can reach the gateway only through a single constrained
+transport endpoint, preferably a Unix domain socket.
+\end{itemize}
+
+\paragraph{Cross platform minimal realizations.}
+The artifact provides a macOS capsule policy using \texttt{sandbox-exec} with profile
+\texttt{capsule/capsule.sb}, and a Linux capsule policy using \texttt{bubblewrap} with a network
+namespace in \texttt{capsule/run\_smoke\_linux.sh}.
+Both realizations use a constrained gateway transport and are exercised by the same smoke test logic
+in \texttt{capsule/smoke.py}.
+
+\paragraph{Testable assertions.}
+The smoke test asserts that direct reads of a host secret path fail, that direct public network
+requests fail, that direct HTTP posts to a local exfiltration endpoint fail when the capsule is
+configured for a netless transport, that direct process execution is denied in the macOS capsule
+configuration, and that a gateway action request succeeds through the constrained transport.
+These assertions are recorded as a structured JSON report.
 
 \subsection{Executable validation of the acceptance predicate}
 \label{app:proofs:executable}

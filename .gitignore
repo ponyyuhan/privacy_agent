@@ -37,6 +37,17 @@ gateway/demo_data/workspace/
 # Local paper downloads
 *.pdf
 
+# LaTeX build artifacts
+*.aux
+*.bbl
+*.blg
+*.log
+*.out
+*.toc
+*.lof
+*.lot
+*.synctex.gz
+
 # Local agent memory/state (should never be committed)
 memory/
 MEMORY.md
