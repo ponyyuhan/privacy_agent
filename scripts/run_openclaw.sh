@@ -148,7 +148,7 @@ cat >"$OPENCLAW_CONFIG_PATH" <<JSON5
     // Lock down core tools: keep only session_status + opt-in plugin tool.
     profile: "minimal",
     // NOTE: tools.allow cannot add tools that are not in the profile allowlist; use tools.alsoAllow.
-    alsoAllow: ["mirage_act"]
+    alsoAllow: ["secureclaw_act", "mirage_act"]
   },
   agents: {
     defaults: {

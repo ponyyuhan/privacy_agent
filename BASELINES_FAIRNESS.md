@@ -7,7 +7,7 @@ The main reviewer pitfall is conflating two distinct threat models:
 1. **Compromised runtime**: the agent runtime (and its skills) are already adversarial and will actively exfiltrate secrets if it can.
 2. **Native guardrails**: the runtime is not intentionally malicious, and we ask how well the platform/model's built-in safety prevents leakage under prompt-injection style attacks.
 
-MIRAGE-OG++ is designed for (1), but papers also need to report (2) as a strong baseline.
+SecureClaw is designed for (1), but papers also need to report (2) as a strong baseline.
 
 ---
 
@@ -15,10 +15,10 @@ MIRAGE-OG++ is designed for (1), but papers also need to report (2) as a strong 
 
 We keep exactly:
 
-- **MIRAGE modes (same harness)**:
+- **SecureClaw modes (same harness)**:
   - `mirage_full`: full system (gateway + 2 policy servers + executor dual-authorization).
   - `policy_only`: gateway policy checks but no executor enforcement line (no dual-proof effect boundary).
-  - `sandbox_only`: disables MIRAGE policy mediation (a “local sandbox only” style baseline).
+  - `sandbox_only`: disables SecureClaw policy mediation (a “local sandbox only” style baseline).
   - `single_server_policy`: same policy logic but only one policy server (removes SAP privacy).
 
 - **Native guardrails baselines (real CLIs, no compromised script)**:
@@ -47,7 +47,7 @@ Therefore, we do not present it as the Codex/OpenClaw “native” baseline in t
 1. Generate an **official case manifest** (JSONL), derived from AgentLeak's official dataset and a fixed seed:
    - `artifact_out_compare/fair_cases.jsonl`
 
-2. Run MIRAGE modes using our official-harness runner with `AGENTLEAK_CASES_MANIFEST_PATH` pinned to that manifest:
+2. Run SecureClaw modes using our official-harness runner with `AGENTLEAK_CASES_MANIFEST_PATH` pinned to that manifest:
    - output: `artifact_out_compare/fair_mirage/agentleak_eval/agentleak_channel_summary.json`
    - per-case rows: `artifact_out_compare/fair_mirage/agentleak_eval/agentleak_eval_rows.csv`
 
@@ -85,7 +85,7 @@ Notes:
 
 ## 5. Interpreting Performance Numbers
 
-MIRAGE modes are local services (policy servers + gateway + executor), so `ops_s` and `p50/p95` reflect system overhead under the harness.
+SecureClaw modes are local services (policy servers + gateway + executor), so `ops_s` and `p50/p95` reflect system overhead under the harness.
 
 Native guardrails baselines invoke external model inference through a real CLI. Inference latency dominates, and throughput is not directly comparable to local enforcement throughput.
 
@@ -99,5 +99,5 @@ For transparency, the native baseline summary records both:
 ## 6. What This Baseline Set Still Does Not Prove
 
 - A “native baseline” does not give non-bypassability: the runtime can still be compromised and leak secrets by construction.
-- A “policy_only” baseline in MIRAGE is still stronger than prompt-only: it enforces handleization and gateway mediation, but lacks the executor dual-proof boundary.
+- A “policy_only” baseline in SecureClaw is still stronger than prompt-only: it enforces handleization and gateway mediation, but lacks the executor dual-proof boundary.
 - Codex/OpenClaw results depend on the exact model version, platform defaults, and any upstream safety changes.

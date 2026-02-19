@@ -14,6 +14,8 @@ from typing import Any, Dict, List, Tuple
 import requests
 import yaml
 
+from common.install_tokens import normalize_install_token
+
 from common.canonical import request_sha256_v1
 from common.uds_http import uds_post_json
 from common.sanitize import (
@@ -274,6 +276,28 @@ def _compute_and_rounds(c: Circuit) -> list[list[int]]:
     for d in range(1, maxd + 1):
         if rounds[d]:
             out.append(sorted(rounds[d]))
+    return out
+
+
+def _pick_safe_pad_strings(*, prefix: str, n: int, domain_size: int, forbidden: set[int]) -> list[str]:
+    """
+    Deterministically pick padding strings whose stable indices are not set bits in the target DB.
+
+    This reduces false positives caused by padding-item hash collisions at small domain sizes.
+    """
+    out: list[str] = []
+    seen: set[int] = set()
+    j = 0
+    # Hard bound to avoid any risk of non-termination.
+    while len(out) < int(n) and j < 200000:
+        cand = f"{prefix}{j}"
+        idx = int(stable_idx(cand, int(domain_size)))
+        if idx not in forbidden and idx not in seen:
+            out.append(cand)
+            seen.add(idx)
+        j += 1
+    if len(out) < int(n):
+        raise RuntimeError("failed_to_pick_safe_padding")
     return out
 
 
@@ -1015,6 +1039,18 @@ class UnifiedPolicyEngine:
 
         cfg = _load_policy_config()
         self._circuit = build_policy_unified_v1_circuit_from_policy(cfg) or build_policy_unified_v1_circuit_default()
+        # Padding safety configuration (to reduce false positives from padding hash collisions).
+        self._cfg_ioc_domains = [str(d).strip().lower() for d in (cfg.get("ioc_domains") or []) if str(d).strip()]
+        raw_inst = list(cfg.get("install_patterns") or cfg.get("ingress_install_patterns") or [])
+        inst_norm: list[str] = []
+        for x in raw_inst:
+            t = normalize_install_token(str(x))
+            if t:
+                inst_norm.append(t)
+        self._cfg_install_tokens = sorted(set(inst_norm))
+        self._pad_base_domain_size: int | None = None
+        self._pad_skill_domains: list[str] | None = None
+        self._pad_install_tokens: list[str] | None = None
         self._bundle: BundleConfig | None = None
         self._mpc_mixed: MixedMpcClient | None = None
 
@@ -1105,22 +1141,43 @@ class UnifiedPolicyEngine:
             raise RuntimeError("FULL policy engine requires SIGNED_PIR=1")
         b = self._load_bundle()
 
+        # Precompute safe padding strings under the bundle base domain.
+        base_ds = int(b.base_domain_size)
+        if self._pad_base_domain_size != base_ds or self._pad_skill_domains is None or self._pad_install_tokens is None:
+            forbidden_ioc = {int(stable_idx(str(d), base_ds)) for d in (self._cfg_ioc_domains or [])}
+            forbidden_inst = {int(stable_idx(str(t), base_ds)) for t in (self._cfg_install_tokens or [])}
+            self._pad_skill_domains = _pick_safe_pad_strings(
+                prefix="__pad_skill_domain__",
+                n=int(self.max_skill_domains),
+                domain_size=base_ds,
+                forbidden=forbidden_ioc,
+            )
+            self._pad_install_tokens = _pick_safe_pad_strings(
+                prefix="__pad_install_token__",
+                n=int(self.max_tokens),
+                domain_size=base_ds,
+                forbidden=forbidden_inst,
+            )
+            self._pad_base_domain_size = base_ds
+
         # Fixed-shape padding.
         doms = [str(d).strip().lower() for d in (skill_domains or []) if str(d).strip()]
         doms = doms[: self.max_skill_domains]
         while len(doms) < self.max_skill_domains:
-            doms.append(os.getenv("DUMMY_SKILL_DOMAIN", "example.com"))
+            pad = (self._pad_skill_domains or ["example.com"])[len(doms) % max(1, int(self.max_skill_domains))]
+            doms.append(str(pad))
 
         toks = extract_install_tokens(text=skill_md or "", max_tokens=self.max_tokens)
         while len(toks) < self.max_tokens:
-            toks.append(f"__pad_install_token_{len(toks)}__")
+            pad2 = (self._pad_install_tokens or [f"__pad_install_token_{len(toks)}__"])[len(toks) % max(1, int(self.max_tokens))]
+            toks.append(str(pad2))
 
         # Stable raw indices under the *base* domain.
-        rec_raw = stable_idx(str(recipient or ""), int(b.base_domain_size))
-        dom_raw = stable_idx(str(domain or ""), int(b.base_domain_size))
-        tok_raw = fourgram_indices(str(text or ""), int(b.base_domain_size), int(self.max_tokens))
-        ioc_raw = [stable_idx(d, int(b.base_domain_size)) for d in doms]
-        inst_raw = [stable_idx(t, int(b.base_domain_size)) for t in toks[: self.max_tokens]]
+        rec_raw = stable_idx(str(recipient or ""), base_ds)
+        dom_raw = stable_idx(str(domain or ""), base_ds)
+        tok_raw = fourgram_indices(str(text or ""), base_ds, int(self.max_tokens))
+        ioc_raw = [stable_idx(d, base_ds) for d in doms]
+        inst_raw = [stable_idx(t, base_ds) for t in toks[: self.max_tokens]]
 
         idxs: list[int] = []
         idxs.append(_bundle_shift(b, logical="allow_recipients", raw_idx=rec_raw))

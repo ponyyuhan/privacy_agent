@@ -58,7 +58,7 @@ class McpStdioClient {
     this._proc.stderr.setEncoding("utf8");
     this._proc.stderr.on("data", (chunk) => {
       const s = String(chunk || "").trim();
-      if (s) this._logger?.debug?.(`[mirage-mcp stderr] ${s}`);
+      if (s) this._logger?.debug?.(`[secureclaw-mcp stderr] ${s}`);
     });
 
     this._rl = readline.createInterface({ input: this._proc.stdout });
@@ -125,7 +125,7 @@ class McpStdioClient {
       msg = JSON.parse(line);
     } catch {
       // Ignore non-JSON noise; MCP servers should not emit it on stdout, but be robust.
-      this._logger?.debug?.(`[mirage-mcp] ignoring non-json: ${String(line).slice(0, 200)}`);
+      this._logger?.debug?.(`[secureclaw-mcp] ignoring non-json: ${String(line).slice(0, 200)}`);
       return;
     }
     const id = msg?.id;
@@ -163,44 +163,50 @@ export default function (api) {
 
   const mcp = new McpStdioClient({ python, repoRoot, env, logger });
 
-  api.registerTool(
-    {
-      name: "mirage_act",
-      description:
-        "Execute a high-level MIRAGE intent. This forwards to the local MIRAGE MCP gateway and returns a structured observation.",
-      parameters: {
-        type: "object",
-        // Keep only intent_id required: some providers/runtimes omit object-typed fields by default.
-        required: ["intent_id"],
-        properties: {
-          intent_id: { type: "string", description: "High-level intent ID (e.g., ReadFile, SendMessage)." },
-          inputs: { type: "object", description: "Intent inputs.", additionalProperties: true },
-          constraints: { type: "object", description: "Optional constraints.", additionalProperties: true },
-          caller: { type: "string", description: "Untrusted caller identity (defaults to openclaw)." },
+  function registerActTool(toolName: string) {
+    api.registerTool(
+      {
+        name: toolName,
+        description:
+          "Execute a high-level SecureClaw intent. This forwards to the local SecureClaw MCP gateway and returns a structured observation.",
+        parameters: {
+          type: "object",
+          // Keep only intent_id required: some providers/runtimes omit object-typed fields by default.
+          required: ["intent_id"],
+          properties: {
+            intent_id: { type: "string", description: "High-level intent ID (e.g., ReadFile, SendMessage)." },
+            inputs: { type: "object", description: "Intent inputs.", additionalProperties: true },
+            constraints: { type: "object", description: "Optional constraints.", additionalProperties: true },
+            caller: { type: "string", description: "Untrusted caller identity (defaults to openclaw)." },
+          },
+          additionalProperties: false,
         },
-        additionalProperties: false,
-      },
-      execute: async (_id, params) => {
-        const intentId = String(params.intent_id || "");
-        const inputs = params.inputs || {};
-        const constraints = params.constraints || {};
-        const caller = String(params.caller || "openclaw");
+        execute: async (_id, params) => {
+          const intentId = String(params.intent_id || "");
+          const inputs = params.inputs || {};
+          const constraints = params.constraints || {};
+          const caller = String(params.caller || "openclaw");
 
-        const args = { intent_id: intentId, inputs, constraints, caller };
-        const res = await mcp.callTool("act", args);
+          const args = { intent_id: intentId, inputs, constraints, caller };
+          const res = await mcp.callTool("act", args);
 
-        const structured = res?.structuredContent ?? res;
-        const text = JSON.stringify(structured, null, 2);
-        const isPolicyDeny =
-          structured && typeof structured === "object" && !Array.isArray(structured) && structured.status === "DENY";
-        return {
-          content: [{ type: "text", text }],
-          structuredContent: structured,
-          // Treat policy DENY as a normal (successful) tool response so the agent can continue.
-          isError: Boolean(res?.isError && !isPolicyDeny),
-        };
+          const structured = res?.structuredContent ?? res;
+          const text = JSON.stringify(structured, null, 2);
+          const isPolicyDeny =
+            structured && typeof structured === "object" && !Array.isArray(structured) && structured.status === "DENY";
+          return {
+            content: [{ type: "text", text }],
+            structuredContent: structured,
+            // Treat policy DENY as a normal (successful) tool response so the agent can continue.
+            isError: Boolean(res?.isError && !isPolicyDeny),
+          };
+        },
       },
-    },
-    { optional: true },
-  );
+      { optional: true },
+    );
+  }
+
+  // New primary tool name (paper-facing), with a legacy alias for compatibility.
+  registerActTool("secureclaw_act");
+  registerActTool("mirage_act");
 }

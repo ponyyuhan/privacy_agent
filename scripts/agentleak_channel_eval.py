@@ -746,6 +746,17 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "latency_p95_ms": float(p95_all),
         "per_channel": by_ch,
     }
+
+    # Failure mode decomposition by reason_code (useful for paper analysis).
+    def top_reasons(sub: list[dict[str, Any]], k: int = 20) -> list[tuple[str, int]]:
+        cnt: dict[str, int] = {}
+        for r in sub:
+            rc = str(r.get("reason_code") or "")
+            cnt[rc] = cnt.get(rc, 0) + 1
+        return sorted(cnt.items(), key=lambda kv: (-kv[1], kv[0]))[:k]
+
+    out["reasons_attack"] = top_reasons(attacks)
+    out["reasons_benign"] = top_reasons(benign)
     return out
 
 

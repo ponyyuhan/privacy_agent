@@ -1,6 +1,8 @@
-# MIRAGE-OG++：算法与协议（Artifact，中文）
+# SecureClaw：算法与协议（Artifact，中文）
 
-本文档提炼并形式化本仓库中**可写入论文**的算法/协议贡献点。它刻意**不把标准密码学原语本身当作贡献**（例如 DPF/DCF/FSS、GMW/Beaver triples），而聚焦于 MIRAGE-OG++ 在系统/协议/编译层面的新设计：
+SecureClaw 在仓库早期历史中曾被称为 MIRAGE-OG++。为保证复现兼容，artifact 中仍保留少量历史命名。
+
+本文档提炼并形式化本仓库中**可写入论文**的算法或协议贡献点。它刻意**不把标准密码学原语本身当作贡献**，例如 DPF 或 DCF 或 FSS 以及 GMW 或 Beaver triples。本文聚焦于 SecureClaw 在系统、协议与编译层面的新设计：
 
 1. 证明携带（proof-carrying）的不可绕过副作用提交（双授权 token）。
 2. Intent shadowing 的统一策略程序编译（多意图共用一套常形状 program）。
@@ -502,7 +504,7 @@ bitset DB 的 PIR 答案份额为：
 
 ## 8. 泄露模型边界（允许泄露函数 L(.)）
 
-MIRAGE-OG++ 的安全叙事以“明确允许泄露”为边界：每个策略服务器能从自身 transcript 看到什么，必须被 leakage 函数 L(.) 精确定义。
+SecureClaw 的安全叙事以“明确允许泄露”为边界：每个策略服务器能从自身 transcript 看到什么，必须被 leakage 函数 L(.) 精确定义。
 
 - 具体定义与当前实现覆盖范围见 `LEAKAGE_MODEL.md`。
 - 本文档中所有“隐藏/不泄露”仅在该 L(.) 边界内成立。

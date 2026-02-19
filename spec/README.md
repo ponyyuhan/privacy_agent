@@ -11,6 +11,7 @@ Second, they define the exact fields that are bound by the executor acceptance p
 Contents
 
 - `spec/secureclaw_executor_accept_v1.schema.json` specifies the JSON structure of commit proof shares and the `commit` evidence object consumed by the executor commit path.
+- `spec/secureclaw_accept_predicate_v1.json` specifies additional semantic constraints that the executor enforces on top of the JSON schema.
 - `spec/secureclaw_capsule_contract_v1.schema.json` specifies the JSON structure of a capsule mediation contract.
 - `spec/secureclaw_capsule_contract_v1.json` is the artifact contract instance for this repository.
 
@@ -21,4 +22,3 @@ The repository provides a schema validator script.
 ```
 python scripts/validate_specs.py
 ```
-

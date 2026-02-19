@@ -1,11 +1,11 @@
 # Formal Security Claims and Proof Chain (NBE / SM / SAP / SCS)
 
-This document upgrades MIRAGE-OG++'s security story into an **appendix-grade** proof chain:
+This document upgrades SecureClaw's security story into an **appendix-grade** proof chain:
 explicit games, acceptance predicates, and reductions, with direct pointers into this repo.
 
 Scope (artifact-accurate):
 
-- Implementation: the current MIRAGE-OG++ code in this repository.
+- Implementation: the current SecureClaw code in this repository.
 - Adversary: PPT adversary controlling prompts/skills/runtime inputs and able to send arbitrary requests to the gateway and executor.
 - Keys: executor-side MAC verification keys are not compromised.
 - Policy servers: honest-but-curious for privacy (SAP), not malicious for integrity. (NBE is about *bypass* by the runtime, not about a malicious policy server authorizing bad actions.)
@@ -16,6 +16,8 @@ Code-linked checks:
 - Unit tests: `tests/test_security_games.py`
 - Mechanized bounded model checking of the interface-level event definitions: `formal/secureclaw_model_check.py`
 - Machine-checkable schemas for the executor commit evidence and capsule contract: `spec/`
+- Capsule mediation contract verifier (spec -> smoke report -> verdict): `capsule/verify_contract.py`
+- Executor accept predicate verifier (spec + keys + request context -> decision): `scripts/verify_accept_predicate.py`
 
 ---
 

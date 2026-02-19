@@ -30,13 +30,13 @@ Therefore, we validate `C6/C7` using the artifact's **synthetic channel suite** 
 
 ## 2. Official Cases (C1..C5): Evidence Artifacts
 
-Fair, same-cases comparison (MIRAGE 4 modes + native baselines):
+Fair, same-cases comparison (SecureClaw 4 modes + native baselines):
 
 - `artifact_out_compare/fair_full_report.json`
   - Contains overall rates, per-channel rates, and latency/throughput summaries.
   - The manifest is pinned at `artifact_out_compare/fair_cases.jsonl` (derived from the official dataset with a fixed seed).
 
-MIRAGE-only official harness run (used internally by the fair report):
+SecureClaw-only official harness run (used internally by the fair report):
 
 - `artifact_out_compare/fair_mirage/agentleak_eval/agentleak_channel_summary.json`
 - `artifact_out_compare/fair_mirage/agentleak_eval/agentleak_eval_rows.csv`
@@ -115,4 +115,3 @@ It does **not** mean:
 - A colluding pair of policy servers cannot infer the query (SAP assumes non-collusion).
 
 These limits are stated explicitly in `LEAKAGE_MODEL.md`.
-

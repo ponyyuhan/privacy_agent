@@ -1,4 +1,6 @@
-# MIRAGE-OG++
+# SecureClaw
+
+本仓库的研究原型早期代号为 MIRAGE-OG++。为保证复现兼容，代码中仍保留部分历史命名，例如模式名 `mirage_full` 与环境变量前缀 `MIRAGE_*`。
 
 可信网关 + 双策略服务 + 双授权执行器 + Skill Capsule 的可运行研究原型（paper artifact + real agents）。
 
@@ -83,7 +85,7 @@ python main.py paper-artifact
 注意：其中 native/real-agent 相关步骤可能需要外部模型/凭据；脚本会尽量 `SKIP/continue`，不把整个流水线跑挂。
 
 可选（更论文级、但更耗时）：
-- official AgentLeak `C1..C5` 同口径 fair compare（MIRAGE + Codex + OpenClaw）：
+- official AgentLeak `C1..C5` 同口径 fair compare（SecureClaw + Codex + OpenClaw）：
   - 设置 `RUN_FAIR_FULL=1`
   - 输出：`artifact_out_compare/fair_full_report.json` 与 `artifact_out_compare/stats/fair_full_stats.json`
   - 提示：这一步会调用外部模型，可能非常耗 token。可用环境变量降低成本/缩短运行时间：
@@ -210,7 +212,7 @@ artifact 证据：
 +-------------------------------+
 | Untrusted Agent Runtime       |
 | - OpenClaw / NanoClaw / demo  |
-| - only tool: mirage_act / act |
+| - only tool: secureclaw_act (alias mirage_act) / act |
 +-------------------------------+
                 |
                 | MCP stdio
@@ -593,7 +595,7 @@ Router 已实现的 intent（是否可用取决于 capability 配置）：
 2. NBE 形式化检查（见 `FORMAL_SECURITY.md` 与 `scripts/security_game_nbe_check.py`）
 3. baselines + 大规模评测（`scripts/paper_eval.py`）
 4. AgentLeak-style 逐通道评测（`C1..C7`，synthetic suite；`scripts/agentleak_channel_eval.py`）
-5. official AgentLeak `C1..C5` 的同口径 fair compare（可选，MIRAGE + Codex + OpenClaw；见 `BASELINES_FAIRNESS.md`）
+5. official AgentLeak `C1..C5` 的同口径 fair compare（可选，SecureClaw + Codex + OpenClaw；见 `BASELINES_FAIRNESS.md`）
    - 默认跳过；设置 `RUN_FAIR_FULL=1`
    - 输出：`artifact_out_compare/fair_full_report.json` 与 `artifact_out_compare/stats/fair_full_stats.json`
 6. policy server 吞吐曲线（`scripts/bench_policy_server_curves.py`）
@@ -890,9 +892,9 @@ OPENCLAW_STATE_DIR="artifact_out/openclaw_state" \
 
 ## 20. 与“模型型 guardrail”工作关系
 
-本项目与仅靠 LLM 分类/推理的 guardrail 路线互补而非替代：
+本项目与仅靠 LLM 分类或推理的 guardrail 路线互补而非替代：
 - 模型型 guardrail 擅长风险感知与解释。
-- MIRAGE-OG++ 重点是不可绕过执行线与单点隐私策略外包。
+- SecureClaw 重点是不可绕过执行线与单点隐私策略外包。
 
 你可以把模型输出当作附加策略信号输入 gateway，但不能替代 executor 双授权机制。
 
@@ -977,7 +979,7 @@ python main.py paper-artifact
 
 `scripts/paper_eval.py` 实现并评测以下模式（输出 `artifact_out/paper_eval/*`）：
 
-- `mirage_full`：完整 MIRAGE-OG++（gateway + 双 policy server + executor 双 proof）。
+- `mirage_full`：完整 SecureClaw（gateway + 双 policy server + executor 双 proof）。
 - `policy_only`：只做 policy 判定/签发，但不通过 executor 强制（用于证明没有 NBE 时不可绕过性不存在）。
 - `sandbox_only`：网关策略检查被显式旁路（`MIRAGE_POLICY_BYPASS=1`），近似“只有沙箱/只有运行时防护”的 ablation（注意：这不是 OS 级 sandbox 的等价实现，只用于对照）。
 - `single_server_policy`：单 policy server 明文 idx 查询（性能更快但牺牲 SAP；用于隐私对照）。
@@ -1054,7 +1056,7 @@ real-agent campaign：
   - `audit_*.jsonl`（审计日志）
   - SHA256（证据链完整性）
 
-native runtime baselines（无 MIRAGE）：
+native runtime baselines（无 SecureClaw 执行线）：
 - `scripts/native_guardrail_eval.py`
 - 输出：`artifact_out/native_baselines/native_guardrail_eval.json`
 
@@ -1066,7 +1068,7 @@ native runtime baselines（无 MIRAGE）：
   - `artifact_out_tmp/native_smoke2/native_baselines/native_guardrail_eval.json`
   - `third_party/agentleak_official/benchmarks/ieee_repro/results/model_stats.json`
 
-official AgentLeak `C1..C5` 同口径 fair compare（MIRAGE + Codex + OpenClaw）：
+official AgentLeak `C1..C5` 同口径 fair compare（SecureClaw + Codex + OpenClaw）：
 - `scripts/fair_full_compare.py`
 - 输出：`artifact_out_compare/fair_full_report.json`
 - 统计分解与显著性：`scripts/fair_full_stats.py` -> `artifact_out_compare/stats/fair_full_stats.json`
@@ -1110,7 +1112,7 @@ official AgentLeak `C1..C5` 同口径 fair compare（MIRAGE + Codex + OpenClaw�
 - 以 `policy_server_scaling.json` 为准报告不同线程数（`RAYON_NUM_THREADS`）下的 `throughput_keys_s / p50 / p95` 曲线。
 
 `real_agent_campaign`（真实 agent 闭环，节选）：
-- OpenClaw + MIRAGE：`benign_allow_rate=1.0`，`attack_block_rate=1.0`（`n_ok=1`）
+- OpenClaw + SecureClaw：`benign_allow_rate=1.0`，`attack_block_rate=1.0`（`n_ok=1`）
 - Scripted MCP：`benign_allow_rate=1.0`，`attack_block_rate=1.0`（`n_ok=1`）
 - NanoClaw：若缺少凭据会被标记为 `SKIPPED`（不影响流水线其他部分）
 

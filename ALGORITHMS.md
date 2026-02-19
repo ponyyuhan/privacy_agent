@@ -1,8 +1,10 @@
-# MIRAGE-OG++: Algorithms and Protocols (Artifact, English)
+# SecureClaw: Algorithms and Protocols (Artifact, English)
+
+SecureClaw was previously referred to as MIRAGE-OG++ in early repository history. The artifact retains some legacy identifiers for reproducibility.
 
 This document isolates the **paper-writeable algorithms/protocols** implemented in this repository.
 It intentionally does **not** claim standard primitives as contributions (e.g., DPF/DCF/FSS, GMW/Beaver
-triples). Instead, it specifies what is new in MIRAGE-OG++ at the system/protocol/compiler layer:
+triples). Instead, it specifies what is new in SecureClaw at the system/protocol/compiler layer:
 
 1. Proof-carrying, non-bypassable effect commits (dual authorization tokens).
 2. Intent-shadowed unified policy program compilation (one constant-shape program for multiple intents).
@@ -548,7 +550,7 @@ Under the one-hot precondition on intent selector bits, for each output wire:
 
 ## 8. Leakage Model Boundary (Explicit L(.))
 
-MIRAGE-OG++ is designed around an explicit "allowed leakage" interface L(.) for what each policy server is permitted
+SecureClaw is designed around an explicit "allowed leakage" interface L(.) for what each policy server is permitted
 to learn from its own transcript view. The artifact includes:
 
 - Transcript logging at the policy-client boundary (gateway side) for PIR metadata.

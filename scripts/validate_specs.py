@@ -69,6 +69,15 @@ def main() -> None:
     example = _example_commit_evidence()
     jsonschema.validate(instance=example, schema=exec_schema)
 
+    # Accept predicate semantic spec validation (best-effort shape checks).
+    accept_spec = _load_json(spec_dir / "secureclaw_accept_predicate_v1.json")
+    assert int(accept_spec.get("version", 0)) == 1
+    assert isinstance(accept_spec.get("program_id"), str) and str(accept_spec.get("program_id")).strip()
+    rok = accept_spec.get("required_output_keys")
+    assert isinstance(rok, list) and all(isinstance(x, str) and x for x in rok)
+    tl = int(accept_spec.get("commit_tag_share_len_bytes") or 0)
+    assert 8 <= tl <= 64
+
     # Basic sanity: contract instance matches repository transport choice.
     if os.getenv("MIRAGE_GATEWAY_UDS_PATH"):
         assert capsule_contract.get("transport", {}).get("mode") == "uds"
@@ -78,4 +87,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

@@ -22,6 +22,8 @@ import json
 from .dfa import build_char_mapping, build_aho_corasick_dfa
 import yaml
 
+from common.install_tokens import normalize_install_token
+
 DATA_DIR = Path(__file__).resolve().parent / "data"
 DATA_DIR.mkdir(exist_ok=True)
 
@@ -40,25 +42,6 @@ def add_fourgrams(buf: bytearray, pattern: str, domain_size: int):
     for i in range(0, max(0, len(p) - 3)):
         g = p[i:i+4]
         set_bit(buf, stable_idx(g, domain_size))
-
-def normalize_install_token(s: str) -> str:
-    """Canonicalize install semantics tokens for skill ingress checks.
-
-    We keep this intentionally simple and deterministic so both DB build and
-    gateway-side feature extraction can agree on the same token strings.
-    """
-    t = str(s or "").strip().lower()
-    if not t:
-        return ""
-    t = t.replace("\n", " ")
-    t = re.sub(r"\s+", " ", t)
-    # Normalize pipe spacing: "curl | bash" => "curl|bash"
-    t = re.sub(r"\s*\|\s*", "|", t)
-    # Normalize common variants.
-    t = re.sub(r"\binvoke-expression\b", "invoke-expression", t)
-    t = re.sub(r"\bchmod\s*\+\s*x\b", "chmod +x", t)
-    t = re.sub(r"\bbase64\s+-\s*d\b", "base64 -d", t)
-    return t
 
 def _write_dfa_transitions(*, patterns: list[str], out_dir: Path, domain_size: int) -> dict:
     # Normalize patterns to reduce alphabet and improve match rate.

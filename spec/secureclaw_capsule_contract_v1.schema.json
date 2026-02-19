@@ -83,6 +83,7 @@
           "enum": ["fs_read", "exec", "internet_get", "http_post", "gateway_act", "gateway_mcp_act"]
         },
         "must_deny": { "type": "boolean" },
+        "allow_skip": { "type": "boolean" },
         "path": { "type": "string" },
         "argv": { "type": "array", "items": { "type": "string" } },
         "url": { "type": "string" }
@@ -90,4 +91,3 @@
     }
   }
 }
-

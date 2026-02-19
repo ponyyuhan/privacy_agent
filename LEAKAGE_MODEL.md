@@ -1,4 +1,4 @@
-# Leakage Model (L(.)) for MIRAGE-OG++ (PIR + MPC + Confirm Path + Traffic Shaping)
+# Leakage Model (L(.)) for SecureClaw (PIR + MPC + Confirm Path + Traffic Shaping)
 
 This document defines two related leakage functions:
 
@@ -335,7 +335,7 @@ This is intentional: `L(.)` is the contract of what we *allow* to leak; anything
 - Official AgentLeak full-case harness (`artifact_out_full_official_v3`):
   `mirage_full` achieves `attack_leak_rate=0.0` with `benign_allow_rate=1.0`
   under case-isolated context and benign confirm-aware evaluation.
-- Official fair-baseline report (same cases, same seed, same metrics for MIRAGE + Codex + OpenClaw):
+- Official fair-baseline report (same cases, same seed, same metrics for SecureClaw + Codex + OpenClaw):
   `artifact_out_compare/fair_full_report.json` (see `systems.mirage_full`).
 - Synthetic full-channel run (covers `C1..C7` including `C6/C7` not in the official dataset):
   `artifact_out_compare/leakage_sys_synth_v2/agentleak_eval/agentleak_channel_summary.json` shows `mirage_full` has `attack_leak_rate=0.0` for every channel.

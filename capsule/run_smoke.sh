@@ -159,3 +159,10 @@ echo "[capsule] running sandboxed smoke..."
   python -m capsule.smoke | tee "$OUT_DIR/capsule_smoke.json"
 
 echo "[capsule] wrote: $OUT_DIR/capsule_smoke.json"
+
+echo "[capsule] verifying capsule mediation contract..."
+python -m capsule.verify_contract \
+  --contract "$ROOT/spec/secureclaw_capsule_contract_v1.json" \
+  --report "$OUT_DIR/capsule_smoke.json" \
+  --out "$OUT_DIR/capsule_contract_verdict.json"
+echo "[capsule] wrote: $OUT_DIR/capsule_contract_verdict.json"

@@ -116,3 +116,9 @@ PY
 
 echo "[capsule-linux] wrote: $OUT_DIR/capsule_smoke_linux.json"
 
+echo "[capsule-linux] verifying capsule mediation contract..."
+python -m capsule.verify_contract \
+  --contract "$ROOT/spec/secureclaw_capsule_contract_v1.json" \
+  --report "$OUT_DIR/capsule_smoke_linux.json" \
+  --out "$OUT_DIR/capsule_contract_verdict_linux.json"
+echo "[capsule-linux] wrote: $OUT_DIR/capsule_contract_verdict_linux.json"

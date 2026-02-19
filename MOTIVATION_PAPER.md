@@ -1,9 +1,11 @@
-# MIRAGE-OG++: Motivation, Problem, Goals, and Approach (Paper-Grade Draft)
+# SecureClaw: Motivation, Problem, Goals, and Approach (Paper-Grade Draft)
+
+SecureClaw was previously referred to as SecureClaw-OG++ in early repository history. The artifact retains some legacy identifiers for reproducibility.
 
 ## Abstract-Level Summary
 
 The primary security gap in modern agent systems is not risk detection quality, but **enforcement non-bypassability**.  
-MIRAGE-OG++ addresses this by moving trust from model compliance to a verifiable execution line:
+SecureClaw addresses this by moving trust from model compliance to a verifiable execution line:
 
 1. A single high-level action surface (`act`) for untrusted runtimes.
 2. Privacy-preserving outsourced policy checks via 2-server PIR (DPF/FSS).
@@ -37,7 +39,7 @@ This creates a structural tension:
 - Centralized policy gives operability and rapid updates.
 - Centralized raw visibility leaks sensitive behavior and data.
 
-MIRAGE-OG++ treats this as a systems-and-crypto co-design problem: externalize policy while reducing single-point observability.
+SecureClaw treats this as a systems-and-crypto co-design problem: externalize policy while reducing single-point observability.
 
 ### 1.3 Why non-bypassability is the key systems requirement
 
@@ -287,7 +289,7 @@ These limitations do not negate the core systems claim; they define the current 
 
 ## 10. One-Paragraph Paper-Ready Motivation Statement
 
-Agent systems now fail primarily at execution boundaries, not merely content boundaries: adversaries can weaponize prompts and skill artifacts to trigger real-world side effects, exfiltrate secrets, and bypass superficial guardrails. MIRAGE-OG++ reframes this as a systems enforcement problem by introducing a minimal trusted execution line where untrusted runtimes access only a single high-level action API, policy evaluation is outsourced through privacy-preserving two-server PIR and MPC, and side effects are committed exclusively through an executor that verifies dual cryptographic proofs and fail-closes otherwise. By additionally transaction-gating skill enablement and confining runtime bypass paths through capsule mediation, MIRAGE-OG++ demonstrates that practical agent safety requires verifiable control of effect execution, not only improved risk classification.
+Agent systems now fail primarily at execution boundaries, not merely content boundaries: adversaries can weaponize prompts and skill artifacts to trigger real-world side effects, exfiltrate secrets, and bypass superficial guardrails. SecureClaw reframes this as a systems enforcement problem by introducing a minimal trusted execution line where untrusted runtimes access only a single high-level action API, policy evaluation is outsourced through privacy-preserving two-server PIR and MPC, and side effects are committed exclusively through an executor that verifies dual cryptographic proofs and fail-closes otherwise. By additionally transaction-gating skill enablement and confining runtime bypass paths through capsule mediation, SecureClaw demonstrates that practical agent safety requires verifiable control of effect execution, not only improved risk classification.
 
 ---
 
@@ -295,38 +297,38 @@ Agent systems now fail primarily at execution boundaries, not merely content bou
 
 Interpretation protocol for rigor:
 
-- `✅`: capability is explicitly documented as first-class (for Codex/Claude) or implemented and evidenced in this repo (for MIRAGE-OG++).
-- `◐`: partially present or achievable via configuration, but not equivalent to MIRAGE’s cryptographic enforcement semantics.
+- `✅`: capability is explicitly documented as first-class (for Codex/Claude) or implemented and evidenced in this repo (for SecureClaw).
+- `◐`: partially present or achievable via configuration, but not equivalent to SecureClaw’s cryptographic enforcement semantics.
 - `❌`: not publicly documented as a built-in capability in the cited sources.
 
-| Capability | MIRAGE-OG++ (this repo) | OpenAI Codex built-ins | Claude Code built-ins | Evidence basis |
+| Capability | SecureClaw (this repo) | OpenAI Codex built-ins | Claude Code built-ins | Evidence basis |
 |---|---|---|---|---|
-| OS/runtime confinement + approval gating for agent actions | ✅ | ✅ | ✅ | MIRAGE capsule+gateway flow; Codex sandbox+approval layers; Claude permission architecture and sandboxed bash. |
-| Network restricted by default in local workflow | ◐ | ✅ | ✅ | MIRAGE can enforce netless behavior when capsule/UDS profile is enabled (recommended path), but this is deployment-config dependent; Codex local defaults are network-off; Claude network requests require approval by default. |
-| Admin/organization policy constraints for local agent config | ◐ | ✅ | ◐ | Codex has `requirements.toml` and managed/cloud requirements; Claude docs mention server-managed settings; MIRAGE currently has policy config but not full enterprise config layering. |
-| MCP server/tool allowlist controls | ◐ | ✅ | ✅ | Codex supports MCP identity allowlist and tool allow/deny controls; Claude supports allowed MCP servers and permission config; MIRAGE currently enforces gateway capability/policy but not a full MCP identity-policy plane at parity. |
-| Cryptographic dual authorization proof required before side effects | ✅ | ❌ | ❌ | MIRAGE executor verifies dual proofs (`P0/P1`) and binding metadata; no equivalent cryptographic dual-proof requirement is documented in Codex/Claude built-ins. |
-| Independent executor re-verification (gateway cannot unilaterally execute effects) | ✅ | ❌ | ❌ | MIRAGE has explicit gateway/executor split with fail-closed proof checks; this split is not documented as a built-in primitive in Codex/Claude. |
-| Transactional `PREVIEW -> COMMIT` with `tx_id` and canonical request hash binding | ✅ | ❌ | ❌ | Implemented in MIRAGE protocol and artifact traces; not documented as a native transactional side-effect protocol in Codex/Claude docs. |
-| 2-server PIR (DPF/FSS) membership checks for policy outsourcing privacy | ✅ | ❌ | ❌ | MIRAGE policy queries use PIR shares over bitset DB; no PIR/FSS policy outsourcing path is documented in Codex/Claude built-ins. |
-| Single-auditor transcript privacy against policy DB observer | ✅ | ❌ | ❌ | MIRAGE leakage evaluation reports reduced single-server inference; no equivalent privacy guarantee is documented in Codex/Claude built-ins. |
-| Handle-first secret release with explicit declassification gate | ✅ | ❌ | ❌ | MIRAGE returns opaque handles for sensitive reads and gates declassification; Codex/Claude docs focus on permissions/sandboxing, not handle-typed secret semantics. |
-| Skill install/enable treated as a transaction-gated side effect | ✅ | ❌ | ❌ | MIRAGE skill ingress path includes policy check and commit proof before enable; not documented as a default install transaction primitive in Codex/Claude. |
-| Per-skill workload identity projection for least privilege (`skill:<digest>`) | ✅ | ❌ | ❌ | MIRAGE mints session-bound workload tokens and caller override; no matching built-in mechanism is documented in cited Codex/Claude docs. |
-| Artifact-level ablations showing bypass reappears when NBE layer is removed | ✅ | ❌ | ❌ | MIRAGE artifact includes no-capsule and no-NBE baselines; comparable cryptographic ablation evidence is not part of Codex/Claude product security docs. |
+| OS/runtime confinement + approval gating for agent actions | ✅ | ✅ | ✅ | SecureClaw capsule+gateway flow; Codex sandbox+approval layers; Claude permission architecture and sandboxed bash. |
+| Network restricted by default in local workflow | ◐ | ✅ | ✅ | SecureClaw can enforce netless behavior when capsule/UDS profile is enabled (recommended path), but this is deployment-config dependent; Codex local defaults are network-off; Claude network requests require approval by default. |
+| Admin/organization policy constraints for local agent config | ◐ | ✅ | ◐ | Codex has `requirements.toml` and managed/cloud requirements; Claude docs mention server-managed settings; SecureClaw currently has policy config but not full enterprise config layering. |
+| MCP server/tool allowlist controls | ◐ | ✅ | ✅ | Codex supports MCP identity allowlist and tool allow/deny controls; Claude supports allowed MCP servers and permission config; SecureClaw currently enforces gateway capability/policy but not a full MCP identity-policy plane at parity. |
+| Cryptographic dual authorization proof required before side effects | ✅ | ❌ | ❌ | SecureClaw executor verifies dual proofs (`P0/P1`) and binding metadata; no equivalent cryptographic dual-proof requirement is documented in Codex/Claude built-ins. |
+| Independent executor re-verification (gateway cannot unilaterally execute effects) | ✅ | ❌ | ❌ | SecureClaw has explicit gateway/executor split with fail-closed proof checks; this split is not documented as a built-in primitive in Codex/Claude. |
+| Transactional `PREVIEW -> COMMIT` with `tx_id` and canonical request hash binding | ✅ | ❌ | ❌ | Implemented in SecureClaw protocol and artifact traces; not documented as a native transactional side-effect protocol in Codex/Claude docs. |
+| 2-server PIR (DPF/FSS) membership checks for policy outsourcing privacy | ✅ | ❌ | ❌ | SecureClaw policy queries use PIR shares over bitset DB; no PIR/FSS policy outsourcing path is documented in Codex/Claude built-ins. |
+| Single-auditor transcript privacy against policy DB observer | ✅ | ❌ | ❌ | SecureClaw leakage evaluation reports reduced single-server inference; no equivalent privacy guarantee is documented in Codex/Claude built-ins. |
+| Handle-first secret release with explicit declassification gate | ✅ | ❌ | ❌ | SecureClaw returns opaque handles for sensitive reads and gates declassification; Codex/Claude docs focus on permissions/sandboxing, not handle-typed secret semantics. |
+| Skill install/enable treated as a transaction-gated side effect | ✅ | ❌ | ❌ | SecureClaw skill ingress path includes policy check and commit proof before enable; not documented as a default install transaction primitive in Codex/Claude. |
+| Per-skill workload identity projection for least privilege (`skill:<digest>`) | ✅ | ❌ | ❌ | SecureClaw mints session-bound workload tokens and caller override; no matching built-in mechanism is documented in cited Codex/Claude docs. |
+| Artifact-level ablations showing bypass reappears when NBE layer is removed | ✅ | ❌ | ❌ | SecureClaw artifact includes no-capsule and no-NBE baselines; comparable cryptographic ablation evidence is not part of Codex/Claude product security docs. |
 | Cloud isolated execution with provider-managed credentials proxy | ❌ | ✅ | ✅ | Codex cloud runs in isolated provider-managed containers; Claude web runs isolated VMs and documents scoped credential proxy + cleanup controls. |
-| Built-in cloud audit logging for cloud sessions | ◐ | ◐ | ✅ | Claude explicitly documents cloud audit logging; Codex documents logs/telemetry/session persistence knobs; MIRAGE currently has artifact and runtime logs but enterprise-grade unified audit plane is still evolving. |
+| Built-in cloud audit logging for cloud sessions | ◐ | ◐ | ✅ | Claude explicitly documents cloud audit logging; Codex documents logs/telemetry/session persistence knobs; SecureClaw currently has artifact and runtime logs but enterprise-grade unified audit plane is still evolving. |
 
 ### Why this difference matters for the paper claim
 
-Codex/Claude built-ins are strong operational safety controls, but they are primarily permission/sandbox governance primitives. MIRAGE-OG++ targets an orthogonal guarantee class: cryptographically verifiable non-bypassability and privacy-preserving outsourced policy evaluation for side-effect authorization. In short, these are complementary layers, not mutually exclusive replacements.
+Codex/Claude built-ins are strong operational safety controls, but they are primarily permission/sandbox governance primitives. SecureClaw targets an orthogonal guarantee class: cryptographically verifiable non-bypassability and privacy-preserving outsourced policy evaluation for side-effect authorization. In short, these are complementary layers, not mutually exclusive replacements.
 
 ---
 
 ## 12. Sources for the Matrix
 
-- [MIRAGE-Impl] Repository modules and protocol flow: `gateway/`, `policy_server/`, `executor_server/`, `capsule/`, `integrations/openclaw_runner/`.
-- [MIRAGE-Art] Artifact evidence: `artifact_out/report.json`, `artifact_out/bench_fss.txt`, `artifact_out/bench_e2e.json`, `artifact_out/bench_e2e_rust.json`.
+- [SecureClaw-Impl] Repository modules and protocol flow: `gateway/`, `policy_server/`, `executor_server/`, `capsule/`, `integrations/openclaw_runner/`.
+- [SecureClaw-Art] Artifact evidence: `artifact_out/report.json`, `artifact_out/bench_fss.txt`, `artifact_out/bench_e2e.json`, `artifact_out/bench_e2e_rust.json`.
 - [OAI-Sec] OpenAI Codex Security: https://developers.openai.com/codex/security
 - [OAI-Config] OpenAI Codex Configuration Reference: https://developers.openai.com/codex/config-reference
 - [OAI-CLI] OpenAI Codex CLI Features: https://developers.openai.com/codex/cli/features
@@ -346,48 +348,48 @@ Important reading of this section:
 
 ### 13.1 Codex-related public cases
 
-| Case ID | Date (UTC) | Product / Affected Range | Public description (condensed) | Why this class matters for MIRAGE |
+| Case ID | Date (UTC) | Product / Affected Range | Public description (condensed) | Why this class matters for SecureClaw |
 |---|---|---|---|---|
-| C-01 | 2025-09-22 | `@openai/codex` `< 0.39.0` | Sandbox path-boundary bug could let model-generated cwd escape workspace boundary for writes/exec (`CVE-2025-59532`). | MIRAGE still requires dual commit proofs at executor, so side effects cannot be committed by runtime-only sandbox confusion. |
-| C-02 | 2025-08-13 | Codex CLI (community CVE record) | Unsafe symlink following in workspace-write mode could lead to arbitrary overwrite/RCE in malicious context (`CVE-2025-55345`). | MIRAGE blocks sensitive reads by handle-first + capability routing + executor proof checks; symlink-induced local reads do not directly grant egress. |
-| C-03 | 2025-07-25 | Codex CLI before `0.9.0` (community CVE record) | `rg` auto-approval issue with dangerous flags (`CVE-2025-54558`). | MIRAGE does not rely on command allowlists for final effect authorization; effect must pass PREVIEW->COMMIT + dual-proof executor. |
+| C-01 | 2025-09-22 | `@openai/codex` `< 0.39.0` | Sandbox path-boundary bug could let model-generated cwd escape workspace boundary for writes/exec (`CVE-2025-59532`). | SecureClaw still requires dual commit proofs at executor, so side effects cannot be committed by runtime-only sandbox confusion. |
+| C-02 | 2025-08-13 | Codex CLI (community CVE record) | Unsafe symlink following in workspace-write mode could lead to arbitrary overwrite/RCE in malicious context (`CVE-2025-55345`). | SecureClaw blocks sensitive reads by handle-first + capability routing + executor proof checks; symlink-induced local reads do not directly grant egress. |
+| C-03 | 2025-07-25 | Codex CLI before `0.9.0` (community CVE record) | `rg` auto-approval issue with dangerous flags (`CVE-2025-54558`). | SecureClaw does not rely on command allowlists for final effect authorization; effect must pass PREVIEW->COMMIT + dual-proof executor. |
 
 ### 13.2 Claude Code public cases (selected subset)
 
-| Case ID | Date (UTC) | Product / Affected Range | Public description (condensed) | Why this class matters for MIRAGE |
+| Case ID | Date (UTC) | Product / Affected Range | Public description (condensed) | Why this class matters for SecureClaw |
 |---|---|---|---|---|
-| A-01 | 2025-08-16 | `claude-code` `< 1.0.4` | Overly permissive allowlist enabled prompt-chain file read + network exfil without confirm (`CVE-2025-55284`). | MIRAGE returns opaque handles for sensitive reads and blocks high-sensitivity handle exfil by policy. |
-| A-02 | 2025-08-05 | `claude-code` `< 1.0.20` | `echo` parsing bug could bypass approval prompt (`CVE-2025-54795`). | MIRAGE effect gate is cryptographic and executor-enforced, not prompt-only approval semantics. |
-| A-03 | 2025-09-10 | `claude-code` `< 1.0.105` | `rg` parsing bug allowed approval bypass (`CVE-2025-58764`). | Same reason: command parser weakness does not grant side-effect commit in MIRAGE. |
-| A-04 | 2025-12-03 | `claude-code` `< 1.0.93` | Command validation bypass via `$IFS`/short flags (`CVE-2025-66032`). | MIRAGE final authorization depends on dual proofs and request hash binding. |
-| A-05 | 2025-10-03 | `claude-code` `< 1.0.120` | Permission-deny bypass through symlinks (`CVE-2025-59829`). | MIRAGE adds independent executor check and handle binding; local path tricks alone cannot authorize egress effects. |
-| A-06 | 2025-10-03 | `claude-code` `< 1.0.111` | Startup trust dialog bug enabled pre-trust command execution (`CVE-2025-59536`). | MIRAGE skill/runtime path can still be confined by capsule; side effects require gateway/executor proof chain. |
-| A-07 | 2025-11-19 | `claude-code` `< 1.0.39` | Yarn plugin startup path could execute code before trust dialog (`CVE-2025-65099`). | MIRAGE treats skill install as transaction-gated side effect, not auto-trusted package load. |
-| A-08 | 2025-06-24 | `claude-code` `>=0.2.116,<1.0.24` | IDE extension allowed unauthorized websocket origins (`CVE-2025-52882`). | MIRAGE recommends UDS + token-bound gateway path and independent effect executor checks. |
-| A-09 | 2026-01-21 | `claude-code` `< 2.0.65` | Malicious repo env config could leak API key pre-trust (`CVE-2026-21852`). | MIRAGE handle-first and session/caller binding constrain data release and side-effect issuance. |
-| A-10 | 2026-02-03 | `claude-code` `< 1.0.111` | Trusted-domain validation using prefix logic could allow attacker domains (`CVE-2026-24052`). | MIRAGE egress policy checks destination + PIR-backed IOC/allowlist before commit. |
+| A-01 | 2025-08-16 | `claude-code` `< 1.0.4` | Overly permissive allowlist enabled prompt-chain file read + network exfil without confirm (`CVE-2025-55284`). | SecureClaw returns opaque handles for sensitive reads and blocks high-sensitivity handle exfil by policy. |
+| A-02 | 2025-08-05 | `claude-code` `< 1.0.20` | `echo` parsing bug could bypass approval prompt (`CVE-2025-54795`). | SecureClaw effect gate is cryptographic and executor-enforced, not prompt-only approval semantics. |
+| A-03 | 2025-09-10 | `claude-code` `< 1.0.105` | `rg` parsing bug allowed approval bypass (`CVE-2025-58764`). | Same reason: command parser weakness does not grant side-effect commit in SecureClaw. |
+| A-04 | 2025-12-03 | `claude-code` `< 1.0.93` | Command validation bypass via `$IFS`/short flags (`CVE-2025-66032`). | SecureClaw final authorization depends on dual proofs and request hash binding. |
+| A-05 | 2025-10-03 | `claude-code` `< 1.0.120` | Permission-deny bypass through symlinks (`CVE-2025-59829`). | SecureClaw adds independent executor check and handle binding; local path tricks alone cannot authorize egress effects. |
+| A-06 | 2025-10-03 | `claude-code` `< 1.0.111` | Startup trust dialog bug enabled pre-trust command execution (`CVE-2025-59536`). | SecureClaw skill/runtime path can still be confined by capsule; side effects require gateway/executor proof chain. |
+| A-07 | 2025-11-19 | `claude-code` `< 1.0.39` | Yarn plugin startup path could execute code before trust dialog (`CVE-2025-65099`). | SecureClaw treats skill install as transaction-gated side effect, not auto-trusted package load. |
+| A-08 | 2025-06-24 | `claude-code` `>=0.2.116,<1.0.24` | IDE extension allowed unauthorized websocket origins (`CVE-2025-52882`). | SecureClaw recommends UDS + token-bound gateway path and independent effect executor checks. |
+| A-09 | 2026-01-21 | `claude-code` `< 2.0.65` | Malicious repo env config could leak API key pre-trust (`CVE-2026-21852`). | SecureClaw handle-first and session/caller binding constrain data release and side-effect issuance. |
+| A-10 | 2026-02-03 | `claude-code` `< 1.0.111` | Trusted-domain validation using prefix logic could allow attacker domains (`CVE-2026-24052`). | SecureClaw egress policy checks destination + PIR-backed IOC/allowlist before commit. |
 
 Additional recent Claude cases (same vulnerability families):
 
-| Case ID | Date (UTC) | Product / Affected Range | Public description (condensed) | Why this class matters for MIRAGE |
+| Case ID | Date (UTC) | Product / Affected Range | Public description (condensed) | Why this class matters for SecureClaw |
 |---|---|---|---|---|
-| A-11 | 2026-02-06 | `claude-code` `< 2.1.7` | Deny-rule bypass through symbolic links (`CVE-2026-25724`). | MIRAGE adds executor-side proof gating and handle-bound data flow. |
-| A-12 | 2026-02-06 | `claude-code` `< 2.0.55` | Piped `sed` command injection bypassed write restrictions (`CVE-2026-25723`). | MIRAGE does not grant write/egress side effects without dual proofs. |
-| A-13 | 2026-02-06 | `claude-code` `< 2.0.57` | `cd` + write path validation weakness enabled protected writes (`CVE-2026-25722`). | MIRAGE separates runtime command parsing from final effect authorization. |
-| A-14 | 2026-02-03 | `claude-code` `< 2.0.72` | `find` command injection could bypass approval (`CVE-2026-24887`). | MIRAGE fail-closes at executor without consistent commit evidence. |
-| A-15 | 2026-02-03 | `claude-code` `< 2.0.74` | ZSH clobber parsing flaw allowed arbitrary writes (`CVE-2026-24053`). | MIRAGE’s effect gate remains independent of shell parsing correctness. |
-| A-16 | 2025-11-21 | `claude-code` `< 2.0.31` | `sed` validation bypass allowed arbitrary file writes (`CVE-2025-64755`). | MIRAGE constrains side effects by transaction and capability projection. |
-| A-17 | 2025-09-24 | `claude-code` `< 1.0.39` | Plugin autoloading (Yarn 2+) could execute before trust (`CVE-2025-59828`). | MIRAGE skill enablement is transaction-gated and auditable. |
-| A-18 | 2025-09-10 | `claude-code` `< 1.0.105` | Malicious git email could trigger pre-trust execution (`CVE-2025-59041`). | MIRAGE combines capsule containment with dual-proof side-effect commit. |
+| A-11 | 2026-02-06 | `claude-code` `< 2.1.7` | Deny-rule bypass through symbolic links (`CVE-2026-25724`). | SecureClaw adds executor-side proof gating and handle-bound data flow. |
+| A-12 | 2026-02-06 | `claude-code` `< 2.0.55` | Piped `sed` command injection bypassed write restrictions (`CVE-2026-25723`). | SecureClaw does not grant write/egress side effects without dual proofs. |
+| A-13 | 2026-02-06 | `claude-code` `< 2.0.57` | `cd` + write path validation weakness enabled protected writes (`CVE-2026-25722`). | SecureClaw separates runtime command parsing from final effect authorization. |
+| A-14 | 2026-02-03 | `claude-code` `< 2.0.72` | `find` command injection could bypass approval (`CVE-2026-24887`). | SecureClaw fail-closes at executor without consistent commit evidence. |
+| A-15 | 2026-02-03 | `claude-code` `< 2.0.74` | ZSH clobber parsing flaw allowed arbitrary writes (`CVE-2026-24053`). | SecureClaw’s effect gate remains independent of shell parsing correctness. |
+| A-16 | 2025-11-21 | `claude-code` `< 2.0.31` | `sed` validation bypass allowed arbitrary file writes (`CVE-2025-64755`). | SecureClaw constrains side effects by transaction and capability projection. |
+| A-17 | 2025-09-24 | `claude-code` `< 1.0.39` | Plugin autoloading (Yarn 2+) could execute before trust (`CVE-2025-59828`). | SecureClaw skill enablement is transaction-gated and auditable. |
+| A-18 | 2025-09-10 | `claude-code` `< 1.0.105` | Malicious git email could trigger pre-trust execution (`CVE-2025-59041`). | SecureClaw combines capsule containment with dual-proof side-effect commit. |
 
 ### 13.3 OpenClaw public cases
 
-| Case ID | Date (UTC) | Product / Affected Range | Public description (condensed) | Why this class matters for MIRAGE |
+| Case ID | Date (UTC) | Product / Affected Range | Public description (condensed) | Why this class matters for SecureClaw |
 |---|---|---|---|---|
-| O-01 | 2026-02-06 | `openclaw` `< 2026.1.20` | Unauthenticated local client could abuse WebSocket `config.apply` and unsafe `cliPath` for local RCE (`CVE-2026-25593`). | MIRAGE side effects are executor-gated with dual proofs; config/control-plane compromise alone does not mint valid commit evidence. |
-| O-02 | 2026-02-04 | `openclaw` `< 2026.1.30` | `MEDIA:/path` extraction could read arbitrary local files (`CVE-2026-25475`). | MIRAGE sensitive reads return high-sensitivity handles and block direct egress unless declassification + policy commit conditions pass. |
-| O-03 | 2026-02-02 | VirusTotal Blog | VirusTotal reports it analyzed **3,016+** OpenClaw skills, with **hundreds** actively malicious, and highlights a ClawHub publisher with **314** malicious skills (illustrative supply-chain concentration). | MIRAGE moves skill enablement into PREVIEW->COMMIT with IOC and suspicious-pattern checks. |
-| O-04 | OpenClaw docs | Security / threat model | OpenClaw docs describe a threat model for running an AI gateway with shell access and warn that hardening is not a perfect boundary. | MIRAGE adds an orthogonal cryptographic effect gate beyond sandbox hardening assumptions. |
+| O-01 | 2026-02-06 | `openclaw` `< 2026.1.20` | Unauthenticated local client could abuse WebSocket `config.apply` and unsafe `cliPath` for local RCE (`CVE-2026-25593`). | SecureClaw side effects are executor-gated with dual proofs; config/control-plane compromise alone does not mint valid commit evidence. |
+| O-02 | 2026-02-04 | `openclaw` `< 2026.1.30` | `MEDIA:/path` extraction could read arbitrary local files (`CVE-2026-25475`). | SecureClaw sensitive reads return high-sensitivity handles and block direct egress unless declassification + policy commit conditions pass. |
+| O-03 | 2026-02-02 | VirusTotal Blog | VirusTotal reports it analyzed **3,016+** OpenClaw skills, with **hundreds** actively malicious, and highlights a ClawHub publisher with **314** malicious skills (illustrative supply-chain concentration). | SecureClaw moves skill enablement into PREVIEW->COMMIT with IOC and suspicious-pattern checks. |
+| O-04 | OpenClaw docs | Security / threat model | OpenClaw docs describe a threat model for running an AI gateway with shell access and warn that hardening is not a perfect boundary. | SecureClaw adds an orthogonal cryptographic effect gate beyond sandbox hardening assumptions. |
 
 ---
 
@@ -442,9 +444,9 @@ Generated artifacts used below:
 
 ---
 
-## 15. Case-to-Control Mapping (What MIRAGE adds beyond built-ins)
+## 15. Case-to-Control Mapping (What SecureClaw adds beyond built-ins)
 
-The repeated pattern across incidents C-01..O-04 is that bypasses often occur in parser/allowlist/path/trust-dialog layers. MIRAGE’s distinct contribution is that effect execution is independently contingent on cryptographic evidence:
+The repeated pattern across incidents C-01..O-04 is that bypasses often occur in parser/allowlist/path/trust-dialog layers. SecureClaw’s distinct contribution is that effect execution is independently contingent on cryptographic evidence:
 
 1. `PREVIEW -> COMMIT` generates transaction-bound proof material.
 2. Executor verifies dual server commit proofs with request hash binding.

@@ -1,9 +1,11 @@
-# MIRAGE-OG++：动机、问题定义、目标与方案（中文论文级草稿）
+# SecureClaw：动机、问题定义、目标与方案（中文论文级草稿）
+
+SecureClaw 在仓库早期历史中曾被称为 SecureClaw-OG++。为保证复现兼容，artifact 中仍保留少量历史命名。
 
 ## 摘要级结论
 
 现代 Agent 系统的核心安全缺口，不在于“是否能识别风险”，而在于“是否能**不可绕过地约束副作用执行**”。  
-MIRAGE-OG++ 的核心思想是把信任从“模型是否听话”迁移到“系统执行线是否可验证”：
+SecureClaw 的核心思想是把信任从“模型是否听话”迁移到“系统执行线是否可验证”：
 
 1. 不可信运行时只暴露一个高层动作面（`act`）。
 2. 策略外包采用 2-server PIR（DPF/FSS）降低单点可见性。
@@ -38,7 +40,7 @@ MIRAGE-OG++ 的核心思想是把信任从“模型是否听话”迁移到“�
 - 集中策略提高可运营性；
 - 集中明文可见性带来隐私泄露。
 
-MIRAGE-OG++ 的动机是把该矛盾转化为“系统+密码学”的可落地问题：  
+SecureClaw 的动机是把该矛盾转化为“系统与密码学”的可落地问题：  
 在不暴露单点明文查询的前提下，仍保持策略判断与执行约束能力。
 
 ### 1.3 为什么“不可绕过执行线”是关键要求
@@ -290,7 +292,7 @@ E2E 吞吐：
 
 ## 10. 可直接放论文的一段中文总述
 
-Agent 系统的主要安全风险正在从内容层面迁移到执行层面：攻击者可通过 prompt 或 skill 文档驱动模型触发真实副作用、外泄敏感数据并绕过表层防护。MIRAGE-OG++ 将该问题重构为系统执行约束问题：不可信运行时仅能通过统一高层动作接口表达意图，策略判断通过双策略服务上的隐私保护计算完成，副作用提交则必须由独立执行器在验证双重加密证明后执行，并在不满足条件时 fail-closed。系统进一步将 skill install/enable 纳入事务化控制，并通过 capsule 约束本地直接绕过路径。该设计表明，面向真实 Agent 生态的安全性不仅依赖风险识别能力，更依赖可验证、不可绕过的执行线。
+Agent 系统的主要安全风险正在从内容层面迁移到执行层面：攻击者可通过 prompt 或 skill 文档驱动模型触发真实副作用、外泄敏感数据并绕过表层防护。SecureClaw 将该问题重构为系统执行约束问题：不可信运行时仅能通过统一高层动作接口表达意图，策略判断通过双策略服务上的隐私保护计算完成，副作用提交则必须由独立执行器在验证双重加密证明后执行，并在不满足条件时 fail-closed。系统进一步将 skill install 或 enable 纳入事务化控制，并通过 capsule 约束本地直接绕过路径。该设计表明，面向真实 Agent 生态的安全性不仅依赖风险识别能力，更依赖可验证、不可绕过的执行线。
 
 ---
 
@@ -298,40 +300,40 @@ Agent 系统的主要安全风险正在从内容层面迁移到执行层面：�
 
 为保证严谨性，判定口径如下：
 
-- `✅`：对 Codex/Claude 而言为官方文档明确声明的一等能力；对 MIRAGE-OG++ 而言为仓库内已实现并有 artifact 证据支撑。
-- `◐`：部分具备或可通过配置实现，但语义上不等价于 MIRAGE 的加密不可绕过执行约束。
+- `✅`：对 Codex 或 Claude 而言为官方文档明确声明的一等能力。对 SecureClaw 而言为仓库内已实现并有 artifact 证据支撑。
+- `◐`：部分具备或可通过配置实现，但语义上不等价于 SecureClaw 的加密不可绕过执行约束。
 - `❌`：在引用资料中未见该能力作为内置机制被明确声明。
 
-| 能力项 | MIRAGE-OG++（本项目） | OpenAI Codex 内置 | Claude Code 内置 | 证据与说明 |
+| 能力项 | SecureClaw（本项目） | OpenAI Codex 内置 | Claude Code 内置 | 证据与说明 |
 |---|---|---|---|---|
-| 运行时隔离与操作审批门控 | ✅ | ✅ | ✅ | MIRAGE 通过 capsule+gateway 执行线；Codex 文档说明 sandbox/approval 机制；Claude 文档说明 permission 架构与 sandboxed bash。 |
-| 本地工作流默认限制网络 | ◐ | ✅ | ✅ | MIRAGE 在启用 capsule/UDS 的 netless 配置时可实现（推荐路径），但是否默认取决于部署配置；Codex 本地默认网络关闭；Claude 默认网络请求需审批。 |
-| 组织/管理员对本地代理配置施加约束 | ◐ | ✅ | ◐ | Codex 有 `requirements.toml` 与托管 requirements；Claude 文档提到 server-managed settings；MIRAGE 目前有策略配置但未形成完整企业级配置治理面。 |
-| MCP 服务与工具白名单控制 | ◐ | ✅ | ✅ | Codex 支持 MCP 身份 allowlist 与工具 allow/deny；Claude 支持允许的 MCP servers 与权限配置；MIRAGE 当前主要在 gateway 做能力/策略控制，尚未做到对等的完整 MCP 身份策略平面。 |
-| 副作用执行前必须具备双策略加密证明 | ✅ | ❌ | ❌ | MIRAGE Executor 验证 `P0/P1` 双证明与绑定元数据；Codex/Claude 文档未声明等价的双证明提交机制。 |
-| 独立 Executor 二次验签（网关不能单点放行副作用） | ✅ | ❌ | ❌ | MIRAGE 明确分离 gateway/executor 并 fail-closed；Codex/Claude 文档未声明该原语。 |
-| 事务化 `PREVIEW -> COMMIT`（含 `tx_id` 与请求哈希绑定） | ✅ | ❌ | ❌ | MIRAGE 协议与 artifact 可验证；Codex/Claude 文档未声明原生事务化副作用提交流程。 |
-| 基于 2-server PIR（DPF/FSS）的策略外包 membership 查询 | ✅ | ❌ | ❌ | MIRAGE 使用 PIR share + bitset 评估；Codex/Claude 文档未见 PIR/FSS 外包策略机制。 |
-| 单审计方视角的 transcript 隐私（难还原具体查询身份） | ✅ | ❌ | ❌ | MIRAGE 有 leakage 对照实验；Codex/Claude 文档未声明同类单方可见性隐私保证。 |
-| Handle-first 敏感数据流与显式去密级门控 | ✅ | ❌ | ❌ | MIRAGE 对敏感读取返回 handle 并对去密级动作强制约束；Codex/Claude 文档侧重权限与沙箱，不是 handle 语义执行模型。 |
-| Skill 安装/启用纳入事务化副作用门控 | ✅ | ❌ | ❌ | MIRAGE skill ingress 需要 check+commit 证明后启用；Codex/Claude 文档未声明默认等价机制。 |
-| per-skill workload identity（`skill:<digest>`）最小权限投影 | ✅ | ❌ | ❌ | MIRAGE 通过 session 绑定 token 覆写 caller；Codex/Claude 引用资料未声明同类内置能力。 |
-| 通过消融实验证明“移除 NBE 层即可重新绕过” | ✅ | ❌ | ❌ | MIRAGE artifact 含 no-capsule/no-NBE 基线；Codex/Claude 产品文档不以该类密码学消融为主要输出。 |
+| 运行时隔离与操作审批门控 | ✅ | ✅ | ✅ | SecureClaw 通过 capsule+gateway 执行线；Codex 文档说明 sandbox/approval 机制；Claude 文档说明 permission 架构与 sandboxed bash。 |
+| 本地工作流默认限制网络 | ◐ | ✅ | ✅ | SecureClaw 在启用 capsule/UDS 的 netless 配置时可实现（推荐路径），但是否默认取决于部署配置；Codex 本地默认网络关闭；Claude 默认网络请求需审批。 |
+| 组织/管理员对本地代理配置施加约束 | ◐ | ✅ | ◐ | Codex 有 `requirements.toml` 与托管 requirements；Claude 文档提到 server-managed settings；SecureClaw 目前有策略配置但未形成完整企业级配置治理面。 |
+| MCP 服务与工具白名单控制 | ◐ | ✅ | ✅ | Codex 支持 MCP 身份 allowlist 与工具 allow/deny；Claude 支持允许的 MCP servers 与权限配置；SecureClaw 当前主要在 gateway 做能力/策略控制，尚未做到对等的完整 MCP 身份策略平面。 |
+| 副作用执行前必须具备双策略加密证明 | ✅ | ❌ | ❌ | SecureClaw Executor 验证 `P0/P1` 双证明与绑定元数据；Codex/Claude 文档未声明等价的双证明提交机制。 |
+| 独立 Executor 二次验签（网关不能单点放行副作用） | ✅ | ❌ | ❌ | SecureClaw 明确分离 gateway/executor 并 fail-closed；Codex/Claude 文档未声明该原语。 |
+| 事务化 `PREVIEW -> COMMIT`（含 `tx_id` 与请求哈希绑定） | ✅ | ❌ | ❌ | SecureClaw 协议与 artifact 可验证；Codex/Claude 文档未声明原生事务化副作用提交流程。 |
+| 基于 2-server PIR（DPF/FSS）的策略外包 membership 查询 | ✅ | ❌ | ❌ | SecureClaw 使用 PIR share + bitset 评估；Codex/Claude 文档未见 PIR/FSS 外包策略机制。 |
+| 单审计方视角的 transcript 隐私（难还原具体查询身份） | ✅ | ❌ | ❌ | SecureClaw 有 leakage 对照实验；Codex/Claude 文档未声明同类单方可见性隐私保证。 |
+| Handle-first 敏感数据流与显式去密级门控 | ✅ | ❌ | ❌ | SecureClaw 对敏感读取返回 handle 并对去密级动作强制约束；Codex/Claude 文档侧重权限与沙箱，不是 handle 语义执行模型。 |
+| Skill 安装/启用纳入事务化副作用门控 | ✅ | ❌ | ❌ | SecureClaw skill ingress 需要 check+commit 证明后启用；Codex/Claude 文档未声明默认等价机制。 |
+| per-skill workload identity（`skill:<digest>`）最小权限投影 | ✅ | ❌ | ❌ | SecureClaw 通过 session 绑定 token 覆写 caller；Codex/Claude 引用资料未声明同类内置能力。 |
+| 通过消融实验证明“移除 NBE 层即可重新绕过” | ✅ | ❌ | ❌ | SecureClaw artifact 含 no-capsule/no-NBE 基线；Codex/Claude 产品文档不以该类密码学消融为主要输出。 |
 | 云端隔离执行与厂商托管凭据代理 | ❌ | ✅ | ✅ | Codex 云端在隔离容器执行；Claude Web 运行于隔离 VM，并文档化了受限凭据代理与清理机制。 |
-| 云端会话审计日志内置支持 | ◐ | ◐ | ✅ | Claude 文档明确 cloud audit logging；Codex 文档包含日志/遥测/会话持久化控制；MIRAGE 当前已有运行日志与 artifact 记录，但企业级统一审计面仍在完善。 |
+| 云端会话审计日志内置支持 | ◐ | ◐ | ✅ | Claude 文档明确 cloud audit logging；Codex 文档包含日志/遥测/会话持久化控制；SecureClaw 当前已有运行日志与 artifact 记录，但企业级统一审计面仍在完善。 |
 
 ### 这组差异对论文主张的意义
 
 Codex/Claude 的内置能力在工程运维层面很强，核心是“权限+沙箱+审批治理”；  
-MIRAGE-OG++ 解决的是另一个正交问题：对副作用授权做可加密验证、可审计的不可绕过执行约束，并在策略外包时提供单点可见性隐私。  
+SecureClaw 解决的是另一个正交问题：对副作用授权做可加密验证、可审计的不可绕过执行约束，并在策略外包时提供单点可见性隐私。  
 因此三者关系是“可叠加互补”，不是“互相替代”。
 
 ---
 
 ## 12. 矩阵引用来源
 
-- [MIRAGE-Impl] 仓库实现入口：`gateway/`、`policy_server/`、`executor_server/`、`capsule/`、`integrations/openclaw_runner/`。
-- [MIRAGE-Art] 工件结果：`artifact_out/report.json`、`artifact_out/bench_fss.txt`、`artifact_out/bench_e2e.json`、`artifact_out/bench_e2e_rust.json`。
+- [SecureClaw-Impl] 仓库实现入口：`gateway/`、`policy_server/`、`executor_server/`、`capsule/`、`integrations/openclaw_runner/`。
+- [SecureClaw-Art] 工件结果：`artifact_out/report.json`、`artifact_out/bench_fss.txt`、`artifact_out/bench_e2e.json`、`artifact_out/bench_e2e_rust.json`。
 - [OAI-Sec] OpenAI Codex Security：https://developers.openai.com/codex/security
 - [OAI-Config] OpenAI Codex Configuration Reference：https://developers.openai.com/codex/config-reference
 - [OAI-CLI] OpenAI Codex CLI Features：https://developers.openai.com/codex/cli/features
@@ -351,48 +353,48 @@ MIRAGE-OG++ 解决的是另一个正交问题：对副作用授权做可加密�
 
 ### 13.1 Codex 相关公开案例
 
-| 案例 ID | 时间（UTC） | 产品 / 影响版本 | 公开描述（摘要） | 对 MIRAGE 的启示 |
+| 案例 ID | 时间（UTC） | 产品 / 影响版本 | 公开描述（摘要） | 对 SecureClaw 的启示 |
 |---|---|---|---|---|
-| C-01 | 2025-09-22 | `@openai/codex` `< 0.39.0` | 沙箱路径边界逻辑缺陷，模型生成 cwd 可越过工作区边界，导致越界写入/执行（`CVE-2025-59532`）。 | MIRAGE 最终副作用仍要过 dual-proof executor；运行时沙箱混淆不等于可提交副作用。 |
-| C-02 | 2025-08-13 | Codex CLI（社区 CVE 记录） | workspace-write 模式下 symlink 跟随问题可导致覆盖写入/潜在 RCE（`CVE-2025-55345`）。 | MIRAGE 通过 handle-first + capability + executor 校验，避免“本地读到即外发”。 |
-| C-03 | 2025-07-25 | Codex CLI `< 0.9.0`（社区 CVE 记录） | `rg` 自动批准存在危险 flag 覆盖问题（`CVE-2025-54558`）。 | MIRAGE 不把最终安全性建立在命令 allowlist 上，而是建立在 PREVIEW->COMMIT + 双证明执行。 |
+| C-01 | 2025-09-22 | `@openai/codex` `< 0.39.0` | 沙箱路径边界逻辑缺陷，模型生成 cwd 可越过工作区边界，导致越界写入/执行（`CVE-2025-59532`）。 | SecureClaw 最终副作用仍要过 dual-proof executor；运行时沙箱混淆不等于可提交副作用。 |
+| C-02 | 2025-08-13 | Codex CLI（社区 CVE 记录） | workspace-write 模式下 symlink 跟随问题可导致覆盖写入/潜在 RCE（`CVE-2025-55345`）。 | SecureClaw 通过 handle-first + capability + executor 校验，避免“本地读到即外发”。 |
+| C-03 | 2025-07-25 | Codex CLI `< 0.9.0`（社区 CVE 记录） | `rg` 自动批准存在危险 flag 覆盖问题（`CVE-2025-54558`）。 | SecureClaw 不把最终安全性建立在命令 allowlist 上，而是建立在 PREVIEW->COMMIT + 双证明执行。 |
 
 ### 13.2 Claude Code 公开案例（节选）
 
-| 案例 ID | 时间（UTC） | 产品 / 影响版本 | 公开描述（摘要） | 对 MIRAGE 的启示 |
+| 案例 ID | 时间（UTC） | 产品 / 影响版本 | 公开描述（摘要） | 对 SecureClaw 的启示 |
 |---|---|---|---|---|
-| A-01 | 2025-08-16 | `claude-code` `< 1.0.4` | 过宽 allowlist 使提示注入链可“读文件+外发”绕过确认（`CVE-2025-55284`）。 | MIRAGE 对敏感读默认只返回句柄，高敏句柄外发直接阻断。 |
-| A-02 | 2025-08-05 | `claude-code` `< 1.0.20` | `echo` 命令解析错误可绕过审批（`CVE-2025-54795`）。 | MIRAGE 副作用授权是加密证明驱动，不依赖单点审批语义。 |
-| A-03 | 2025-09-10 | `claude-code` `< 1.0.105` | `rg` 解析错误可绕过审批（`CVE-2025-58764`）。 | 命令解析层失效时，MIRAGE 仍由 executor 二次验签兜底。 |
-| A-04 | 2025-12-03 | `claude-code` `< 1.0.93` | `$IFS`/短参数解析导致命令校验绕过并执行（`CVE-2025-66032`）。 | MIRAGE 绑定 `request_sha256` + 双策略 commit proofs。 |
-| A-05 | 2025-10-03 | `claude-code` `< 1.0.120` | deny 规则在 symlink 下可被绕过（`CVE-2025-59829`）。 | MIRAGE 通过独立 executor + handle 绑定降低路径绕过后果。 |
-| A-06 | 2025-10-03 | `claude-code` `< 1.0.111` | 启动 trust dialog 前可被诱导执行项目内代码（`CVE-2025-59536`）。 | MIRAGE 将 skill/运行时置于 capsule 与事务门控下，副作用仍需证明链。 |
-| A-07 | 2025-11-19 | `claude-code` `< 1.0.39` | Yarn 插件路径可在信任前触发执行（`CVE-2025-65099`）。 | MIRAGE 将 skill enable 视为事务副作用，不是“加载即信任”。 |
-| A-08 | 2025-06-24 | `claude-code` `>=0.2.116,<1.0.24` | IDE 扩展 WebSocket 可被任意来源连接（`CVE-2025-52882`）。 | MIRAGE 推荐 UDS + token 绑定传输，且最终由 executor 校验。 |
-| A-09 | 2026-01-21 | `claude-code` `< 2.0.65` | 恶意仓库环境配置可在信任前泄露 API key（`CVE-2026-21852`）。 | MIRAGE 对数据释放做 handle/caller/session 绑定与显式去密级门控。 |
-| A-10 | 2026-02-03 | `claude-code` `< 1.0.111` | trusted-domain 前缀校验可被伪域名绕过，触发自动请求（`CVE-2026-24052`）。 | MIRAGE 在 egress commit 前执行目的地策略与 IOC/allowlist 校验。 |
+| A-01 | 2025-08-16 | `claude-code` `< 1.0.4` | 过宽 allowlist 使提示注入链可“读文件+外发”绕过确认（`CVE-2025-55284`）。 | SecureClaw 对敏感读默认只返回句柄，高敏句柄外发直接阻断。 |
+| A-02 | 2025-08-05 | `claude-code` `< 1.0.20` | `echo` 命令解析错误可绕过审批（`CVE-2025-54795`）。 | SecureClaw 副作用授权是加密证明驱动，不依赖单点审批语义。 |
+| A-03 | 2025-09-10 | `claude-code` `< 1.0.105` | `rg` 解析错误可绕过审批（`CVE-2025-58764`）。 | 命令解析层失效时，SecureClaw 仍由 executor 二次验签兜底。 |
+| A-04 | 2025-12-03 | `claude-code` `< 1.0.93` | `$IFS`/短参数解析导致命令校验绕过并执行（`CVE-2025-66032`）。 | SecureClaw 绑定 `request_sha256` + 双策略 commit proofs。 |
+| A-05 | 2025-10-03 | `claude-code` `< 1.0.120` | deny 规则在 symlink 下可被绕过（`CVE-2025-59829`）。 | SecureClaw 通过独立 executor + handle 绑定降低路径绕过后果。 |
+| A-06 | 2025-10-03 | `claude-code` `< 1.0.111` | 启动 trust dialog 前可被诱导执行项目内代码（`CVE-2025-59536`）。 | SecureClaw 将 skill/运行时置于 capsule 与事务门控下，副作用仍需证明链。 |
+| A-07 | 2025-11-19 | `claude-code` `< 1.0.39` | Yarn 插件路径可在信任前触发执行（`CVE-2025-65099`）。 | SecureClaw 将 skill enable 视为事务副作用，不是“加载即信任”。 |
+| A-08 | 2025-06-24 | `claude-code` `>=0.2.116,<1.0.24` | IDE 扩展 WebSocket 可被任意来源连接（`CVE-2025-52882`）。 | SecureClaw 推荐 UDS + token 绑定传输，且最终由 executor 校验。 |
+| A-09 | 2026-01-21 | `claude-code` `< 2.0.65` | 恶意仓库环境配置可在信任前泄露 API key（`CVE-2026-21852`）。 | SecureClaw 对数据释放做 handle/caller/session 绑定与显式去密级门控。 |
+| A-10 | 2026-02-03 | `claude-code` `< 1.0.111` | trusted-domain 前缀校验可被伪域名绕过，触发自动请求（`CVE-2026-24052`）。 | SecureClaw 在 egress commit 前执行目的地策略与 IOC/allowlist 校验。 |
 
 补充的近期 Claude 案例（同类漏洞家族）：
 
-| 案例 ID | 时间（UTC） | 产品 / 影响版本 | 公开描述（摘要） | 对 MIRAGE 的启示 |
+| 案例 ID | 时间（UTC） | 产品 / 影响版本 | 公开描述（摘要） | 对 SecureClaw 的启示 |
 |---|---|---|---|---|
-| A-11 | 2026-02-06 | `claude-code` `< 2.1.7` | deny 规则可经 symlink 绕过（`CVE-2026-25724`）。 | MIRAGE 增加 executor 侧 proof 门控与 handle 绑定数据流。 |
-| A-12 | 2026-02-06 | `claude-code` `< 2.0.55` | 管道 `sed` 命令注入可绕过写入限制（`CVE-2026-25723`）。 | MIRAGE 无双证明不放行写入/外发副作用。 |
-| A-13 | 2026-02-06 | `claude-code` `< 2.0.57` | `cd` + 写路径校验薄弱可写入受保护目录（`CVE-2026-25722`）。 | MIRAGE 将命令解析正确性与最终副作用授权解耦。 |
-| A-14 | 2026-02-03 | `claude-code` `< 2.0.72` | `find` 命令注入可绕过审批（`CVE-2026-24887`）。 | MIRAGE 在 executor 缺证据即 fail-closed。 |
-| A-15 | 2026-02-03 | `claude-code` `< 2.0.74` | ZSH clobber 解析缺陷可导致任意写入（`CVE-2026-24053`）。 | MIRAGE 的副作用门控独立于 shell 解析细节。 |
-| A-16 | 2025-11-21 | `claude-code` `< 2.0.31` | `sed` 校验绕过可导致任意文件写入（`CVE-2025-64755`）。 | MIRAGE 用事务化与能力投影约束副作用。 |
-| A-17 | 2025-09-24 | `claude-code` `< 1.0.39` | Yarn2+ 插件自动加载可在信任前执行（`CVE-2025-59828`）。 | MIRAGE 将 skill enable 纳入可审计事务。 |
-| A-18 | 2025-09-10 | `claude-code` `< 1.0.105` | 恶意 git email 可触发信任前执行（`CVE-2025-59041`）。 | MIRAGE 通过 capsule + 双证明提交降低此类启动链风险。 |
+| A-11 | 2026-02-06 | `claude-code` `< 2.1.7` | deny 规则可经 symlink 绕过（`CVE-2026-25724`）。 | SecureClaw 增加 executor 侧 proof 门控与 handle 绑定数据流。 |
+| A-12 | 2026-02-06 | `claude-code` `< 2.0.55` | 管道 `sed` 命令注入可绕过写入限制（`CVE-2026-25723`）。 | SecureClaw 无双证明不放行写入/外发副作用。 |
+| A-13 | 2026-02-06 | `claude-code` `< 2.0.57` | `cd` + 写路径校验薄弱可写入受保护目录（`CVE-2026-25722`）。 | SecureClaw 将命令解析正确性与最终副作用授权解耦。 |
+| A-14 | 2026-02-03 | `claude-code` `< 2.0.72` | `find` 命令注入可绕过审批（`CVE-2026-24887`）。 | SecureClaw 在 executor 缺证据即 fail-closed。 |
+| A-15 | 2026-02-03 | `claude-code` `< 2.0.74` | ZSH clobber 解析缺陷可导致任意写入（`CVE-2026-24053`）。 | SecureClaw 的副作用门控独立于 shell 解析细节。 |
+| A-16 | 2025-11-21 | `claude-code` `< 2.0.31` | `sed` 校验绕过可导致任意文件写入（`CVE-2025-64755`）。 | SecureClaw 用事务化与能力投影约束副作用。 |
+| A-17 | 2025-09-24 | `claude-code` `< 1.0.39` | Yarn2+ 插件自动加载可在信任前执行（`CVE-2025-59828`）。 | SecureClaw 将 skill enable 纳入可审计事务。 |
+| A-18 | 2025-09-10 | `claude-code` `< 1.0.105` | 恶意 git email 可触发信任前执行（`CVE-2025-59041`）。 | SecureClaw 通过 capsule + 双证明提交降低此类启动链风险。 |
 
 ### 13.3 OpenClaw 公开案例
 
-| 案例 ID | 时间（UTC） | 产品 / 影响版本 | 公开描述（摘要） | 对 MIRAGE 的启示 |
+| 案例 ID | 时间（UTC） | 产品 / 影响版本 | 公开描述（摘要） | 对 SecureClaw 的启示 |
 |---|---|---|---|---|
-| O-01 | 2026-02-06 | `openclaw` `< 2026.1.20` | 本地未认证客户端可通过 WebSocket `config.apply` + 不安全 `cliPath` 触发本地 RCE（`CVE-2026-25593`）。 | MIRAGE 的副作用提交仍需双证明，控制面失守不直接等于副作用可执行。 |
-| O-02 | 2026-02-04 | `openclaw` `< 2026.1.30` | `MEDIA:/path` 提取可导致任意本地文件包含读取（`CVE-2026-25475`）。 | MIRAGE 将敏感读取 handle 化并限制高敏外发路径。 |
-| O-03 | 2026-02-02 | VirusTotal Blog | VirusTotal 报告其已分析 **3,016+** 个 OpenClaw skills，发现**数百**个处于“主动恶意”状态，并点名 ClawHub 发布者单人关联 **314** 个恶意 skill（体现供应链集中度风险）。 | MIRAGE 将 skill enable 纳入 PREVIEW->COMMIT，并引入 IOC/suspicious 分流。 |
-| O-04 | OpenClaw 官方文档 | 安全 / Threat model | 官方文档描述了“运行带 shell access 的 AI gateway”的威胁模型，并强调硬化不是完美边界。 | MIRAGE 在沙箱之外再加一层加密执行门，形成正交防线。 |
+| O-01 | 2026-02-06 | `openclaw` `< 2026.1.20` | 本地未认证客户端可通过 WebSocket `config.apply` + 不安全 `cliPath` 触发本地 RCE（`CVE-2026-25593`）。 | SecureClaw 的副作用提交仍需双证明，控制面失守不直接等于副作用可执行。 |
+| O-02 | 2026-02-04 | `openclaw` `< 2026.1.30` | `MEDIA:/path` 提取可导致任意本地文件包含读取（`CVE-2026-25475`）。 | SecureClaw 将敏感读取 handle 化并限制高敏外发路径。 |
+| O-03 | 2026-02-02 | VirusTotal Blog | VirusTotal 报告其已分析 **3,016+** 个 OpenClaw skills，发现**数百**个处于“主动恶意”状态，并点名 ClawHub 发布者单人关联 **314** 个恶意 skill（体现供应链集中度风险）。 | SecureClaw 将 skill enable 纳入 PREVIEW->COMMIT，并引入 IOC/suspicious 分流。 |
+| O-04 | OpenClaw 官方文档 | 安全 / Threat model | 官方文档描述了“运行带 shell access 的 AI gateway”的威胁模型，并强调硬化不是完美边界。 | SecureClaw 在沙箱之外再加一层加密执行门，形成正交防线。 |
 
 ---
 
@@ -447,10 +449,10 @@ MIRAGE-OG++ 解决的是另一个正交问题：对副作用授权做可加密�
 
 ---
 
-## 15. 案例到防线映射（MIRAGE 相比内置防护新增了什么）
+## 15. 案例到防线映射（SecureClaw 相比内置防护新增了什么）
 
 从 C-01..O-04 的共性可以看到：多数失守发生在解析器、allowlist、路径校验、信任对话框等单层控制点。  
-MIRAGE 的增量在于“副作用执行的加密证据门控”：
+SecureClaw 的增量在于“副作用执行的加密证据门控”：
 
 1. `PREVIEW -> COMMIT` 生成事务绑定证据；
 2. Executor 校验双策略服务 proofs 与请求哈希绑定；

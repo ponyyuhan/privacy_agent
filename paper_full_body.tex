@@ -351,6 +351,14 @@ For each case we record a channel, a label indicating attack or benign, a leaked
 
 The artifact implements this protocol in \texttt{scripts/fair\_full\_compare.py} and aggregates to a single report file \texttt{artifact\_out\_compare/fair\_full\_report.json}.
 
+\subsection{Official and synthetic channel coverage}
+
+The official benchmark dataset covers channels $C1$ through $C5$ only.
+Channels $C6$ and $C7$ are not covered by official cases.
+Therefore we evaluate $C6$ and $C7$ using the artifact synthetic channel suite.
+We report official and synthetic results separately and we do not mix them in a single rate table.
+The reproduction and evidence paths are indexed in \texttt{LEAKAGE\_EVIDENCE.md}.
+
 \subsection{Metrics and statistical analysis}
 
 For a system $S$ and a set of attack cases $\mathcal{D}_{\mathsf{atk}}$ we define
@@ -466,6 +474,9 @@ It asserts that direct reads of a host secret path fail, that direct public netw
 that direct HTTP posts to a local exfiltration endpoint fail when a netless transport is used, that
 direct process execution is denied in the macOS capsule configuration, and that a gateway action
 request succeeds through the constrained transport.
+The artifact includes a contract verifier \texttt{capsule/verify\_contract.py} that checks these
+assertions against the machine checkable contract instance \texttt{spec/secureclaw\_capsule\_contract\_v1.json}
+and fails closed if any required assertion is violated.
 
 \section{Related work and positioning}
 \label{sec:related}

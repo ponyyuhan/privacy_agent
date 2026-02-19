@@ -299,9 +299,21 @@ def _verify_commit_evidence(commit: dict, *, action_id: str, program_id: str, re
         t1 = base64.b64decode(tag1_b64) if tag1_b64 else b""
     except Exception:
         return None, None, "bad_commit_tag_b64"
-    if len(t0) != len(t1) or len(t0) == 0:
+    # Semantic constraint: commit tag shares are fixed-width so audit records are uniform and
+    # the executor acceptance predicate is machine-checkable.
+    want_tag_len = int(os.getenv("COMMIT_TAG_LEN_BYTES", "16") or "16")
+    if want_tag_len < 8:
+        want_tag_len = 8
+    if want_tag_len > 64:
+        want_tag_len = 64
+    if len(t0) != len(t1) or len(t0) != want_tag_len:
         return None, None, "bad_commit_tag_len"
     tag = bytes([x ^ y for x, y in zip(t0, t1)])
+
+    # Semantic constraint: require a stable output interface.
+    for need in ("allow_pre", "need_confirm", "patch0", "patch1"):
+        if need not in outs:
+            return None, None, "missing_output_key"
     return outs, tag, "OK"
 
 

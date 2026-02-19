@@ -1,15 +1,15 @@
 {
   "id": "mirage_ogpp",
-  "name": "MIRAGE-OG++ Gateway Bridge",
+  "name": "SecureClaw Gateway Bridge",
   "version": "0.1.0",
-  "description": "Expose a single tool (mirage_act) that forwards to the local Python MIRAGE MCP gateway (gateway.mcp_server), or to a remote MIRAGE HTTP gateway via capsule.mcp_proxy.",
+  "description": "Expose a single side-effect tool (secureclaw_act, alias mirage_act) that forwards to the local Python SecureClaw MCP gateway (gateway.mcp_server), or to a remote SecureClaw HTTP gateway via capsule.mcp_proxy.",
   "configSchema": {
     "type": "object",
     "additionalProperties": false,
     "properties": {
       "python": {
         "type": "string",
-        "description": "Python executable used to spawn the MIRAGE MCP gateway (default: python)."
+        "description": "Python executable used to spawn the SecureClaw MCP gateway (default: python)."
       },
       "session_id": {
         "type": "string",

@@ -66,6 +66,9 @@ The artifact computes and verifies these fields in:
 \texttt{executor\_server/server.py:\_verify\_commit\_evidence}.
 The corresponding machine checkable JSON schema for the commit evidence object is
 \texttt{spec/secureclaw\_executor\_accept\_v1.schema.json}.
+Additional semantic constraints used by the executor acceptance predicate are specified in
+\texttt{spec/secureclaw\_accept\_predicate\_v1.json} and are machine checked by
+\texttt{scripts/verify\_accept\_predicate.py}.
 
 \paragraph{Executor acceptance.}
 Given an effect request $\mathsf{req}$ and two purported commit proof shares $\pi_0,\pi_1$, the
