@@ -224,6 +224,7 @@ def main() -> None:
             str(repo_root / "third_party" / "agentleak_official" / "agentleak_data" / "datasets" / "scenarios_full_1000.jsonl"),
         )
     ).expanduser()
+    reuse_secureclaw = bool(int(os.getenv("FAIR_FULL_REUSE_SECURECLAW", "1")))
 
     mod = _load_agentleak_module(repo_root)
     cases, case_meta = mod.build_cases_official(  # type: ignore[attr-defined]
@@ -244,27 +245,27 @@ def main() -> None:
     _write_jsonl(cases_manifest, manifest_rows)
     _write_json(out_root / "fair_case_meta.json", {"seed": seed, "case_meta": case_meta})
 
-    # 1) MIRAGE four modes (same official cases via manifest).
+    # 1) SecureClaw four modes (same official cases via manifest).
     mirage_out = out_root / "fair_mirage"
-    env = os.environ.copy()
-    env["PYTHONPATH"] = str(repo_root)
-    env["OUT_DIR"] = str(mirage_out)
-    env["POLICY_BACKEND"] = str(os.getenv("POLICY_BACKEND", "rust"))
-    env["AGENTLEAK_CASESET"] = "official"
-    env["MIRAGE_SEED"] = str(seed)
-    env["AGENTLEAK_ATTACKS_PER_CHANNEL"] = str(n_attack)
-    env["AGENTLEAK_BENIGNS_PER_CHANNEL"] = str(n_benign)
-    env["AGENTLEAK_CASES_MANIFEST_PATH"] = str(cases_manifest)
-    # Prefer high-perf local settings unless explicitly disabled.
-    env.setdefault("MIRAGE_USE_UDS", "1")
-    env.setdefault("PIR_BINARY_TRANSPORT", "1")
-
-    p = _run([sys.executable, str(repo_root / "scripts" / "agentleak_channel_eval.py")], env=env, cwd=repo_root, timeout_s=7200)
-    if p.returncode != 0:
-        raise SystemExit(f"mirage_eval_failed:\n{p.stderr[:2000]}")
     mirage_summary_path = mirage_out / "agentleak_eval" / "agentleak_channel_summary.json"
+    if not (reuse_secureclaw and mirage_summary_path.exists()):
+        env = os.environ.copy()
+        env["PYTHONPATH"] = str(repo_root)
+        env["OUT_DIR"] = str(mirage_out)
+        env["POLICY_BACKEND"] = str(os.getenv("POLICY_BACKEND", "rust"))
+        env["AGENTLEAK_CASESET"] = "official"
+        env["MIRAGE_SEED"] = str(seed)
+        env["AGENTLEAK_ATTACKS_PER_CHANNEL"] = str(n_attack)
+        env["AGENTLEAK_BENIGNS_PER_CHANNEL"] = str(n_benign)
+        env["AGENTLEAK_CASES_MANIFEST_PATH"] = str(cases_manifest)
+        # Prefer high-perf local settings unless explicitly disabled.
+        env.setdefault("MIRAGE_USE_UDS", "1")
+        env.setdefault("PIR_BINARY_TRANSPORT", "1")
+        p = _run([sys.executable, str(repo_root / "scripts" / "agentleak_channel_eval.py")], env=env, cwd=repo_root, timeout_s=7200)
+        if p.returncode != 0:
+            raise SystemExit(f"secureclaw_eval_failed:\n{p.stderr[:2000]}")
     if not mirage_summary_path.exists():
-        raise SystemExit("mirage_eval_missing_summary")
+        raise SystemExit("secureclaw_eval_missing_summary")
     mirage_summary = _load_json(mirage_summary_path)
 
     systems: dict[str, Any] = {}
@@ -280,75 +281,100 @@ def main() -> None:
     native_script = repo_root / "scripts" / "native_official_baseline_eval.py"
     max_groups = int(os.getenv("NATIVE_BASELINE_MAX_GROUPS", "0") or 0)
     max_groups_arg = ["--max-groups", str(max_groups)] if max_groups > 0 else []
+    reuse_native = bool(int(os.getenv("FAIR_FULL_REUSE_NATIVE", "0")))
 
     codex_out = out_root / "fair_codex_native_guardrails"
     codex_out.mkdir(parents=True, exist_ok=True)
-    codex = _run(
-        [
-            sys.executable,
-            str(native_script),
-            "--cases",
-            str(cases_manifest),
-            "--out",
-            str(codex_out),
-            "--runtime",
-            "codex",
-            *max_groups_arg,
-        ],
-        env=os.environ.copy(),
-        cwd=repo_root,
-        timeout_s=24 * 3600,
-    )
     codex_summary_path = codex_out / "native_official_baseline_summary.json"
-    if codex.returncode != 0 or not codex_summary_path.exists():
-        systems["codex_native"] = {"status": "ERROR", "rc": int(codex.returncode), "stderr": codex.stderr[:2000], "stdout": codex.stdout[:2000]}
-    else:
+    if reuse_native and codex_summary_path.exists():
         cd = _load_json(codex_summary_path)
         sm = (cd.get("summary") or {}) if isinstance(cd, dict) else {}
-        systems["codex_native"] = {"status": "OK", **_extract_system_metrics(sm)}
-        # Preserve call-level metrics for transparency (LLM inference dominates).
+        systems["codex_native"] = {"status": "OK", **_extract_system_metrics(sm), "source_path": str(codex_summary_path), "reused_existing": True}
         if isinstance(sm, dict):
             for k in ("model_call_count", "model_ops_s", "model_latency_p50_ms", "model_latency_p95_ms"):
                 if k in sm:
                     systems["codex_native"][k] = sm.get(k)
-        systems["codex_native"]["source_path"] = str(codex_summary_path)
+    else:
+        codex_env = os.environ.copy()
+        codex_env.setdefault("NATIVE_BASELINE_RETRY_BAD", "0")
+        codex = _run(
+            [
+                sys.executable,
+                str(native_script),
+                "--cases",
+                str(cases_manifest),
+                "--out",
+                str(codex_out),
+                "--runtime",
+                "codex",
+                *max_groups_arg,
+            ],
+            env=codex_env,
+            cwd=repo_root,
+            timeout_s=24 * 3600,
+        )
+        if codex.returncode != 0 or not codex_summary_path.exists():
+            systems["codex_native"] = {"status": "ERROR", "rc": int(codex.returncode), "stderr": codex.stderr[:2000], "stdout": codex.stdout[:2000]}
+        else:
+            cd = _load_json(codex_summary_path)
+            sm = (cd.get("summary") or {}) if isinstance(cd, dict) else {}
+            systems["codex_native"] = {"status": "OK", **_extract_system_metrics(sm), "source_path": str(codex_summary_path), "reused_existing": False}
+            # Preserve call-level metrics for transparency (LLM inference dominates).
+            if isinstance(sm, dict):
+                for k in ("model_call_count", "model_ops_s", "model_latency_p50_ms", "model_latency_p95_ms"):
+                    if k in sm:
+                        systems["codex_native"][k] = sm.get(k)
 
     openclaw_out = out_root / "fair_openclaw_native_guardrails"
     openclaw_out.mkdir(parents=True, exist_ok=True)
-    oc = _run(
-        [
-            sys.executable,
-            str(native_script),
-            "--cases",
-            str(cases_manifest),
-            "--out",
-            str(openclaw_out),
-            "--runtime",
-            "openclaw",
-            *max_groups_arg,
-        ],
-        env=os.environ.copy(),
-        cwd=repo_root,
-        timeout_s=24 * 3600,
-    )
     oc_summary_path = openclaw_out / "native_official_baseline_summary.json"
-    if oc.returncode != 0 or not oc_summary_path.exists():
-        systems["openclaw_native"] = {"status": "ERROR", "rc": int(oc.returncode), "stderr": oc.stderr[:2000], "stdout": oc.stdout[:2000]}
-    else:
+    if reuse_native and oc_summary_path.exists():
         od = _load_json(oc_summary_path)
         sm2 = (od.get("summary") or {}) if isinstance(od, dict) else {}
-        systems["openclaw_native"] = {"status": "OK", **_extract_system_metrics(sm2)}
+        systems["openclaw_native"] = {"status": "OK", **_extract_system_metrics(sm2), "source_path": str(oc_summary_path), "reused_existing": True}
         if isinstance(sm2, dict):
             for k in ("model_call_count", "model_ops_s", "model_latency_p50_ms", "model_latency_p95_ms"):
                 if k in sm2:
                     systems["openclaw_native"][k] = sm2.get(k)
-        systems["openclaw_native"]["source_path"] = str(oc_summary_path)
+    else:
+        oc_env = os.environ.copy()
+        oc_env.setdefault("NATIVE_BASELINE_RETRY_BAD", "1")
+        oc = _run(
+            [
+                sys.executable,
+                str(native_script),
+                "--cases",
+                str(cases_manifest),
+                "--out",
+                str(openclaw_out),
+                "--runtime",
+                "openclaw",
+                *max_groups_arg,
+            ],
+            env=oc_env,
+            cwd=repo_root,
+            timeout_s=24 * 3600,
+        )
+        if oc.returncode != 0 or not oc_summary_path.exists():
+            systems["openclaw_native"] = {"status": "ERROR", "rc": int(oc.returncode), "stderr": oc.stderr[:2000], "stdout": oc.stdout[:2000]}
+        else:
+            od = _load_json(oc_summary_path)
+            sm2 = (od.get("summary") or {}) if isinstance(od, dict) else {}
+            systems["openclaw_native"] = {"status": "OK", **_extract_system_metrics(sm2), "source_path": str(oc_summary_path), "reused_existing": False}
+            if isinstance(sm2, dict):
+                for k in ("model_call_count", "model_ops_s", "model_latency_p50_ms", "model_latency_p95_ms"):
+                    if k in sm2:
+                        systems["openclaw_native"][k] = sm2.get(k)
 
     out = {
         "status": "OK",
         "seed": seed,
         "cases_manifest_path": str(cases_manifest),
         "case_meta": case_meta,
+        "baseline_set": {
+            "secureclaw_modes": ["mirage_full", "policy_only", "sandbox_only", "single_server_policy"],
+            "native_baselines": ["codex_native", "openclaw_native"],
+        },
         "systems": systems,
     }
     out_path = out_root / "fair_full_report.json"

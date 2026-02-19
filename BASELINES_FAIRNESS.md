@@ -61,14 +61,19 @@ Therefore, we do not present it as the Codex/OpenClaw “native” baseline in t
 
 5. Produce statistics / breakdowns / significance tests:
    - `scripts/fair_full_stats.py` (Wilson 95% CI + two-sided Fisher exact tests vs `mirage_full`)
+   - `scripts/fair_utility_breakdown.py` (benign deny / false-positive reason decomposition by mode and channel)
+   - `scripts/write_submission_convergence.py` (camera-ready convergence snapshot markdown)
 
 ---
 
 ## 4. Reproducing the Fair Report
 
 ```bash
-OUT_DIR=artifact_out_compare MIRAGE_SEED=7 python scripts/fair_full_compare.py
+OUT_DIR=artifact_out_compare MIRAGE_SEED=7 \
+  FAIR_FULL_REUSE_NATIVE=1 FAIR_FULL_REUSE_SECURECLAW=1 \
+  python scripts/fair_full_compare.py
 python scripts/fair_full_stats.py --report artifact_out_compare/fair_full_report.json
+python scripts/fair_utility_breakdown.py --report artifact_out_compare/fair_full_report.json
 ```
 
 Notes:
@@ -80,6 +85,7 @@ Notes:
 - To reduce cost, you can cap the number of scenario groups evaluated by both native baselines:
   - `NATIVE_BASELINE_MAX_GROUPS=50` (evaluates the first 50 scenarios, still mapped to all channel-cases in aggregation).
 - OpenClaw baseline uses `OPENCLAW_NATIVE_MODEL=openai-codex/gpt-5.1-codex-mini` by default and the OpenAI OAuth provider plugin shipped under `integrations/openclaw_runner/extensions/openai-codex-auth`.
+- `scripts/fair_utility_breakdown.py` fails fast when native summaries are missing. Use `--allow-missing-native 1` only for partial debug runs.
 
 ---
 

@@ -89,13 +89,22 @@ python main.py paper-artifact
 可选（更论文级、但更耗时）：
 - official AgentLeak `C1..C5` 同口径 fair compare（SecureClaw + Codex + OpenClaw）：
   - 设置 `RUN_FAIR_FULL=1`
-  - 输出：`artifact_out_compare/fair_full_report.json` 与 `artifact_out_compare/stats/fair_full_stats.json`
+  - 输出：`artifact_out_compare/fair_full_report.json`、`artifact_out_compare/stats/fair_full_stats.json`、`artifact_out_compare/stats/fair_utility_breakdown.json`
   - 提示：这一步会调用外部模型，可能非常耗 token。可用环境变量降低成本/缩短运行时间：
     - `CODEX_BASELINE_MODEL=gpt-5.1-codex-mini`（默认）
     - `CODEX_BASELINE_REASONING=low`（默认）
     - `OPENCLAW_NATIVE_MODEL=openai-codex/gpt-5.1-codex-mini`（默认）
     - `CODEX_BASELINE_CONCURRENCY=4`（并发，视限流而定）
+    - `OPENCLAW_BASELINE_CONCURRENCY=2`（并发，视限流而定）
     - `NATIVE_BASELINE_MAX_GROUPS=50`（只评测前 50 个 scenario，用于快速 sanity-check）
+    - `FAIR_FULL_REUSE_NATIVE=1`（复用已有 native summary，避免重复外部调用）
+    - `FAIR_FULL_REUSE_SECURECLAW=1`（复用已有 SecureClaw official summary，避免重复本地重跑）
+
+当前仓库中的最新同口径汇总快照见：
+- `artifact_out_compare/fair_full_report.json`
+- `artifact_out_compare/stats/fair_full_stats.json`
+- `artifact_out_compare/stats/fair_utility_breakdown.json`
+- `artifact_out_compare/SUBMISSION_CONVERGENCE.md`
 
 ### 2.4 真实 agent（OpenClaw + OpenAI OAuth）
 ```bash
@@ -599,16 +608,19 @@ Router 已实现的 intent（是否可用取决于 capability 配置）：
 4. AgentLeak-style 逐通道评测（`C1..C7`，synthetic suite；`scripts/agentleak_channel_eval.py`）
 5. official AgentLeak `C1..C5` 的同口径 fair compare（可选，SecureClaw + Codex + OpenClaw；见 `BASELINES_FAIRNESS.md`）
    - 默认跳过；设置 `RUN_FAIR_FULL=1`
-   - 输出：`artifact_out_compare/fair_full_report.json` 与 `artifact_out_compare/stats/fair_full_stats.json`
+   - 输出：`artifact_out_compare/fair_full_report.json`、`artifact_out_compare/stats/fair_full_stats.json`、`artifact_out_compare/stats/fair_utility_breakdown.json`
+   - 默认复用已有结果：`FAIR_FULL_REUSE_NATIVE=1`、`FAIR_FULL_REUSE_SECURECLAW=1`
 6. policy server 吞吐曲线（`scripts/bench_policy_server_curves.py`）
 7. policy server 单核/多核 scaling + JSON/Binary 传输对比（`scripts/bench_policy_server_scaling.py`）
 8. 端到端吞吐 benches（python + rust，可选）
 9. 端到端 shaping 曲线（`scripts/bench_e2e_shaping_curves.py`）
-10. native runtime baselines（`scripts/native_guardrail_eval.py`）
-11. real-agent campaign（`scripts/real_agent_campaign.py`）
-12. 审计日志 hash-chain 校验（`scripts/verify_audit_log.py`）
-13. 自动产图（`artifact_out/figures/*.svg`）
-14. 可复现 manifest（`artifact_out/repro_manifest.json`）
+10. 生产性能汇总（`scripts/perf_production_report.py`）
+11. 泄露通道汇总（`scripts/leakage_channel_report.py`）
+12. native runtime baselines（`scripts/native_guardrail_eval.py`）
+13. real-agent campaign（`scripts/real_agent_campaign.py`）
+14. 审计日志 hash-chain 校验（`scripts/verify_audit_log.py`）
+15. 自动产图（`artifact_out/figures/*.svg`）
+16. 可复现 manifest（`artifact_out/repro_manifest.json`）
 
 ---
 
@@ -1074,7 +1086,13 @@ official AgentLeak `C1..C5` 同口径 fair compare（SecureClaw + Codex + OpenCl
 - `scripts/fair_full_compare.py`
 - 输出：`artifact_out_compare/fair_full_report.json`
 - 统计分解与显著性：`scripts/fair_full_stats.py` -> `artifact_out_compare/stats/fair_full_stats.json`
+- 效用/误报分解：`scripts/fair_utility_breakdown.py` -> `artifact_out_compare/stats/fair_utility_breakdown.json`
 - 语义与威胁模型解释：`BASELINES_FAIRNESS.md`
+
+生产性能与泄露统一汇总：
+- `scripts/perf_production_report.py` -> `artifact_out_compare/perf_production_report.json`
+- `scripts/leakage_channel_report.py` -> `artifact_out_compare/leakage_channel_report.json`
+- 投稿收敛快照：`scripts/write_submission_convergence.py` -> `artifact_out_compare/SUBMISSION_CONVERGENCE.md`
 
 ### 24.7 自动产图与复现清单（必须）
 

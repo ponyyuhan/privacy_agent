@@ -44,8 +44,11 @@ SecureClaw-only official harness run (used internally by the fair report):
 Reproduce:
 
 ```bash
-OUT_DIR=artifact_out_compare MIRAGE_SEED=7 python scripts/fair_full_compare.py
+OUT_DIR=artifact_out_compare MIRAGE_SEED=7 \
+  FAIR_FULL_REUSE_NATIVE=1 FAIR_FULL_REUSE_SECURECLAW=1 \
+  python scripts/fair_full_compare.py
 python scripts/fair_full_stats.py --report artifact_out_compare/fair_full_report.json
+python scripts/fair_utility_breakdown.py --report artifact_out_compare/fair_full_report.json
 ```
 
 ---
@@ -85,6 +88,16 @@ Reproduce:
 
 ```bash
 OUT_DIR=artifact_out_compare/leakage_sweep python scripts/leakage_model_sweep.py
+```
+
+Unified paper-facing leakage report:
+
+- `artifact_out_compare/leakage_channel_report.json`
+
+Reproduce:
+
+```bash
+python scripts/leakage_channel_report.py
 ```
 
 This sweep is designed to validate the claim:

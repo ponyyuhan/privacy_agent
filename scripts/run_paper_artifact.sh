@@ -45,13 +45,18 @@ echo "[paper] 3c) official AgentLeak C1..C5 fair comparison (MIRAGE + native Cod
 if [[ "${RUN_FAIR_FULL:-0}" == "1" ]]; then
   OUT_DIR_COMPARE="${OUT_DIR_COMPARE:-$ROOT/artifact_out_compare}"
   mkdir -p "$OUT_DIR_COMPARE"
-	  # Codex/OpenClaw baselines can be slow and may require external credentials; keep optional.
-	  CODEX_BASELINE_CONCURRENCY="${CODEX_BASELINE_CONCURRENCY:-4}" \
-	    CODEX_BASELINE_REASONING="${CODEX_BASELINE_REASONING:-low}" \
-	    OUT_DIR="$OUT_DIR_COMPARE" \
-	    PYTHONPATH=. python scripts/fair_full_compare.py | tee "$OUT_DIR_COMPARE/fair_full_compare_path.txt"
+  # Codex/OpenClaw baselines can be slow and may require external credentials; keep optional.
+  CODEX_BASELINE_CONCURRENCY="${CODEX_BASELINE_CONCURRENCY:-4}" \
+    OPENCLAW_BASELINE_CONCURRENCY="${OPENCLAW_BASELINE_CONCURRENCY:-2}" \
+    CODEX_BASELINE_REASONING="${CODEX_BASELINE_REASONING:-low}" \
+    FAIR_FULL_REUSE_NATIVE="${FAIR_FULL_REUSE_NATIVE:-1}" \
+    FAIR_FULL_REUSE_SECURECLAW="${FAIR_FULL_REUSE_SECURECLAW:-1}" \
+    OUT_DIR="$OUT_DIR_COMPARE" \
+    PYTHONPATH=. python scripts/fair_full_compare.py | tee "$OUT_DIR_COMPARE/fair_full_compare_path.txt"
   PYTHONPATH=. python scripts/fair_full_stats.py --report "$OUT_DIR_COMPARE/fair_full_report.json" --out "$OUT_DIR_COMPARE/stats/fair_full_stats.json" \
     | tee "$OUT_DIR_COMPARE/fair_full_stats_path.txt"
+  PYTHONPATH=. python scripts/fair_utility_breakdown.py --report "$OUT_DIR_COMPARE/fair_full_report.json" --out "$OUT_DIR_COMPARE/stats/fair_utility_breakdown.json" \
+    | tee "$OUT_DIR_COMPARE/fair_utility_breakdown_path.txt"
 else
   echo "[paper] skip fair_full_compare (set RUN_FAIR_FULL=1)" | tee "$OUT_DIR/fair_full_compare_skipped.txt"
 fi
@@ -81,7 +86,13 @@ else
   POLICY_BACKEND=python PYTHONPATH=. python scripts/bench_e2e_shaping_curves.py | tee "$OUT_DIR/bench_e2e_shaping_curves_path.txt"
 fi
 
-echo "[paper] 8) native runtime baselines (codex/claude/openclaw)"
+echo "[paper] 7b) production performance report (target ops + scaling summary)"
+PYTHONPATH=. python scripts/perf_production_report.py --run-missing 0 | tee "$OUT_DIR/perf_production_report_path.txt"
+
+echo "[paper] 7c) leakage channel report (C1..C7 + distinguishability summary)"
+PYTHONPATH=. python scripts/leakage_channel_report.py | tee "$OUT_DIR/leakage_channel_report_path.txt"
+
+echo "[paper] 8) native runtime baselines (codex/openclaw)"
 PYTHONPATH=. python scripts/native_guardrail_eval.py | tee "$OUT_DIR/native_guardrail_eval_path.txt"
 
 echo "[paper] 9) real-agent closed-loop campaign (openclaw/nanoclaw/scripted)"
@@ -101,5 +112,8 @@ PYTHONPATH=. python scripts/plot_paper_figures.py | tee "$OUT_DIR/figures_path.t
 
 echo "[paper] 12) repro manifest"
 PYTHONPATH=. python scripts/write_repro_manifest.py | tee "$OUT_DIR/repro_manifest_path.txt"
+
+echo "[paper] 12b) submission convergence snapshot"
+PYTHONPATH=. python scripts/write_submission_convergence.py | tee "$OUT_DIR/submission_convergence_path.txt" || true
 
 echo "[paper] done; outputs in $OUT_DIR"

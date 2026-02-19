@@ -64,6 +64,24 @@ def _write_json(path: Path, obj: dict[str, Any]) -> None:
     path.write_text(json.dumps(obj, indent=2, ensure_ascii=True) + "\n", encoding="utf-8")
 
 
+def _cached_output_is_bad(obj: dict[str, Any]) -> bool:
+    if not isinstance(obj, dict):
+        return True
+    if "error" in obj:
+        return True
+    # Expected output contract for this baseline runner.
+    req = ("final_output", "inter_agent", "tool_input", "tool_output", "memory_write")
+    for k in req:
+        if k not in obj:
+            return True
+    ti = obj.get("tool_input")
+    if not isinstance(ti, dict):
+        return True
+    if not str(ti.get("tool") or ""):
+        return True
+    return False
+
+
 def _safe_json_loads(s: str) -> dict[str, Any] | None:
     s = (s or "").strip()
     if not s:
@@ -302,6 +320,7 @@ def _codex_run_groups(
     raw_dir.mkdir(parents=True, exist_ok=True)
 
     # Resolve cache hits first (so we can resume long runs).
+    retry_bad = bool(int(os.getenv("NATIVE_BASELINE_RETRY_BAD", "0")))
     todo: list[ScenarioGroup] = []
     for i, g in enumerate(groups):
         if max_groups is not None and i >= int(max_groups):
@@ -309,10 +328,16 @@ def _codex_run_groups(
         out_path = scen_dir / f"{g.kind}_{g.scenario_id}.json"
         if out_path.exists():
             try:
-                meta[g.scenario_id] = json.loads(out_path.read_text(encoding="utf-8"))
+                cached = json.loads(out_path.read_text(encoding="utf-8"))
+                if retry_bad and _cached_output_is_bad(cached):
+                    todo.append(g)
+                    continue
+                meta[g.scenario_id] = cached
+                continue
             except Exception:
-                pass
-            continue
+                if retry_bad:
+                    todo.append(g)
+                continue
         todo.append(g)
 
     def _run_one(g: ScenarioGroup) -> tuple[str, dict[str, Any], dict[str, Any]]:
@@ -520,6 +545,7 @@ def _openclaw_run_groups(
     raw_dir.mkdir(parents=True, exist_ok=True)
     try:
         # Resolve cache hits first (so we can resume long runs).
+        retry_bad = bool(int(os.getenv("NATIVE_BASELINE_RETRY_BAD", "1")))
         todo: list[ScenarioGroup] = []
         for i, g in enumerate(groups):
             if max_groups is not None and i >= int(max_groups):
@@ -527,10 +553,16 @@ def _openclaw_run_groups(
             out_path = scen_dir / f"{g.kind}_{g.scenario_id}.json"
             if out_path.exists():
                 try:
-                    meta[g.scenario_id] = json.loads(out_path.read_text(encoding="utf-8"))
+                    cached = json.loads(out_path.read_text(encoding="utf-8"))
+                    if retry_bad and _cached_output_is_bad(cached):
+                        todo.append(g)
+                        continue
+                    meta[g.scenario_id] = cached
+                    continue
                 except Exception:
-                    pass
-                continue
+                    if retry_bad:
+                        todo.append(g)
+                    continue
             todo.append(g)
 
         def _run_one(g: ScenarioGroup) -> tuple[str, dict[str, Any], dict[str, Any]]:
