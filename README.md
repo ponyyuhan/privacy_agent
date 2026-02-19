@@ -42,6 +42,8 @@
 - `FORMAL_SECURITY.md`：形式化安全主张（NBE/SM/SAP/SCS）的游戏/定理框架与代码映射。
 - `appendix_security.tex`：附录级归约证明链（无双证明不可提交副作用，归约到 MAC 不可伪造 + 哈希绑定一致性 + replay/TTL/session/caller 绑定）。
 - `LEAKAGE_MODEL.md`：允许泄露函数 `L_policy`/`L_sys` 的严格定义与 shaping/bundling/confirm-path 的通道分解。
+- `spec/SECURECLAW_PROTOCOL_RFC_v1.md`：`act`/PREVIEW/COMMIT/evidence/accept predicate 的 RFC 风格接口规范（字段、错误码、不变量、版本兼容）。
+- `capsule/MC_CONTRACT_SPEC.md`：capsule mediation contract 的可验证系统假设、断言集合与降级语义。
 - `LEAKAGE_EVIDENCE.md`：逐通道 `L_Ci` 的官方/合成实证索引（含复现实验路径）。
 - `BASELINES_FAIRNESS.md`：强基线同口径对比的语义、威胁模型与公平性说明。
 - `PERFORMANCE.md`：固定形状（pad+cover+mixer）下的吞吐/延迟曲线与多核 scaling 叙事。

@@ -13,6 +13,9 @@ SecureClaw follows a different strategy.
 It treats the runtime as adversarial and moves policy enforcement and effect authorization into a small trusted gateway and a separate executor.
 The runtime retains planning utility, but it cannot directly commit external side effects without cryptographic authorization that is verified at the executor.
 
+\paragraph{Single reviewable claim.}
+SecureClaw enforces a non bypassable side effect commit line with dual proof verification and request binding, while outsourcing policy checks with single auditor privacy up to an explicit leakage function.
+
 \section{Problem statement and scope}
 \label{sec:problem}
 
@@ -274,8 +277,11 @@ If the capsule mediation contract blocks a direct bypass attempt then the attemp
 \section{Formal security claims and proof chain}
 \label{sec:security}
 
-We state four system properties.
+We state one primary claim and four compositional properties.
 The full definitions and proofs are provided in Appendix \ref{app:proofs} and the accompanying artifact documents \texttt{FORMAL\_SECURITY.md} and \texttt{appendix\_security.tex}.
+
+\paragraph{Primary claim.}
+No external side effect is committed without dual valid commit evidence bound to the exact request tuple, and each single policy server transcript is simulatable from the allowed leakage function.
 
 \paragraph{Non bypassable effects.}
 No external side effect is committed unless two valid commit proofs exist that are bound to the exact request context, satisfy freshness, and are not replayed.
@@ -288,6 +294,7 @@ For each policy server there exists a simulator that can reproduce its view from
 
 \paragraph{Skill confined safety.}
 Under a capsule mediation contract, skills cannot access host secrets, execute arbitrary processes, or access the public network except through the gateway and executor mediation path.
+The contract is specified as a machine checkable assumption and validated by probe assertions.
 
 \section{Leakage model and implementation mapping}
 \label{sec:leakage}
@@ -305,6 +312,7 @@ This captures application level leakage across AgentLeak style channels.
 We represent it as a tuple of per channel leakage functions $L_{C1}$ through $L_{C7}$, covering final output, inter agent messages, tool inputs, tool outputs, memory, logs, and skill ingress.
 
 The formal definitions, per channel decomposition, residual leakage bounds, and a code and configuration mapping are given in Appendix \ref{app:leakage} and in \texttt{LEAKAGE\_MODEL.md}.
+Each allowed leakage term is mapped to explicit code paths and configuration keys to avoid implicit leakage assumptions.
 
 \section{Baselines and evaluation methodology}
 \label{sec:eval}
@@ -446,6 +454,7 @@ For paper claims we clearly separate official coverage from synthetic coverage a
 Skill confined safety is conditional on a capsule mediation contract.
 The contract must enforce the following properties.
 The machine checkable contract instance for the artifact is \texttt{spec/secureclaw\_capsule\_contract\_v1.json}.
+The contract semantics and downgrade rules are defined in \texttt{capsule/MC\_CONTRACT\_SPEC.md}.
 
 \paragraph{Minimal filesystem exposure.}
 The capsule exposes only the skill code directory and a dedicated write only workspace directory.

@@ -21,6 +21,33 @@ protocol.
 Policy servers are also assumed honest but curious for privacy.
 Single server leakage is bounded by an explicit leakage function defined in \texttt{LEAKAGE\_MODEL.md}.
 
+\paragraph{Single proposition.}
+The reviewable proposition for this paper is:
+no external side effect can be committed without dual valid request bound commit proofs, and a single
+policy server learns no more than the allowed leakage function under stated assumptions.
+The first clause is formalized by Theorem \ref{thm:nbe}.
+The second clause is formalized by Theorem \ref{thm:sap}.
+
+\paragraph{Assumption partition.}
+Table \ref{tab:assumption-partition} partitions assumptions by property so that composition dependencies are explicit.
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{lll}
+\toprule
+Property & Security objective & Main assumptions \\
+\midrule
+NBE & No unauthorized side effects & MAC EUF-CMA, hash binding consistency, replay store \\
+SM & No plaintext flow to runtime & Handle opacity, explicit declassification only \\
+SAP & Single server transcript privacy & PIR single server security, MPC HBC privacy, non-collusion \\
+SCS & Skill bypass confinement & Capsule mediation contract and NBE plus SM \\
+\bottomrule
+\end{tabular}
+\caption{Assumption partition for SecureClaw properties.}
+\label{tab:assumption-partition}
+\end{table}
+
 \subsection{Cryptographic primitives and canonical binding}
 \label{app:proofs:primitives}
 
@@ -190,6 +217,14 @@ For mechanized consistency, the artifact includes an explicit state model checke
 \texttt{formal/secureclaw\_model\_check.py} that enumerates bounded adversary behaviors under idealized
 cryptography and confirms that the event $\mathsf{Bad}_{\mathsf{NBE}}$ cannot occur when the executor
 enforces $\mathsf{Accept}$ and the interface fields match the schema.
+
+\paragraph{Dependency decomposition.}
+The combined argument separates responsibilities at interface boundaries.
+PIR and two party computation are used only for transcript privacy and do not enforce side effects.
+Executor acceptance and replay logic enforce effect integrity.
+Gateway handleization enforces runtime plaintext confinement.
+Capsule mediation enforces skill process and network confinement.
+This partition prevents hidden circular assumptions in the composition theorem.
 
 \paragraph{Combined experiment.}
 Define a combined experiment $\mathsf{Exp}^{\mathsf{SC}}(\lambda)$ for SecureClaw.

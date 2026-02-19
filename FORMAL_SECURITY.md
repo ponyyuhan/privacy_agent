@@ -1,365 +1,377 @@
-# Formal Security Claims and Proof Chain (NBE / SM / SAP / SCS)
+# SecureClaw Formal Security Model
 
-This document upgrades SecureClaw's security story into an **appendix-grade** proof chain:
-explicit games, acceptance predicates, and reductions, with direct pointers into this repo.
+This document defines a single, reviewable security statement and the full proof skeleton for four properties:
 
-Scope (artifact-accurate):
+1. Non-Bypassable Effects (NBE)
+2. Secret Myopia (SM)
+3. Single-Auditor Privacy (SAP)
+4. Skill-Confined Safety (SCS)
 
-- Implementation: the current SecureClaw code in this repository.
-- Adversary: PPT adversary controlling prompts/skills/runtime inputs and able to send arbitrary requests to the gateway and executor.
-- Keys: executor-side MAC verification keys are not compromised.
-- Policy servers: honest-but-curious for privacy (SAP), not malicious for integrity. (NBE is about *bypass* by the runtime, not about a malicious policy server authorizing bad actions.)
+It is artifact-faithful and mapped to executable checks in this repository.
 
-Code-linked checks:
+## 1. Single Reviewable Proposition
 
-- Formal NBE harness: `scripts/security_game_nbe_check.py`
-- Unit tests: `tests/test_security_games.py`
-- Mechanized bounded model checking of the interface-level event definitions: `formal/secureclaw_model_check.py`
-- Machine-checkable schemas for the executor commit evidence and capsule contract: `spec/`
-- Capsule mediation contract verifier (spec -> smoke report -> verdict): `capsule/verify_contract.py`
-- Executor accept predicate verifier (spec + keys + request context -> decision): `scripts/verify_accept_predicate.py`
+Primary claim:
 
----
+For the deployed SecureClaw interfaces, no external side effect can be committed without dual valid commit proofs bound to the exact request tuple, while any single policy server view is simulatable from an explicit leakage function.
 
-## 0. Parties, APIs, and Trust Boundaries
+This claim has two orthogonal parts:
 
-Parties:
+1. Integrity part. Non-bypassable effect commit line at the executor.
+2. Privacy part. Leakage-bounded policy outsourcing against one policy server.
 
-- `A`: adversary controlling the untrusted agent runtime and skills.
-- `G`: trusted gateway orchestrating PIR/MPC and issuing `tx_id` in PREVIEW.
-- `P0, P1`: two policy servers (honest-but-curious; non-colluding for SAP).
-- `E`: trusted executor, the only component allowed to perform side effects.
-- `C`: optional capsule enforcing a mediation contract (for SCS).
+SM and SCS are supporting system properties that guarantee no plaintext bypass around this line under stated assumptions.
 
-Executor side-effect endpoints:
+## 2. System Model
 
-- `/exec/send_message`
-- `/exec/fetch`
-- `/exec/webhook`
-- `/exec/skill_install`
+### 2.1 Parties
 
-Important knob:
+1. `A`: PPT adversary controlling runtime prompts, tool invocations, and skill code.
+2. `G`: trusted gateway.
+3. `P0`, `P1`: policy servers.
+4. `X`: trusted executor and only side-effect sink.
+5. `U`: user confirmation source.
+6. `C`: optional capsule boundary for skill confinement.
 
-- `EXECUTOR_INSECURE_ALLOW=1` bypasses enforcement; **all claims assume `EXECUTOR_INSECURE_ALLOW=0`**.
+### 2.2 Interfaces
 
----
+1. Runtime-to-gateway entrypoint: `act(intent_id, inputs, constraints, caller)`.
+2. Policy path: PIR endpoints and MPC endpoints.
+3. Effect path: executor `/exec/*`.
+4. Capsule path: mediated runtime transport to gateway.
 
-## 1. Syntax and Cryptographic Primitives
+### 2.3 Trust and Non-Goals
 
-Security parameter: `lambda` (implicit).
+1. `G` and `X` are in TCB.
+2. At least one policy server is non-colluding for SAP.
+3. No claim against kernel-level side channels.
+4. No claim if `EXECUTOR_INSECURE_ALLOW=1`.
+5. No claim if both policy servers collude.
 
-### 1.1 Canonicalization and Request Binding Hash
+## 3. Unified Notation
 
-Define the request-binding function:
+### 3.1 Request and Context Tuples
 
-```
-ReqHash(intent_id, caller, session, inputs) = SHA256( CanonicalJSON({
-  "intent_id": intent_id,
-  "caller": caller,
-  "session": session,
-  "inputs": inputs
-}) )
-```
+Bound request tuple:
 
-Implementation:
+`rho = (intent_id, caller, session, inputs_eff)`
 
-- `common/canonical.py:request_sha256_v1`
+Commit context tuple:
 
-This hash is recomputed by the executor from the incoming request payload and must match the value bound in commit proofs.
-Therefore, security depends on:
+`ctx = (action_id, program_id, request_sha256)`
 
-- SHA-256 collision resistance, and
-- consistent canonicalization (same semantics -> same bytes at both gateway and executor).
+Request binding hash:
 
-### 1.2 Commit Proof Shares (Per Policy Server)
+`ReqHash(rho) = SHA256(CanonJSON({"intent_id", "caller", "session", "inputs"}))`
 
-Each policy server `Pi` holds a MAC key `Ki` and outputs a commit proof share:
+Artifact implementation:
 
-- `pi_i = (meta_i, mac_i)`
-- `mac_i = HMAC(Ki, CanonicalJSON(meta_i))`
+1. `common/canonical.py:request_sha256_v1`
+2. `executor_server/server.py:_validate_commit_proof_common`
 
-Where `meta_i` includes:
+### 3.2 Commit Proof Share
 
-- `v = 1`
-- `kind = "commit"`
-- `server_id in {0,1}`
-- `kid` (key identifier, supports rotation)
-- `ts` (timestamp, seconds)
-- `action_id` (commit identifier)
-- `program_id` (policy program identifier)
-- `request_sha256 = ReqHash(...)`
-- `outputs` (XOR shares of output bits)
-- `commit_tag_share_b64` (XOR share of an audit tag)
+For server `s in {0,1}`, a proof share is:
 
-Implementation:
+`pi_s = (meta_s, mac_s)`
 
-- Python policy server: `policy_server/server.py` (`/mpc/finalize`)
-- Rust policy server: `policy_server_rust/src/main.rs` (`/mpc/finalize`)
+where:
 
----
+1. `meta_s` contains `v, kind, server_id, kid, ts, action_id, program_id, request_sha256, outputs, commit_tag_share_b64`.
+2. `mac_s = HMAC(K_s, Canon(meta_s))`.
 
-## 2. Executor Acceptance Predicate (What Must Hold to Commit an Effect)
+### 3.3 Acceptance Predicate
 
-Define the context tuple:
+Executor accepts iff all hold:
 
-- `ctx = (action_id, program_id, request_sha256)`.
+1. Structural schema valid.
+2. `policy0` and `policy1` server identities are distinct and valid.
+3. MAC verification succeeds under keyring `kid`.
+4. Freshness `abs(now - ts) <= POLICY_MAC_TTL_S`.
+5. Shared `(action_id, program_id, request_sha256)` match.
+6. Recomputed `ReqHash(rho(req))` equals proof hash.
+7. Replay guard rejects duplicates in replay window.
+8. Reconstructed policy bits satisfy `allow_pre=1`.
+9. `need_confirm=1` implies explicit confirmation.
+10. Sanitization patch constraints hold.
 
-Define the bound request tuple:
+Normative files:
 
-- `rho = (intent_id, caller, session, inputs_eff)`, where `inputs_eff` are the
-  effectful fields hashed by `request_sha256_v1` (commit-phase flags like
-  `user_confirm` are intentionally excluded).
+1. `spec/secureclaw_executor_accept_v1.schema.json`
+2. `spec/secureclaw_accept_predicate_v1.json`
+3. `scripts/verify_accept_predicate.py`
 
-Given an effect request `req` and two commit proofs `(pi_0, pi_1)`, the executor accepts iff:
+## 4. Unified Security Experiment Template
 
-1. **Both proofs parse** and have `v=1`, `kind="commit"`.
-2. **MAC keys are known** for the claimed `server_id` and `kid` (rotation supported).
-3. **MACs verify** under those keys.
-4. **Freshness**: `abs(now - ts) <= POLICY_MAC_TTL_S`.
-5. **Binding**: both proofs bind exactly the same `ctx`, and `request_sha256`
-   equals the executor's recomputed `ReqHash(rho)` on the request.
-6. **Replay resistance**: `action_id` has not been used before (best-effort replay cache, optionally persistent).
-7. **Policy decision bits** reconstruct to `allow_pre=1`, and `need_confirm` implies user confirmation; sanitize patches are enforced.
+Define a generic game family:
 
-Implementation:
+`Exp^Pi_{A}(lambda; Oracles, Win)`
 
-- Common proof checks: `executor_server/server.py:_validate_commit_proof_common`
-- Dual-proof verify + output reconstruction + commit tag: `executor_server/server.py:_verify_commit_evidence`
-- Replay cache: `executor_server/server.py:_ReplayGuard` (`reason_code=REPLAY_DENY`)
-- Endpoint enforcement: `executor_server/server.py` `/exec/*`
+where:
 
----
+1. Challenger initializes keys, stores, and trusted services.
+2. Adversary gets oracle access defined by property `Pi`.
+3. Adversary outputs a terminal action.
+4. Win predicate `Win` decides success.
 
-## 3. Security Games
+Every property below instantiates this template and uses explicit bad events.
 
-### 3.1 Game `G_NBE` (Non-Bypassable Effects)
+## 5. NBE Game and Theorem
 
-Goal: the adversary cannot cause a side effect without dual authorization bound to the exact request context, and cannot replay it.
+### 5.1 Game `G_NBE`
 
-Let `CommitOracle(rho)` return valid commit proofs for:
+Oracles:
 
-- `ctx(rho) = (action_id, program_id, request_sha256)` with `request_sha256 = ReqHash(rho)`.
+1. `O_preview_commit(rho)` returns valid dual shares and records authorized binding for `ctx(rho)`.
+2. Optional benign service oracles needed for syntax consistency.
 
-The challenger records:
+State:
 
-- `S_ctx`: contexts for which **both** proofs were issued,
-- `S_rho`: authorized tuples `(intent_id, caller, session, inputs_eff)`,
-- `U`: contexts already accepted by executor (for replay checks).
+1. `S_auth`: set of authorized tuples `(ctx, rho)`.
+2. `S_accept`: accepted action identifiers for replay window.
 
-Experiment `Exp^{NBE}_{Pi,A}(lambda)`:
+Adversary outputs `(req_star, pi0_star, pi1_star)`.
 
-1. Challenger samples independent MAC keys for policy servers and initializes `S_ctx = empty`, `U = empty`.
-2. `A` adaptively queries `CommitOracle(rho)`; challenger returns `(pi_0, pi_1)` and records `ctx(rho) in S_ctx` plus `rho in S_rho`.
-3. `A` outputs a side-effect request `req*` plus `(pi_0*, pi_1*)`.
-4. `A` wins iff `Accept_E(req*, pi_0*, pi_1*) = 1` and at least one holds:
-   - **No-auth success**: `ctx(req*)` is not in `S_ctx`.
-   - **Binding break**: `ctx(req*) in S_ctx`, but `rho(req*)` differs from every authorized tuple in `S_rho` bound to that context.
-   - **Replay success**: `ctx(req*) in U` and the executor accepts it again before replay expiry.
+Win condition `Bad_NBE` is true if executor accepts and one of the following holds:
 
-### 3.2 Game `G_SM` (Secret Myopia)
+1. No-auth event. `ctx(req_star)` not in `S_auth`.
+2. Binding-break event. `ctx(req_star)` in `S_auth` but `rho(req_star)` differs from all authorized tuples under that context.
+3. Replay event. `action_id` already accepted in replay window.
 
-Goal: sensitive plaintext does not flow to the untrusted runtime by default.
+### 5.2 Lemma `L_bind`
 
-Experiment `Exp^{SM}_{Pi,A}(lambda)`:
+If acceptance succeeds for a request whose bound tuple differs from the tuple used to create the accepted proof context, then either:
 
-1. `A` interacts with the gateway via `act(intent_id, inputs, constraints, caller)`.
-2. The gateway may mint a handle record `(handle, session, caller, ttl, sensitivity, allowed_sinks)` and return only the opaque `handle`.
-3. `A` wins if it receives any HIGH-sensitivity plaintext value without satisfying the explicit declassification/confirmation path.
+1. SHA256 collision is found on canonicalized messages, or
+2. Canonicalization consistency is violated.
 
-Code points:
+Reason:
 
-- Handle store + bindings: `gateway/handles.py`
-- File -> handle minting: `gateway/executors/fsexec.py`
-- Declassify path: `gateway/executors/cryptoexec.py`
+Accepted proof hash equals recomputed `ReqHash(rho(req))`.
+Different tuples with equal hash imply collision or serialization inconsistency.
 
-### 3.3 Game `G_SAP` (Single-Auditor Privacy, Leakage-Aware)
-
-Goal: a single policy server cannot infer queried identities beyond an explicit leakage function `L(.)`.
-
-We use a standard simulation-style definition parameterized by leakage.
-The system satisfies `SAP(L)` if for each server `Pi` there exists a PPT simulator `Sim_i` such that for all PPT distinguishers `D`:
-
-```
-| Pr[D(View(Pi))=1] - Pr[D(Sim_i(L(params, A)))=1] | <= negl(lambda)
-```
-
-Where:
-
-- `View(Pi)` is the transcript observed by `Pi` (PIR + MPC endpoints, sizes, timing).
-- `A` is the (secret) sequence of gateway actions.
-- `L(params, A)` is the allowed leakage defined in `LEAKAGE_MODEL.md`.
-
-### 3.4 Game `G_SCS` (Skill-Confined Safety, Conditional)
-
-Goal: under a capsule mediation contract, skills cannot bypass `act` to perform forbidden direct actions.
-
-Experiment `Exp^{SCS}_{Pi,A}(lambda)`:
-
-1. `A` controls the skill code and runtime instructions inside capsule `C`.
-2. Capsule enforces a mediation contract `MC` (filesystem/network/exec restrictions).
-3. `A` wins if it performs a forbidden direct action while `MC` holds (e.g., host secret read, arbitrary exec, direct Internet exfil).
-
-Code points:
-
-- macOS sandbox profile: `capsule/capsule.sb`
-- Capsule proxy (UDS preferred): `capsule/mcp_proxy.py`
-- Capsule smoke tests: `capsule/smoke.py`
-
----
-
-## 4. Theorems and Reductions
-
-### Lemma L1 (Binding: Session/Caller/Inputs)
-
-Assume `ReqHash` is collision-resistant and canonicalization is consistent across gateway and executor.
-
-If the executor accepts a request `req*` using commit proofs whose `request_sha256` was produced for a *different* tuple `(intent_id, caller, session, inputs)`, then we obtain either:
-
-- a collision in `ReqHash`, or
-- a canonicalization inconsistency.
-
-In particular, because `ReqHash` includes `caller` and `session`, changing `caller` or `session` after PREVIEW invalidates the commit proofs unless a collision exists.
-
-### Theorem T1 (NBE: No Side Effects Without Dual Authorization)
+### 5.3 Theorem `T_NBE`
 
 Assume:
 
-1. HMAC-SHA256 is EUF-CMA secure.
-2. `ReqHash` is collision-resistant and canonicalization is consistent (Lemma L1).
-3. Executor enforces `Accept_E` with `EXECUTOR_INSECURE_ALLOW=0`.
+1. HMAC is EUF-CMA secure.
+2. `ReqHash` is collision resistant and canonicalization is consistent.
+3. Executor implements acceptance predicate exactly.
+4. Replay store semantics hold in configured replay window.
 
-Then there exist PPT reductions `B0, B1, C` such that for any PPT adversary `A`:
+Then for any PPT adversary `A`:
 
+`Pr[Bad_NBE] <= Adv_euf_cma(B0) + Adv_euf_cma(B1) + Adv_coll(C) + eps_replay + negl(lambda)`
+
+where:
+
+1. `B0`, `B1` are reductions against each policy-server MAC key.
+2. `C` is a collision finder reduction.
+3. `eps_replay` captures non-cryptographic replay-store failures.
+
+Proof sketch by exhaustive cases:
+
+1. No-auth. Acceptance with unseen context implies at least one fresh MAC forgery.
+2. Binding-break. Acceptance on changed `rho` with same proof hash implies `L_bind` violation.
+3. Replay. Any second acceptance in replay window is replay-store failure.
+
+Corollary:
+
+Without dual valid proofs, side effects cannot be committed except with negligible advantage plus replay-store failure probability.
+
+## 6. SM Game and Theorem
+
+### 6.1 Game `G_SM`
+
+Sensitive value space `S`.
+
+Oracles:
+
+1. `O_act` for runtime calls into gateway.
+2. Declassification oracle subject to policy and confirmation.
+
+Adversary controls all runtime interactions.
+Challenger stores one of two equal-length secrets behind a handle.
+
+Win event `Bad_SM`:
+
+Adversary distinguishes which secret is stored with non-negligible advantage without an allowed declassification event that includes this secret in leakage.
+
+### 6.2 Theorem `T_SM`
+
+Assume:
+
+1. Gateway only returns opaque handles for high-sensitivity values by default.
+2. Handle identifiers are unguessable and independent of plaintext.
+3. Declassification path is explicit, logged, and policy-controlled.
+
+Then runtime view is simulatable from:
+
+`L_SM = (handle ids, labels, ttl, reason codes, explicitly declassified outputs)`
+
+and `Pr[Bad_SM]` is negligible under handle-guessing assumptions.
+
+## 7. SAP Game and Theorem
+
+### 7.1 Game `G_SAP`
+
+Adversary chooses two action traces `W0, W1` such that:
+
+`L_policy(params, W0) = L_policy(params, W1)`
+
+Challenger samples bit `b`, executes `Wb`, and reveals transcript view of one policy server `P_sigma`.
+
+Adversary outputs guess `b_prime`.
+
+Win event:
+
+`Bad_SAP = [b_prime = b]` with non-negligible bias over one half.
+
+### 7.2 Theorem `T_SAP`
+
+Assume:
+
+1. Two-server PIR security against one server for DPF/FSS shares.
+2. Honest-but-curious MPC privacy for fixed policy circuit.
+3. Fixed-shape routing and shaping are configured as assumed by `L_policy`.
+4. At least one policy server is non-colluding.
+
+Then for each `sigma` there exists PPT simulator `Sim_sigma` such that:
+
+`|Pr[D(View(P_sigma))=1] - Pr[D(Sim_sigma(L_policy))=1]| <= negl(lambda)`
+
+for all PPT distinguishers `D`.
+
+Hybrid structure:
+
+1. Replace PIR messages by PIR simulator outputs.
+2. Replace MPC transcripts by MPC simulator outputs.
+3. Remaining fields are deterministic from leakage terms and public parameters.
+
+## 8. SCS Game and Theorem
+
+### 8.1 Game `G_SCS`
+
+Adversary controls skill code inside capsule boundary and attempts forbidden direct actions:
+
+1. Host secret reads.
+2. Arbitrary process execution.
+3. Direct internet exfiltration.
+4. Direct loopback exfiltration when disallowed.
+
+Win event `Bad_SCS`:
+
+Forbidden direct action succeeds while contract `MC` is declared active.
+
+### 8.2 Theorem `T_SCS`
+
+Assume:
+
+1. Capsule mediation contract `MC` holds.
+2. All effectful operations require executor path.
+3. NBE and SM hold for gateway-executor path.
+
+Then `Pr[Bad_SCS]` is bounded by capsule-contract violation probability plus negligible cryptographic failure from NBE and SM assumptions.
+
+## 9. Composition Theorem
+
+Define combined bad event:
+
+`Bad_SC = Bad_NBE or Bad_SM or Bad_SAP or Bad_SCS`
+
+### 9.1 Dependency Partition
+
+Property dependency table:
+
+1. `NBE` depends on MAC unforgeability, hash binding consistency, replay store semantics, executor accept implementation.
+2. `SM` depends on handle discipline and explicit declassification discipline in gateway.
+3. `SAP` depends on PIR one-server privacy, MPC one-party privacy, fixed-shape leakage contract, non-collusion.
+4. `SCS` depends on enforceable capsule contract and non-bypass requirement for external effects.
+
+### 9.2 Composition Bound
+
+`Pr[Bad_SC] <= Pr[Bad_NBE] + Pr[Bad_SM] + Pr[Bad_SAP] + Pr[Bad_SCS]`
+
+with each term bounded by its theorem assumptions.
+
+Proof is direct union bound over disjoint event definitions plus per-property theorem bounds.
+
+### 9.3 Proof Structure Diagram
+
+```text
+                 +-----------------------+
+                 |  Cryptographic Layer  |
+                 |  MAC, Hash, PIR, MPC  |
+                 +-----------+-----------+
+                             |
+          +------------------+------------------+
+          |                                     |
+  +-------v--------+                    +-------v--------+
+  | Executor Line  |                    | Policy Privacy |
+  | Accept(ctx,rho)|                    | Sim(L_policy)  |
+  +-------+--------+                    +-------+--------+
+          |                                     |
+          +---------------+---------------------+
+                          |
+                 +--------v--------+
+                 | Gateway Handles |
+                 |  + Declass Path |
+                 +--------+--------+
+                          |
+                 +--------v--------+
+                 | Capsule MC      |
+                 | Skill Boundary  |
+                 +--------+--------+
+                          |
+                 +--------v--------+
+                 |  Combined Claim |
+                 | NBE + SM + SAP  |
+                 |      + SCS      |
+                 +-----------------+
 ```
-Pr[Exp^{NBE}_{Pi,A}(lambda)=1]
-  <= Adv^{euf-cma}_{HMAC}(B0)
-   + Adv^{euf-cma}_{HMAC}(B1)
-   + Adv^{coll}_{ReqHash}(C)
-   + epsilon_replay_store
-   + negl(lambda)
-```
 
-where `epsilon_replay_store` captures only non-cryptographic replay-store failure
-(crash/loss/corruption outside the cryptographic model).
+## 10. MC as Verifiable System Assumption
 
-Proof (case analysis, reduction-level detail):
+Contract instance:
 
-Let `A` win `Exp^{NBE}` by outputting `(req*, pi_0*, pi_1*)` accepted by the executor.
-By definition of `Accept_E`, both proofs verify and bind to the same context
-`ctx* = (action_id*, program_id*, request_sha256*)`.
+1. `spec/secureclaw_capsule_contract_v1.json`
+2. `spec/secureclaw_capsule_contract_v1.schema.json`
 
-We consider two exhaustive possibilities for the win condition:
+Contract verifier:
 
-**Case 1 (No-auth success): `ctx*` not in `S_ctx`.**
+1. `capsule/verify_contract.py`
+2. `capsule/run_smoke.sh`
+3. `capsule/smoke.py`
 
-Because acceptance requires both MAC-valid proofs, at least one of `pi_0*` or `pi_1*`
-is a fresh MAC forgery relative to the corresponding server's signing oracle.
-Construct `B0` (similarly `B1`) that embeds its UF-CMA challenge key as policy0's key,
-answers `CommitOracle` queries by using the UF-CMA signing oracle to MAC canonical payloads,
-and outputs `pi_0*` as the forgery when `A` wins in Case 1.
+Semantic interpretation:
 
-**Case 2 (Binding break): `ctx* in S_ctx`, but `rho(req*)` is not an authorized bound tuple for `ctx*`.**
+1. If contract verifier returns `OK`, SCS assumption is satisfied for tested environment profile.
+2. If verifier fails, SCS claim is disabled and deployment must fail closed or downgrade to no-capsule claims.
 
-Executor acceptance implies `request_sha256*` equals the executor recomputation on `req*`.
-If `req*` differs in any bound field (`intent_id`, `caller`, `session`, or effectful inputs), Lemma L1 yields
-a collision in `ReqHash` or canonicalization inconsistency. Construct collision finder `C`
-by outputting the two distinct canonical inputs producing the same `request_sha256*`.
+## 11. Machine-Checked Consistency in Repository
 
-**Case 3 (Replay success):** `ctx*` was already accepted once in `U`, but accepted again.
+The repository provides bounded mechanization and executable checks:
 
-Within model assumptions (replay guard check-and-mark is atomic and store remains live for replay TTL),
-Case 3 is impossible except negligible implementation-failure probability. Thus replay contributes only
-the non-cryptographic failure term captured by system assumptions.
-
-Combining the cases yields the bound.
-
-Implementation mapping:
-
-- MAC verification: `executor_server/server.py:_verify_mac`
-- Context binding: `executor_server/server.py:_validate_commit_proof_common`
-- Request hash recomputation: `common/canonical.py:request_sha256_v1`
-
-### Corollary T1.1 (No Dual Proof, No Effect)
-
-Under T1 assumptions, any accepted side effect implies existence of two MAC-valid commit proofs
-bound to the exact accepted tuple `rho = (intent_id, caller, session, inputs_eff)`.
-Equivalently, there is no successful proofless or single-proof commit.
-
-### Theorem T2 (Replay: No Double-Commit of the Same action_id Within TTL)
-
-Assume the executor runs the replay guard check-and-mark on `action_id` exactly when
-an effect commit is accepted, and rejects any future commit with that `action_id`
-within the replay TTL (`EXECUTOR_REPLAY_TTL_S`).
-
-Then an adversary cannot cause the executor to accept the same `(action_id, program_id, request_sha256)`
-twice within replay TTL (except with probability due to replay-store failure/crash).
-
-Implementation:
-
-- `executor_server/server.py:_ReplayGuard.check_and_mark`
-- Enforced in each `/exec/*` endpoint (returns `REPLAY_DENY` on duplicates)
-
-### Theorem T3 (Composition: PIR + MPC + Executor Evidence Chain + Capsule)
-
-The artifact composes the following mechanisms:
-
-- PIR/FSS membership for outsourced policy DB reads (privacy goal SAP),
-- 2PC/MPC evaluation for fixed policy circuits (decision bits secret-shared),
-- executor dual-authorization (T1) to enforce NBE at the effect boundary,
-- optional capsule mediation contract to conditionally enforce SCS.
-
-Under the joint assumptions of:
-
-- T1/T2 for executor enforcement,
-- SAP(L) for the policy-server transcript (with `L(.)` defined in `LEAKAGE_MODEL.md`), and
-- capsule mediation contract `MC` (for SCS),
-
-the composed system satisfies NBE, SM, SAP(L), and conditional SCS simultaneously.
-
-The combination argument is a standard hybrid: each property is enforced at a different trust boundary
-(executor for NBE; gateway handle store for SM; PIR/MPC transcript design for SAP; capsule for SCS),
-so the overall failure probability is bounded by the sum of component advantages.
-
-### Theorem T4 (Session/Caller/TTL Binding Soundness)
-
-Let `rho = (intent_id, caller, session, inputs_eff)` and let PREVIEW mint `tx_id` with `TX_TTL_S`,
-while commit proofs are freshness-checked by `POLICY_MAC_TTL_S`.
-
-If an adversary causes an accepted side effect for tuple `rho*`, then at least one is true:
-
-1. `rho*` equals an actually authorized tuple at PREVIEW/COMMIT time;
-2. a MAC forgery occurred (EUF-CMA break);
-3. a request-binding hash collision/canonicalization break occurred;
-4. trusted-state failure occurred (tx/replay store failure beyond model assumptions).
-
-This theorem explicitly brings replay window, proof freshness, and session/caller binding into the
-formal contract.
-
----
-
-## 5. Reproducibility (Formal Checks)
+1. `formal/secureclaw_model_check.py` checks finite-state consistency for NBE, SM, SCS contract shape.
+2. `scripts/security_game_nbe_check.py` executes end-to-end NBE adversarial probes.
+3. `tests/test_security_games.py` validates replay, hash binding, dual-proof necessity.
+4. `scripts/verify_accept_predicate.py` validates semantic accept constraints.
+5. `scripts/validate_specs.py` validates schema and spec files.
 
 Run:
 
 ```bash
+PYTHONPATH=. python formal/secureclaw_model_check.py
 PYTHONPATH=. python scripts/security_game_nbe_check.py
 python -m unittest discover -s tests -p 'test_security_games.py'
+python scripts/validate_specs.py
 ```
 
-Expected:
+## 12. Explicit Limits
 
-- Dual valid commit proofs accept once.
-- Missing proof / tampered MAC / mismatched request hash / expired proof are rejected.
-- Replay is rejected with `reason_code=REPLAY_DENY`.
+1. Claims are conditional on trusted `G` and `X`.
+2. SAP does not hold under full collusion of both policy servers.
+3. Capsule claims are conditional and environment-specific.
+4. Kernel microarchitectural channels are not covered.
+5. Unkeyed `request_sha256` can permit offline guessing on low-entropy fields.
 
----
-
-## 6. Explicit Limits (Do Not Overclaim)
-
-- `request_sha256` is an *unkeyed* hash. A malicious policy server that observes it may attempt
-  dictionary attacks if the underlying bound inputs are low-entropy. A production design can use
-  a keyed commitment shared by gateway+executor instead.
-- NBE prevents bypass by the untrusted runtime; it does not stop a malicious policy server from
-  authorizing an unsafe action (out of scope in this artifact's model).
-- Traffic analysis is only addressed up to the explicit leakage function `L(.)` (see `LEAKAGE_MODEL.md`).
-- If the executor is misconfigured into insecure allow mode, NBE is intentionally disabled.

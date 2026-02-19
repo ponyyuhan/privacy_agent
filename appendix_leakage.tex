@@ -122,6 +122,30 @@ It excludes plaintext secrets.
 $L_{C7}$ includes a skill digest, membership hit bits for known bad indicators, an install marker bit, a reason code, and a timing bucket.
 It excludes raw skill content unless explicitly declassified.
 
+\subsubsection{Channel to implementation mapping}
+
+Table \ref{tab:channel-map} maps each channel leakage function to the implementation path and primary controls.
+
+\begin{table}[t]
+\centering
+\small
+\begin{tabular}{lll}
+\toprule
+Channel & Primary implementation path & Primary controls \\
+\midrule
+$C1$ & \texttt{gateway/mcp\_server.py}, \texttt{gateway/egress\_policy.py} & reason codes, sanitize patch, leakage budget \\
+$C2$ & \texttt{gateway/router.py}, \texttt{gateway/handles.py} & handle bindings, leakage budget \\
+$C3$ & \texttt{gateway/mcp\_server.py}, \texttt{gateway/policy\_unified.py} & unified routing, bundle selection \\
+$C4$ & \texttt{gateway/executors/*} & output handleization, declassification \\
+$C5$ & \texttt{gateway/executors/memoryexec.py} & memory handle mediation, leakage budget \\
+$C6$ & \texttt{gateway/audit.py}, \texttt{executor\_server/server.py} & structured metadata logging, hash chain \\
+$C7$ & \texttt{gateway/policy\_unified.py}, \texttt{gateway/capabilities.yaml} & skill IOC checks, caller capability policy \\
+\bottomrule
+\end{tabular}
+\caption{Per-channel leakage mapping to implementation and controls.}
+\label{tab:channel-map}
+\end{table}
+
 \subsection{Residual leakage and allowed leakage items}
 
 We list the allowed leakage items and their sources.
