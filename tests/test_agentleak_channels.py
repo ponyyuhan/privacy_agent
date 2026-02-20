@@ -42,7 +42,7 @@ class ChannelMechanismTests(unittest.TestCase):
 
             send = bus.send({"to_agent": "agent-b", "text": "AKIA1234567890ABCDEF", "artifacts": []}, session="s", caller="c")
             self.assertEqual(send["status"], "OK")
-            recv = bus.receive({"agent_id": "agent-b", "max_messages": 1}, session="s", caller="c")
+            recv = bus.receive({"agent_id": "agent-b", "max_messages": 1}, session="s", caller="agent-b")
             self.assertEqual(recv["status"], "OK")
             dump = str(recv)
             self.assertNotIn("AKIA1234567890ABCDEF", dump)
@@ -51,7 +51,7 @@ class ChannelMechanismTests(unittest.TestCase):
             hid = str((msgs[0] or {}).get("payload_handle") or "")
             self.assertTrue(hid)
 
-            dec = crypto.declassify({"handle": hid, "purpose": "inspect"}, constraints={}, session="s", caller="c")
+            dec = crypto.declassify({"handle": hid, "purpose": "inspect"}, constraints={}, session="s", caller="agent-b")
             self.assertEqual(dec["status"], "DENY")
             self.assertEqual(dec["reason_code"], "REQUIRE_CONFIRM")
 
@@ -96,6 +96,17 @@ class ChannelMechanismTests(unittest.TestCase):
                 os.environ.pop("LEAKAGE_BUDGET_C1", None)
             else:
                 os.environ["LEAKAGE_BUDGET_C1"] = old_limit
+
+    def test_c2_receive_agent_id_must_match_caller(self) -> None:
+        with tempfile.NamedTemporaryFile() as db_msg:
+            handles = HandleStore()
+            store = InterAgentStore(db_path=db_msg.name)
+            bus = InterAgentExec(handles, store)
+            send = bus.send({"to_agent": "agent-b", "text": "hello"}, session="s", caller="agent-a")
+            self.assertEqual(send["status"], "OK")
+            recv = bus.receive({"agent_id": "agent-b", "max_messages": 1}, session="s", caller="agent-a")
+            self.assertEqual(recv["status"], "DENY")
+            self.assertEqual(recv["reason_code"], "AGENT_ID_MISMATCH")
 
     def test_turn_gate_requires_finalize_before_next_turn(self) -> None:
         old = os.environ.get("MIRAGE_ENFORCE_FINAL_OUTPUT_GATE")

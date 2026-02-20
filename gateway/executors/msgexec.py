@@ -9,7 +9,7 @@ class MsgExec:
         self.handles = handles
         self.policy = policy
 
-    def check_message_policy(self, inputs: Dict[str, Any], session: str, caller: str = "unknown") -> Dict[str, Any]:
+    def check_message_policy(self, inputs: Dict[str, Any], constraints: Dict[str, Any] | None = None, session: str = "", caller: str = "unknown") -> Dict[str, Any]:
         """Dry-run message guardrails without performing the send.
 
         This is useful for safety-constrained agent runtimes that will refuse to perform real-world
@@ -20,10 +20,12 @@ class MsgExec:
         text = str(inputs.get("text", ""))
         artifacts = inputs.get("artifacts", []) or []
 
+        auth_ctx = (constraints or {}).get("_auth_ctx") if isinstance((constraints or {}).get("_auth_ctx"), dict) else {}
+        pv_constraints = {"_auth_ctx": dict(auth_ctx)} if auth_ctx else {}
         pv = self.policy.preview(
             intent_id="CheckMessagePolicy",
             inputs={"channel": channel, "recipient": recipient, "text": text, "domain": str(inputs.get("domain", "")), "artifacts": list(artifacts)},
-            constraints={},
+            constraints=pv_constraints,
             session=session,
             caller=caller,
         )
@@ -58,10 +60,18 @@ class MsgExec:
         artifacts = inputs.get("artifacts", []) or []
         tx_id = str(inputs.get("tx_id") or "").strip()
         user_confirm = bool((constraints or {}).get("user_confirm", False))
+        auth_ctx = (constraints or {}).get("_auth_ctx") if isinstance((constraints or {}).get("_auth_ctx"), dict) else {}
+        pv_constraints = {"_auth_ctx": dict(auth_ctx)} if auth_ctx else {}
 
         # If a tx_id is provided, commit that preview. Otherwise, create a fresh preview and commit it.
         if tx_id:
-            auth = self.policy.commit_from_tx(tx_id=tx_id, intent_id="SendMessage", constraints={"user_confirm": user_confirm}, session=session, caller=caller)
+            auth = self.policy.commit_from_tx(
+                tx_id=tx_id,
+                intent_id="SendMessage",
+                constraints={"user_confirm": user_confirm, "_auth_ctx": dict(auth_ctx)} if auth_ctx else {"user_confirm": user_confirm},
+                session=session,
+                caller=caller,
+            )
             if auth.get("status") != "OK":
                 return auth
             commit_ev = (auth.get("data") or {}).get("commit_evidence") or {}
@@ -71,7 +81,7 @@ class MsgExec:
             pv = self.policy.preview(
                 intent_id="SendMessage",
                 inputs={"channel": channel, "recipient": recipient, "text": text, "domain": str(inputs.get("domain", "")), "artifacts": list(artifacts)},
-                constraints={},
+                constraints=pv_constraints,
                 session=session,
                 caller=caller,
             )
@@ -124,6 +134,8 @@ class MsgExec:
             caller=caller,
             session=session,
             user_confirm=bool(user_confirm),
+            external_principal=str(auth_ctx.get("external_principal") or ""),
+            delegation_jti=str(auth_ctx.get("delegation_jti") or ""),
         )
         if resp.get("status") != "OK":
             return {

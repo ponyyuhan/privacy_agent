@@ -30,6 +30,10 @@
 - PREVIEW->COMMIT 的 MPC policy engine（GMW + Beaver）与双签名 commit proofs。
 - Skill ingress（Import -> CheckSkillInstallPolicy -> CommitSkillInstall）。
 - per-skill workload identity（`workload_token` -> `caller=skill:<digest>`）。
+- 跨 agent 委托令牌（scope / ttl / revoke），支持外部主体到内部 actor 的最小授权委托。
+- 双主体策略判定（`external_principal` 与 `caller` 取交集授权）。
+- 联邦接入鉴权链路（mTLS 证书哈希钉扎 + 请求签名 + proof token + replay 防护）。
+- C2 与 C5 强制中介全覆盖：跨 agent 消息与 memory 明文均 handle 化，跨主体读取需显式委托。
 - capsule（macOS + Linux smoke 路径）+ UDS netless 传输。
 - real agent 验证（OpenClaw + OpenAI OAuth，NanoClaw runtime）。
 
@@ -121,6 +125,16 @@ export ANTHROPIC_API_KEY="..."
 bash scripts/run_nanoclaw.sh
 ```
 
+### 2.6 多 agent 委托与联邦接入快速验证（低开销）
+```bash
+PYTHONPATH=. OUT_DIR=artifact_out_compare python scripts/multi_agent_federated_eval.py
+cat artifact_out_compare/multi_agent_federated_eval.json
+```
+
+辅助工具：
+- 生成 delegation token：`python scripts/mint_delegation_token.py --issuer ... --subject ... --session ... --scope intent:SendInterAgentMessage`
+- 生成联邦签名请求头：`python scripts/sign_gateway_request.py --payload payload.json --session ... --principal ...`
+
 ---
 
 ## 3. 信任边界与威胁模型
@@ -146,6 +160,44 @@ bash scripts/run_nanoclaw.sh
 - 若对手同时攻破 gateway 与 executor，本仓库不保证不可绕过。
 - 若两台策略服务合谋，PIR 的单点隐私性质不成立。
 - 若不使用 capsule 或 capsule 放宽网络/执行限制，skill 可绕过 `act` 面。
+
+### 3.5 多 agent 委托与联邦接入控制面
+
+#### 委托令牌（Delegation Token）
+- 数据结构：`iss`（外部主体）、`sub`（内部 actor 模式）、`scope`（intent 集合）、`session`、`exp_ms`、`jti`。
+- 校验点：`session` 绑定、`subject` 绑定、`scope` 覆盖、`exp` 未过期、`jti` 未撤销。
+- 关键环境变量：
+  - `DELEGATION_TOKEN_KEY`
+  - `DELEGATION_REQUIRED_FOR_EXTERNAL=1`
+  - `DELEGATION_DB_PATH`
+- 关键代码：
+  - `common/delegation_token.py`
+  - `gateway/delegation_store.py`
+  - `gateway/router.py`
+
+#### 双主体策略判定（External Principal + Internal Actor）
+- 生效规则：`effective_caps = intersect(caller_caps, principal_caps)`。
+- 结果：外部主体无法提升内部 actor 权限，内部 actor 也无法绕过外部主体约束。
+- 关键代码：
+  - `gateway/capabilities.py:get_effective_capabilities`
+  - `gateway/capabilities.yaml` 中 `principal_default` 与 `principals`
+
+#### 联邦身份与远端可信接入（mTLS/签名/证明）
+- 网关 HTTP 接入支持三层验证，可单独或组合启用：
+  - mTLS 证书哈希钉扎
+  - 请求签名（带 ts/nonce 的 anti-replay）
+  - proof token（短时效，session+principal 绑定）
+- 关键环境变量：
+  - `MIRAGE_MTLS_REQUIRED`
+  - `MIRAGE_MTLS_CERT_SHA256_ALLOWLIST`
+  - `MIRAGE_FEDERATED_SIG_REQUIRED`
+  - `MIRAGE_FEDERATED_SIG_KEYS`
+  - `MIRAGE_FEDERATED_PROOF_REQUIRED`
+  - `MIRAGE_FEDERATED_PROOF_KEY`
+- 关键代码：
+  - `gateway/federated_auth.py`
+  - `common/federated_proof_token.py`
+  - `gateway/http_server.py`
 
 ---
 

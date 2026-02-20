@@ -111,7 +111,7 @@ class SkillExec:
             "reason_code": "ALLOW",
         }
 
-    def check_skill_install_policy(self, inputs: Dict[str, Any], session: str, caller: str = "unknown") -> Dict[str, Any]:
+    def check_skill_install_policy(self, inputs: Dict[str, Any], constraints: Dict[str, Any] | None = None, session: str = "", caller: str = "unknown") -> Dict[str, Any]:
         hid = str(inputs.get("skill_pkg_handle") or inputs.get("handle") or "").strip()
         if not hid:
             return {"status": "DENY", "summary": "Missing skill_pkg_handle.", "data": {}, "artifacts": [], "reason_code": "BAD_REQUEST"}
@@ -132,6 +132,7 @@ class SkillExec:
         feats = extract_skill_ingress_features(text=skill_md, max_domains=int(os.getenv("MAX_SKILL_DOMAINS", "16")))
         install_tokens = extract_install_tokens(text=skill_md, max_tokens=16)
 
+        auth_ctx = (constraints or {}).get("_auth_ctx") if isinstance((constraints or {}).get("_auth_ctx"), dict) else {}
         pv = self.policy.preview(
             skill_id=skill_id,
             skill_digest=skill_digest,
@@ -140,6 +141,7 @@ class SkillExec:
             base64_obf=bool(feats.has_base64_obf),
             session=session,
             caller=caller,
+            auth_context=dict(auth_ctx) if auth_ctx else None,
         )
 
         risk: list[str] = []
@@ -213,7 +215,13 @@ class SkillExec:
             return {"status": "DENY", "summary": "Missing tx_id.", "data": {}, "artifacts": [], "reason_code": "BAD_REQUEST"}
 
         user_confirm = bool((constraints or {}).get("user_confirm", False))
-        auth = self.policy.commit_from_tx(tx_id=tx_id, constraints={"user_confirm": user_confirm}, session=session, caller=caller)
+        auth_ctx = (constraints or {}).get("_auth_ctx") if isinstance((constraints or {}).get("_auth_ctx"), dict) else {}
+        auth = self.policy.commit_from_tx(
+            tx_id=tx_id,
+            constraints={"user_confirm": user_confirm, "_auth_ctx": dict(auth_ctx)} if auth_ctx else {"user_confirm": user_confirm},
+            session=session,
+            caller=caller,
+        )
         if auth.get("status") != "OK":
             return auth
 
@@ -246,6 +254,8 @@ class SkillExec:
             caller=caller,
             session=session,
             user_confirm=bool(user_confirm),
+            external_principal=str(auth_ctx.get("external_principal") or ""),
+            delegation_jti=str(auth_ctx.get("delegation_jti") or ""),
         )
         if resp.get("status") != "OK":
             return {"status": "DENY", "summary": "Executor denied skill install.", "data": {"skill_id": skill_id}, "artifacts": [], "reason_code": str(resp.get("reason_code") or "EXECUTOR_DENY")}

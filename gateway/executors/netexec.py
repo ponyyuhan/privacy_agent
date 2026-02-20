@@ -9,14 +9,16 @@ class NetExec:
         self.handles = handles
         self.policy = policy
 
-    def check_fetch_policy(self, inputs: Dict[str, Any], session: str, caller: str = "unknown") -> Dict[str, Any]:
+    def check_fetch_policy(self, inputs: Dict[str, Any], constraints: Dict[str, Any] | None = None, session: str = "", caller: str = "unknown") -> Dict[str, Any]:
         """Dry-run network policy without performing the fetch."""
         resource_id = str(inputs.get("resource_id", "example"))
         domain = str(inputs.get("domain", "example.com"))
+        auth_ctx = (constraints or {}).get("_auth_ctx") if isinstance((constraints or {}).get("_auth_ctx"), dict) else {}
+        pv_constraints = {"_auth_ctx": dict(auth_ctx)} if auth_ctx else {}
         pv = self.policy.preview(
             intent_id="CheckFetchPolicy",
             inputs={"resource_id": resource_id, "domain": domain, "recipient": str(inputs.get("recipient", "")), "text": str(inputs.get("text", ""))},
-            constraints={},
+            constraints=pv_constraints,
             session=session,
             caller=caller,
         )
@@ -50,9 +52,17 @@ class NetExec:
         domain = str(inputs.get("domain", "example.com"))
         tx_id = str(inputs.get("tx_id") or "").strip()
         user_confirm = bool((constraints or {}).get("user_confirm", False))
+        auth_ctx = (constraints or {}).get("_auth_ctx") if isinstance((constraints or {}).get("_auth_ctx"), dict) else {}
+        pv_constraints = {"_auth_ctx": dict(auth_ctx)} if auth_ctx else {}
 
         if tx_id:
-            auth = self.policy.commit_from_tx(tx_id=tx_id, intent_id="FetchResource", constraints={"user_confirm": user_confirm}, session=session, caller=caller)
+            auth = self.policy.commit_from_tx(
+                tx_id=tx_id,
+                intent_id="FetchResource",
+                constraints={"user_confirm": user_confirm, "_auth_ctx": dict(auth_ctx)} if auth_ctx else {"user_confirm": user_confirm},
+                session=session,
+                caller=caller,
+            )
             if auth.get("status") != "OK":
                 return auth
             commit_ev = (auth.get("data") or {}).get("commit_evidence") or {}
@@ -62,7 +72,7 @@ class NetExec:
             pv = self.policy.preview(
                 intent_id="FetchResource",
                 inputs={"resource_id": resource_id, "domain": domain, "recipient": str(inputs.get("recipient", "")), "text": str(inputs.get("text", ""))},
-                constraints={},
+                constraints=pv_constraints,
                 session=session,
                 caller=caller,
             )
@@ -110,6 +120,8 @@ class NetExec:
             user_confirm=bool(user_confirm),
             recipient=str(dummy_recipient),
             text=str(dummy_text),
+            external_principal=str(auth_ctx.get("external_principal") or ""),
+            delegation_jti=str(auth_ctx.get("delegation_jti") or ""),
         )
         if resp.get("status") != "OK":
             return {

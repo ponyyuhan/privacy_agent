@@ -448,6 +448,8 @@ class ExecSendMessageReq(BaseModel):
     caller: str = ""
     session: str = ""
     user_confirm: bool = False
+    external_principal: str = ""
+    delegation_jti: str = ""
 
 
 class ExecFetchReq(BaseModel):
@@ -461,6 +463,8 @@ class ExecFetchReq(BaseModel):
     user_confirm: bool = False
     recipient: str = ""
     text: str = ""
+    external_principal: str = ""
+    delegation_jti: str = ""
 
 
 class ExecWebhookReq(BaseModel):
@@ -475,6 +479,8 @@ class ExecWebhookReq(BaseModel):
     user_confirm: bool = False
     recipient: str = ""
     text: str = ""
+    external_principal: str = ""
+    delegation_jti: str = ""
 
 class ExecSkillInstallReq(BaseModel):
     action_id: str
@@ -484,9 +490,22 @@ class ExecSkillInstallReq(BaseModel):
     caller: str = ""
     session: str = ""
     user_confirm: bool = False
+    external_principal: str = ""
+    delegation_jti: str = ""
 
 
 app = FastAPI(title="MIRAGE-OG++ Executor", version="0.1")
+
+
+def _req_hash_context(*, external_principal: str, delegation_jti: str) -> dict[str, Any]:
+    ctx: dict[str, Any] = {}
+    ep = str(external_principal or "").strip()
+    dj = str(delegation_jti or "").strip()
+    if ep:
+        ctx["external_principal"] = ep
+    if dj:
+        ctx["delegation_jti"] = dj
+    return ctx
 
 
 @app.get("/health")
@@ -509,11 +528,13 @@ def exec_send_message(req: ExecSendMessageReq):
 
     # New path: PREVIEW->COMMIT commit tokens from both policy servers.
     if isinstance(req.commit, dict) and req.commit.get("policy0") and req.commit.get("policy1"):
+        hctx = _req_hash_context(external_principal=req.external_principal, delegation_jti=req.delegation_jti)
         request_sha = request_sha256_v1(
             intent_id="SendMessage",
             caller=str(req.caller or ""),
             session=str(req.session or ""),
             inputs={"channel": str(req.channel), "recipient": str(req.recipient), "domain": str(req.domain), "text": str(req.text)},
+            context=hctx,
         )
         outs, tag, code = _verify_commit_evidence(req.commit, action_id=action_id, program_id=POLICY_PROGRAM_ID, request_sha256=request_sha)
         if outs is None:
@@ -586,11 +607,13 @@ def exec_fetch(req: ExecFetchReq):
         return {"status": "OK", "reason_code": "ALLOW_INSECURE", "data": {"resource_id": req.resource_id, "domain": req.domain, "content_preview": "<html>...</html>"}}
 
     if isinstance(req.commit, dict) and req.commit.get("policy0") and req.commit.get("policy1"):
+        hctx = _req_hash_context(external_principal=req.external_principal, delegation_jti=req.delegation_jti)
         request_sha = request_sha256_v1(
             intent_id="FetchResource",
             caller=str(req.caller or ""),
             session=str(req.session or ""),
             inputs={"resource_id": str(req.resource_id), "recipient": str(req.recipient), "domain": str(req.domain), "text": str(req.text)},
+            context=hctx,
         )
         outs, tag, code = _verify_commit_evidence(req.commit, action_id=action_id, program_id=POLICY_PROGRAM_ID, request_sha256=request_sha)
         if outs is None:
@@ -632,11 +655,13 @@ def exec_webhook(req: ExecWebhookReq):
     if EXECUTOR_INSECURE_ALLOW:
         return {"status": "OK", "reason_code": "ALLOW_INSECURE", "data": {"domain": req.domain, "path": req.path, "sent_chars": len(req.body)}}
     if isinstance(req.commit, dict) and req.commit.get("policy0") and req.commit.get("policy1"):
+        hctx = _req_hash_context(external_principal=req.external_principal, delegation_jti=req.delegation_jti)
         request_sha = request_sha256_v1(
             intent_id="PostWebhook",
             caller=str(req.caller or ""),
             session=str(req.session or ""),
             inputs={"path": str(req.path), "body": str(req.body), "recipient": str(req.recipient), "domain": str(req.domain), "text": str(req.text)},
+            context=hctx,
         )
         outs, tag, code = _verify_commit_evidence(req.commit, action_id=action_id, program_id=POLICY_PROGRAM_ID, request_sha256=request_sha)
         if outs is None:
@@ -668,11 +693,13 @@ def exec_webhook(req: ExecWebhookReq):
 def exec_skill_install(req: ExecSkillInstallReq):
     action_id = req.action_id
     if isinstance(req.commit, dict) and req.commit.get("policy0") and req.commit.get("policy1"):
+        hctx = _req_hash_context(external_principal=req.external_principal, delegation_jti=req.delegation_jti)
         request_sha = request_sha256_v1(
             intent_id="CommitSkillInstall",
             caller=str(req.caller or ""),
             session=str(req.session or ""),
             inputs={"skill_id": str(req.skill_id), "skill_digest": str(req.skill_digest)},
+            context=hctx,
         )
         outs, tag, code = _verify_commit_evidence(req.commit, action_id=action_id, program_id=POLICY_PROGRAM_ID, request_sha256=request_sha)
         if outs is None:

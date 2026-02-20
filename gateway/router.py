@@ -20,8 +20,10 @@ from .memory_service import MemoryService
 from .interagent_store import InterAgentStore
 from .leakage_budget import LeakageBudget
 from .turn_gate import TurnGate
-from .capabilities import get_capabilities
+from .capabilities import get_effective_capabilities
+from .delegation_store import DelegationStore
 from .audit import AuditEvent, get_audit_logger, now_ts
+from common.delegation_token import parse_and_verify_delegation_token
 from common.workload_token import verify_workload_token
 
 class IntentRouter:
@@ -35,6 +37,7 @@ class IntentRouter:
         self.skill_store = SkillStore()
         self.memory_service = MemoryService()
         self.inter_agent_store = InterAgentStore()
+        self.delegations = DelegationStore()
         self.fs = FSExec(handles)
         self.msg = MsgExec(handles, self.policy)
         self.crypto = CryptoExec(handles, self.tx_store, budget=self.budget)
@@ -45,6 +48,27 @@ class IntentRouter:
         self.memory = MemoryExec(handles, self.memory_service)
         self.output = OutputExec(self.policy, self.budget)
         self.turn_gate = TurnGate()
+
+    @staticmethod
+    def _is_side_effect_intent(intent_id: str) -> bool:
+        i = str(intent_id or "")
+        return i in {
+            "SendMessage",
+            "FetchResource",
+            "PostWebhook",
+            "CommitSkillInstall",
+            "SendInterAgentMessage",
+            "ReceiveInterAgentMessages",
+            "MemoryWrite",
+            "MemoryRead",
+            "MemoryList",
+            "MemoryDelete",
+            "Declassify",
+            "FinalizeOutput",
+            "RevokeHandle",
+            "RevokeSession",
+            "RevokeDelegation",
+        }
 
     def act(self, intent_id: str, inputs: Dict[str, Any], constraints: Dict[str, Any], caller: str, session: str) -> Dict[str, Any]:
         audit = get_audit_logger()
@@ -69,6 +93,77 @@ class IntentRouter:
                 return obs
             caller = f"skill:{wt.skill_digest}"
 
+        c0 = dict(constraints or {})
+        auth_ctx = c0.get("_auth_ctx") if isinstance(c0.get("_auth_ctx"), dict) else {}
+        external_principal = str(c0.get("external_principal") or auth_ctx.get("external_principal") or "").strip()
+        delegation_token = str(c0.get("delegation_token") or "").strip()
+        delegation_jti = ""
+        if delegation_token:
+            key_hex = (os.getenv("DELEGATION_TOKEN_KEY") or "").strip()
+            chk = parse_and_verify_delegation_token(
+                key_hex=key_hex,
+                token=delegation_token,
+                expected_session=session,
+                expected_subject=caller,
+                expected_intent=intent_id,
+            )
+            if not chk.ok or chk.token is None:
+                obs = {
+                    "status": "DENY",
+                    "summary": "Delegation token verification failed.",
+                    "data": {"caller": str(caller), "intent_id": str(intent_id), "reason_code": str(chk.code)},
+                    "artifacts": [],
+                    "reason_code": str(chk.code),
+                }
+                audit.log(AuditEvent(ts=now_ts(), event="act_result", session=session, caller=str(caller), intent_id=intent_id, status=str(obs.get("status", "")), reason_code=str(obs.get("reason_code", ""))))
+                return obs
+            tok = chk.token
+            delegation_jti = str(tok.jti)
+            if self.delegations.is_revoked(delegation_jti):
+                obs = {
+                    "status": "DENY",
+                    "summary": "Delegation token revoked.",
+                    "data": {"caller": str(caller), "intent_id": str(intent_id), "delegation_jti": delegation_jti},
+                    "artifacts": [],
+                    "reason_code": "DELEGATION_REVOKED",
+                }
+                audit.log(AuditEvent(ts=now_ts(), event="act_result", session=session, caller=str(caller), intent_id=intent_id, status=str(obs.get("status", "")), reason_code=str(obs.get("reason_code", ""))))
+                return obs
+            if external_principal and external_principal != tok.iss:
+                obs = {
+                    "status": "DENY",
+                    "summary": "External principal mismatches delegation issuer.",
+                    "data": {"runtime_external_principal": external_principal, "delegation_issuer": tok.iss},
+                    "artifacts": [],
+                    "reason_code": "EXTERNAL_PRINCIPAL_MISMATCH",
+                }
+                audit.log(AuditEvent(ts=now_ts(), event="act_result", session=session, caller=str(caller), intent_id=intent_id, status=str(obs.get("status", "")), reason_code=str(obs.get("reason_code", ""))))
+                return obs
+            external_principal = str(tok.iss)
+
+        if external_principal and self._is_side_effect_intent(intent_id):
+            req_dlg = bool(int(os.getenv("DELEGATION_REQUIRED_FOR_EXTERNAL", "1") or "1"))
+            if req_dlg and not delegation_jti:
+                obs = {
+                    "status": "DENY",
+                    "summary": "External principal requires a delegation token for side effects.",
+                    "data": {"external_principal": external_principal, "intent_id": str(intent_id)},
+                    "artifacts": [],
+                    "reason_code": "DELEGATION_REQUIRED",
+                }
+                audit.log(AuditEvent(ts=now_ts(), event="act_result", session=session, caller=str(caller), intent_id=intent_id, status=str(obs.get("status", "")), reason_code=str(obs.get("reason_code", ""))))
+                return obs
+
+        constraints2 = dict(c0)
+        merged_ctx = dict(auth_ctx)
+        if external_principal:
+            merged_ctx["external_principal"] = external_principal
+            constraints2["external_principal"] = external_principal
+        if delegation_jti:
+            merged_ctx["delegation_jti"] = delegation_jti
+        if merged_ctx:
+            constraints2["_auth_ctx"] = merged_ctx
+
         audit.log(
             AuditEvent(
                 ts=now_ts(),
@@ -80,18 +175,20 @@ class IntentRouter:
                     "input_keys": sorted(list((inputs or {}).keys())),
                     "orig_caller": str(orig_caller),
                     "workload_skill_digest": (wt.skill_digest if wt else ""),
+                    "external_principal": external_principal,
+                    "delegation_jti": delegation_jti,
                 },
             )
         )
 
-        caps = get_capabilities(caller)
+        caps = get_effective_capabilities(caller, external_principal=(external_principal or None))
         if not caps.allow_intent(intent_id):
             obs = {
                 "status": "DENY",
                 "summary": "Caller capability does not allow this intent.",
-                "data": {"caller": caller, "intent_id": intent_id},
+                "data": {"caller": caller, "intent_id": intent_id, "external_principal": external_principal},
                 "artifacts": [],
-                "reason_code": "CAPABILITY_DENY",
+                "reason_code": ("PRINCIPAL_CAPABILITY_DENY" if external_principal else "CAPABILITY_DENY"),
             }
             audit.log(AuditEvent(ts=now_ts(), event="act_result", session=session, caller=caller, intent_id=intent_id, status=str(obs.get("status", "")), reason_code=str(obs.get("reason_code", ""))))
             return obs
@@ -100,7 +197,7 @@ class IntentRouter:
             ok_turn, code_turn, turn_data = self.turn_gate.on_non_finalize(
                 session=session,
                 caller=caller,
-                turn_id=str((constraints or {}).get("turn_id", "")),
+                turn_id=str((constraints2 or {}).get("turn_id", "")),
             )
             if not ok_turn:
                 obs = {
@@ -137,31 +234,31 @@ class IntentRouter:
             audit.log(AuditEvent(ts=now_ts(), event="act_result", session=session, caller=caller, intent_id=intent_id, status=str(obs.get("status", "")), reason_code=str(obs.get("reason_code", ""))))
             return obs
         if intent_id == "Declassify":
-            obs = self.crypto.declassify(inputs, constraints, session=session, caller=caller)
+            obs = self.crypto.declassify(inputs, constraints2, session=session, caller=caller)
             audit.log(AuditEvent(ts=now_ts(), event="act_result", session=session, caller=caller, intent_id=intent_id, status=str(obs.get("status", "")), reason_code=str(obs.get("reason_code", ""))))
             return obs
         if intent_id == "CheckMessagePolicy":
-            obs = self.msg.check_message_policy(inputs, session=session, caller=caller)
+            obs = self.msg.check_message_policy(inputs, constraints=constraints2, session=session, caller=caller)
             audit.log(AuditEvent(ts=now_ts(), event="act_result", session=session, caller=caller, intent_id=intent_id, status=str(obs.get("status", "")), reason_code=str(obs.get("reason_code", ""))))
             return obs
         if intent_id == "SendMessage":
-            obs = self.msg.send_message(inputs, constraints, session=session, caller=caller)
+            obs = self.msg.send_message(inputs, constraints2, session=session, caller=caller)
             audit.log(AuditEvent(ts=now_ts(), event="act_result", session=session, caller=caller, intent_id=intent_id, status=str(obs.get("status", "")), reason_code=str(obs.get("reason_code", ""))))
             return obs
         if intent_id == "CheckWebhookPolicy":
-            obs = self.webhook.check_webhook_policy(inputs, session=session, caller=caller)
+            obs = self.webhook.check_webhook_policy(inputs, constraints=constraints2, session=session, caller=caller)
             audit.log(AuditEvent(ts=now_ts(), event="act_result", session=session, caller=caller, intent_id=intent_id, status=str(obs.get("status", "")), reason_code=str(obs.get("reason_code", ""))))
             return obs
         if intent_id == "PostWebhook":
-            obs = self.webhook.post_webhook(inputs, constraints, session=session, caller=caller)
+            obs = self.webhook.post_webhook(inputs, constraints2, session=session, caller=caller)
             audit.log(AuditEvent(ts=now_ts(), event="act_result", session=session, caller=caller, intent_id=intent_id, status=str(obs.get("status", "")), reason_code=str(obs.get("reason_code", ""))))
             return obs
         if intent_id == "FetchResource":
-            obs = self.net.fetch(inputs, constraints, session=session, caller=caller)
+            obs = self.net.fetch(inputs, constraints2, session=session, caller=caller)
             audit.log(AuditEvent(ts=now_ts(), event="act_result", session=session, caller=caller, intent_id=intent_id, status=str(obs.get("status", "")), reason_code=str(obs.get("reason_code", ""))))
             return obs
         if intent_id == "CheckFetchPolicy":
-            obs = self.net.check_fetch_policy(inputs, session=session, caller=caller)
+            obs = self.net.check_fetch_policy(inputs, constraints=constraints2, session=session, caller=caller)
             audit.log(AuditEvent(ts=now_ts(), event="act_result", session=session, caller=caller, intent_id=intent_id, status=str(obs.get("status", "")), reason_code=str(obs.get("reason_code", ""))))
             return obs
         if intent_id == "WriteWorkspaceFile":
@@ -173,11 +270,26 @@ class IntentRouter:
             audit.log(AuditEvent(ts=now_ts(), event="act_result", session=session, caller=caller, intent_id=intent_id, status=str(obs.get("status", "")), reason_code=str(obs.get("reason_code", ""))))
             return obs
         if intent_id == "RevokeHandle":
-            obs = self.crypto.revoke_handle(inputs, constraints, session=session, caller=caller)
+            obs = self.crypto.revoke_handle(inputs, constraints2, session=session, caller=caller)
             audit.log(AuditEvent(ts=now_ts(), event="act_result", session=session, caller=caller, intent_id=intent_id, status=str(obs.get("status", "")), reason_code=str(obs.get("reason_code", ""))))
             return obs
         if intent_id == "RevokeSession":
-            obs = self.crypto.revoke_session(inputs, constraints, session=session, caller=caller)
+            obs = self.crypto.revoke_session(inputs, constraints2, session=session, caller=caller)
+            audit.log(AuditEvent(ts=now_ts(), event="act_result", session=session, caller=caller, intent_id=intent_id, status=str(obs.get("status", "")), reason_code=str(obs.get("reason_code", ""))))
+            return obs
+        if intent_id == "RevokeDelegation":
+            user_confirm = bool((constraints2 or {}).get("user_confirm", False))
+            jti = str((inputs or {}).get("delegation_jti") or "").strip()
+            if not user_confirm:
+                obs = {"status": "DENY", "summary": "Delegation revocation requires explicit user confirmation.", "data": {"delegation_jti": jti}, "artifacts": [], "reason_code": "REQUIRE_CONFIRM"}
+                audit.log(AuditEvent(ts=now_ts(), event="act_result", session=session, caller=caller, intent_id=intent_id, status=str(obs.get("status", "")), reason_code=str(obs.get("reason_code", ""))))
+                return obs
+            if not jti:
+                obs = {"status": "DENY", "summary": "Missing delegation_jti.", "data": {}, "artifacts": [], "reason_code": "BAD_ARGS"}
+                audit.log(AuditEvent(ts=now_ts(), event="act_result", session=session, caller=caller, intent_id=intent_id, status=str(obs.get("status", "")), reason_code=str(obs.get("reason_code", ""))))
+                return obs
+            ok = self.delegations.revoke(jti=jti, session=session, caller=caller, reason=str((inputs or {}).get("reason") or ""))
+            obs = {"status": "OK" if ok else "DENY", "summary": "Delegation revoked." if ok else "Delegation revocation failed.", "data": {"delegation_jti": jti}, "artifacts": [], "reason_code": "ALLOW" if ok else "DELEGATION_REVOKE_FAILED"}
             audit.log(AuditEvent(ts=now_ts(), event="act_result", session=session, caller=caller, intent_id=intent_id, status=str(obs.get("status", "")), reason_code=str(obs.get("reason_code", ""))))
             return obs
         if intent_id == "ListWorkspaceFiles":
@@ -197,11 +309,11 @@ class IntentRouter:
             audit.log(AuditEvent(ts=now_ts(), event="act_result", session=session, caller=caller, intent_id=intent_id, status=str(obs.get("status", "")), reason_code=str(obs.get("reason_code", ""))))
             return obs
         if intent_id == "CheckSkillInstallPolicy":
-            obs = self.skill.check_skill_install_policy(inputs, session=session, caller=caller)
+            obs = self.skill.check_skill_install_policy(inputs, constraints=constraints2, session=session, caller=caller)
             audit.log(AuditEvent(ts=now_ts(), event="act_result", session=session, caller=caller, intent_id=intent_id, status=str(obs.get("status", "")), reason_code=str(obs.get("reason_code", ""))))
             return obs
         if intent_id == "CommitSkillInstall":
-            obs = self.skill.commit_skill_install(inputs, constraints, session=session, caller=caller)
+            obs = self.skill.commit_skill_install(inputs, constraints2, session=session, caller=caller)
             audit.log(AuditEvent(ts=now_ts(), event="act_result", session=session, caller=caller, intent_id=intent_id, status=str(obs.get("status", "")), reason_code=str(obs.get("reason_code", ""))))
             return obs
         if intent_id == "ListEnabledSkills":
@@ -233,12 +345,12 @@ class IntentRouter:
             audit.log(AuditEvent(ts=now_ts(), event="act_result", session=session, caller=caller, intent_id=intent_id, status=str(obs.get("status", "")), reason_code=str(obs.get("reason_code", ""))))
             return obs
         if intent_id == "FinalizeOutput":
-            obs = self.output.finalize_output(inputs, constraints, session=session, caller=caller)
+            obs = self.output.finalize_output(inputs, constraints2, session=session, caller=caller)
             if str(obs.get("status", "")) == "OK":
                 okf, codef, dataf = self.turn_gate.on_finalize(
                     session=session,
                     caller=caller,
-                    turn_id=str((constraints or {}).get("turn_id", "")),
+                    turn_id=str((constraints2 or {}).get("turn_id", "")),
                 )
                 if not okf:
                     obs = {

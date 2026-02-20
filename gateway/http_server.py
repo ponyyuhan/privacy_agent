@@ -8,6 +8,7 @@ from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field, ValidationError
 
 from .config import settings
+from .federated_auth import verify_federated_ingress
 from .fss_pir import PirClient
 from .guardrails import ObliviousGuardrails
 from .handles import HandleStore
@@ -72,6 +73,15 @@ def act(
     payload: dict[str, Any],
     authorization: str | None = Header(default=None),
     x_mirage_session: str | None = Header(default=None),
+    x_mirage_external_principal: str | None = Header(default=None),
+    x_mirage_delegation_token: str | None = Header(default=None),
+    x_mtls_client_cert_sha256: str | None = Header(default=None),
+    x_forwarded_client_cert_sha256: str | None = Header(default=None),
+    x_mirage_sig_kid: str | None = Header(default=None),
+    x_mirage_sig: str | None = Header(default=None),
+    x_mirage_sig_ts_ms: str | None = Header(default=None),
+    x_mirage_sig_nonce: str | None = Header(default=None),
+    x_mirage_proof_token: str | None = Header(default=None),
 ) -> dict[str, Any]:
     _require_bearer_token(authorization)
     session = _resolve_session(x_mirage_session)
@@ -81,10 +91,48 @@ def act(
     except ValidationError as e:
         raise HTTPException(status_code=400, detail={"error": "bad arguments", "details": e.errors()})
 
+    fd = verify_federated_ingress(
+        method="POST",
+        path="/act",
+        payload=payload if isinstance(payload, dict) else {},
+        session=session,
+        external_principal=str(x_mirage_external_principal or ""),
+        mtls_client_cert_sha256=str(x_mtls_client_cert_sha256 or x_forwarded_client_cert_sha256 or ""),
+        sig_kid=str(x_mirage_sig_kid or ""),
+        sig_value=str(x_mirage_sig or ""),
+        sig_ts_ms=str(x_mirage_sig_ts_ms or ""),
+        sig_nonce=str(x_mirage_sig_nonce or ""),
+        proof_token=str(x_mirage_proof_token or ""),
+    )
+    if not fd.ok:
+        raise HTTPException(status_code=403, detail={"error": "federated_auth_failed", "reason_code": fd.code})
+
+    constraints = dict(act_args.constraints or {})
+    # HTTP ingress identity is trusted input; runtime-provided constraints are not.
+    c_ext = str((constraints or {}).get("external_principal") or "").strip()
+    if fd.external_principal:
+        if c_ext and c_ext != fd.external_principal:
+            raise HTTPException(
+                status_code=400,
+                detail={"error": "external_principal_mismatch", "runtime": c_ext, "ingress": fd.external_principal},
+            )
+        constraints["external_principal"] = fd.external_principal
+    if isinstance(x_mirage_delegation_token, str) and x_mirage_delegation_token.strip():
+        constraints["delegation_token"] = x_mirage_delegation_token.strip()
+    auth_ctx = dict(fd.auth_context or {})
+    if auth_ctx:
+        old_ctx = constraints.get("_auth_ctx")
+        if isinstance(old_ctx, dict):
+            merged = dict(old_ctx)
+            merged.update(auth_ctx)
+            constraints["_auth_ctx"] = merged
+        else:
+            constraints["_auth_ctx"] = auth_ctx
+
     obs = _router.act(
         act_args.intent_id,
         act_args.inputs,
-        act_args.constraints,
+        constraints,
         caller=act_args.caller,
         session=session,
     )

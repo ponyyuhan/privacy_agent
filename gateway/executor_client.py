@@ -28,6 +28,8 @@ class ExecutorClient:
         session: str = "",
         user_confirm: bool = False,
         domain: str = "",
+        external_principal: str = "",
+        delegation_jti: str = "",
     ) -> Dict[str, Any]:
         payload = {
             "action_id": action_id,
@@ -42,6 +44,8 @@ class ExecutorClient:
             "caller": caller,
             "session": session,
             "user_confirm": bool(user_confirm),
+            "external_principal": str(external_principal or ""),
+            "delegation_jti": str(delegation_jti or ""),
         }
         u = str(self.base_url).rstrip("/")
         r = session_for(u).post(f"{u}/exec/send_message", json=payload, timeout=10)
@@ -61,6 +65,8 @@ class ExecutorClient:
         user_confirm: bool = False,
         recipient: str = "",
         text: str = "",
+        external_principal: str = "",
+        delegation_jti: str = "",
     ) -> Dict[str, Any]:
         payload = {
             "action_id": action_id,
@@ -73,6 +79,8 @@ class ExecutorClient:
             "user_confirm": bool(user_confirm),
             "recipient": recipient,
             "text": text,
+            "external_principal": str(external_principal or ""),
+            "delegation_jti": str(delegation_jti or ""),
         }
         u = str(self.base_url).rstrip("/")
         r = session_for(u).post(f"{u}/exec/fetch", json=payload, timeout=10)
@@ -93,6 +101,8 @@ class ExecutorClient:
         user_confirm: bool = False,
         recipient: str = "",
         text: str = "",
+        external_principal: str = "",
+        delegation_jti: str = "",
     ) -> Dict[str, Any]:
         payload = {
             "action_id": action_id,
@@ -106,6 +116,8 @@ class ExecutorClient:
             "user_confirm": bool(user_confirm),
             "recipient": recipient,
             "text": text,
+            "external_principal": str(external_principal or ""),
+            "delegation_jti": str(delegation_jti or ""),
         }
         u = str(self.base_url).rstrip("/")
         r = session_for(u).post(f"{u}/exec/webhook", json=payload, timeout=10)
@@ -122,6 +134,8 @@ class ExecutorClient:
         caller: str = "",
         session: str = "",
         user_confirm: bool = False,
+        external_principal: str = "",
+        delegation_jti: str = "",
     ) -> Dict[str, Any]:
         payload = {
             "action_id": action_id,
@@ -131,6 +145,8 @@ class ExecutorClient:
             "caller": caller,
             "session": session,
             "user_confirm": bool(user_confirm),
+            "external_principal": str(external_principal or ""),
+            "delegation_jti": str(delegation_jti or ""),
         }
         u = str(self.base_url).rstrip("/")
         r = session_for(u).post(f"{u}/exec/skill_install", json=payload, timeout=10)

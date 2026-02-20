@@ -14,7 +14,7 @@ import yaml
 from common.canonical import request_sha256_v1
 from common.sanitize import PATCH_CLAMP_LEN, PATCH_NOOP, PATCH_REDACT, SanitizePatch
 
-from .capabilities import get_capabilities
+from .capabilities import get_effective_capabilities
 from .fss_pir import PirClient
 from .guardrails import stable_idx
 from .skill_ingress import extract_install_tokens
@@ -344,6 +344,7 @@ class SkillIngressPolicyEngine:
         base64_obf: bool,
         session: str,
         caller: str,
+        auth_context: Dict[str, Any] | None = None,
     ) -> Dict[str, Any]:
         if self._unified is not None:
             return self._unified.preview_skill_install(
@@ -354,8 +355,18 @@ class SkillIngressPolicyEngine:
                 base64_obf=base64_obf,
                 session=session,
                 caller=caller,
+                auth_context=auth_context,
             )
-        caps = get_capabilities(caller)
+        auth_ctx = dict(auth_context or {})
+        external_principal = str(auth_ctx.get("external_principal") or "")
+        delegation_jti = str(auth_ctx.get("delegation_jti") or "")
+        hash_ctx: dict[str, Any] = {}
+        if external_principal:
+            hash_ctx["external_principal"] = external_principal
+        if delegation_jti:
+            hash_ctx["delegation_jti"] = delegation_jti
+
+        caps = get_effective_capabilities(caller, external_principal=(external_principal or None))
         cap_install = 1 if caps.egress_ok(kind="skill_install") else 0
 
         # Fixed-shape PIR surface.
@@ -365,6 +376,7 @@ class SkillIngressPolicyEngine:
             caller=str(caller),
             session=str(session),
             inputs={"skill_id": str(skill_id), "skill_digest": str(skill_digest)},
+            context=hash_ctx,
         )
 
         if self.policy_bypass:
@@ -373,6 +385,7 @@ class SkillIngressPolicyEngine:
                 "program_id": "skill_ingress_v1",
                 "action_id": action_id,
                 "request_sha256": request_sha,
+                "auth_context": hash_ctx,
                 "allow_pre": True,
                 "need_confirm": False,
                 "patch": patch.to_dict(),
@@ -525,6 +538,7 @@ class SkillIngressPolicyEngine:
             "program_id": program_id,
             "action_id": action_id,
             "request_sha256": request_sha,
+            "auth_context": hash_ctx,
             "allow_pre": bool(allow_pre == 1),
             "need_confirm": bool(need_confirm == 1),
             "patch": patch.to_dict(),
@@ -565,6 +579,17 @@ class SkillIngressPolicyEngine:
             return {"status": "DENY", "summary": "tx_id bound to a different caller.", "data": {}, "artifacts": [], "reason_code": "TX_CALLER_MISMATCH"}
 
         pv = rec.preview or {}
+        auth_ctx = (constraints or {}).get("_auth_ctx") if isinstance((constraints or {}).get("_auth_ctx"), dict) else {}
+        expected_ctx = pv.get("auth_context") if isinstance(pv.get("auth_context"), dict) else {}
+        if expected_ctx:
+            if dict(expected_ctx) != dict(auth_ctx):
+                return {
+                    "status": "DENY",
+                    "summary": "tx_id bound to a different auth context.",
+                    "data": {"tx_id": rec.tx_id, "expected_auth_context": expected_ctx},
+                    "artifacts": [],
+                    "reason_code": "TX_AUTH_CONTEXT_MISMATCH",
+                }
         allow_pre = bool(pv.get("allow_pre", False))
         need_confirm = bool(pv.get("need_confirm", False))
         patch_dict = pv.get("patch") or {}

@@ -55,9 +55,13 @@ where:
 3. `session` is the runtime session binding.
 4. `inputs_eff` are the effectful fields used by request hash binding.
 
-Define the context tuple:
+Define the hash context tuple:
 
-`ctx = (action_id, program_id, request_sha256)`
+`hctx = (external_principal, delegation_jti)`
+
+Define the commit context tuple:
+
+`ctx = (action_id, program_id, request_sha256, hctx)`
 
 `request_sha256` MUST be computed by the canonical hash function in `common/canonical.py:request_sha256_v1`.
 
@@ -71,6 +75,14 @@ Define the context tuple:
 4. `caller: string` REQUIRED
 
 No additional top-level fields are allowed by the MCP tool schema.
+
+`constraints` MAY include:
+
+1. `external_principal: string`
+2. `delegation_token: string`
+3. `user_confirm: boolean`
+
+When HTTP ingress federation is enabled, these fields are bound to trusted ingress headers and runtime-supplied conflicting values MUST be rejected.
 
 ### 3.3 `act` Response Envelope
 
@@ -103,6 +115,7 @@ PREVIEW MUST bind `tx_id` to:
 2. `caller`.
 3. `action_id`.
 4. `request_sha256`.
+5. `auth_context` which includes `external_principal` and `delegation_jti` when present.
 
 ### 4.2 COMMIT Input Contract
 
@@ -112,6 +125,7 @@ A COMMIT request to executor endpoints MUST include:
 2. `action_id`.
 3. `commit` object with `policy0` and `policy1`.
 4. Optional user confirmation flag for confirm-required actions.
+5. Optional `external_principal` and `delegation_jti` fields when delegation is in use.
 
 Executor MUST recompute `request_sha256` from received request payload and compare with both proof shares.
 
@@ -161,15 +175,20 @@ Any failed check MUST fail closed.
 
 1. `UNKNOWN_INTENT`
 2. `CAPABILITY_DENY`
-3. `WORKLOAD_TOKEN_INVALID`
-4. `TX_INVALID`
-5. `TX_SESSION_MISMATCH`
-6. `TX_CALLER_MISMATCH`
-7. `POLICY_DENY`
-8. `REQUIRE_CONFIRM`
-9. `ALLOW`
-10. `HIGH_HANDLE_BLOCKED`
-11. `IOC_BLOCKED`
+3. `PRINCIPAL_CAPABILITY_DENY`
+4. `WORKLOAD_TOKEN_INVALID`
+5. `TX_INVALID`
+6. `TX_SESSION_MISMATCH`
+7. `TX_CALLER_MISMATCH`
+8. `TX_AUTH_CONTEXT_MISMATCH`
+9. `POLICY_DENY`
+10. `REQUIRE_CONFIRM`
+11. `ALLOW`
+12. `HIGH_HANDLE_BLOCKED`
+13. `IOC_BLOCKED`
+14. `DELEGATION_REQUIRED`
+15. `DELEGATION_REVOKED`
+16. `DELEGATION_SCOPE_DENY`
 
 ### 7.2 Executor-Side Common Codes
 
@@ -192,8 +211,9 @@ The following invariants are normative:
 1. No side effect commit without dual valid proofs and request hash match.
 2. No side effect commit on replayed `action_id` within replay window.
 3. No bypass from PREVIEW binding through caller or session mismatch.
-4. No plaintext high-sensitivity release without explicit declassification path.
-5. No silent downgrade from verified capsule mediation to unverified mode.
+4. No bypass from PREVIEW binding through `external_principal` or `delegation_jti` mismatch.
+5. No plaintext high-sensitivity release without explicit declassification path.
+6. No silent downgrade from verified capsule mediation to unverified mode.
 
 ## 9. Versioning and Compatibility
 

@@ -233,6 +233,55 @@ class SecurityGameTests(unittest.TestCase):
         self.assertIsNone(tag)
         self.assertNotEqual(code, "OK")
 
+    def test_external_principal_binding_denied(self) -> None:
+        action_id = "a_principal_bind"
+        program_id = "policy_unified_v1"
+        req_sha = request_sha256_v1(
+            intent_id="SendMessage",
+            caller="caller_a",
+            session="session_a",
+            inputs={"channel": "email", "recipient": "alice@example.com", "domain": "", "text": "hello"},
+            context={"external_principal": "ext:internal-blue", "delegation_jti": "dlg_1"},
+        )
+        p0 = _mk_commit_proof(
+            server_id=0,
+            key_hex=self.k0,
+            action_id=action_id,
+            program_id=program_id,
+            request_sha256=req_sha,
+            outputs={"allow_pre": 1, "need_confirm": 0, "patch0": 0, "patch1": 0},
+            ts=int(time.time()),
+        )
+        p1 = _mk_commit_proof(
+            server_id=1,
+            key_hex=self.k1,
+            action_id=action_id,
+            program_id=program_id,
+            request_sha256=req_sha,
+            outputs={"allow_pre": 0, "need_confirm": 0, "patch0": 0, "patch1": 0},
+            ts=int(time.time()),
+        )
+        req = ex.ExecSendMessageReq(
+            action_id=action_id,
+            channel="email",
+            recipient="alice@example.com",
+            domain="",
+            text="hello",
+            artifacts=[],
+            dlp_mode="fourgram",
+            evidence={},
+            commit={"policy0": p0, "policy1": p1},
+            caller="caller_a",
+            session="session_a",
+            user_confirm=False,
+            external_principal="ext:internal-red",
+            delegation_jti="dlg_1",
+        )
+        r = ex.exec_send_message(req)
+        self.assertEqual(str(r.get("status")), "DENY")
+        self.assertEqual(str(r.get("reason_code")), "BAD_COMMIT_PROOF")
+        self.assertEqual(str(r.get("details")), "bad_request_sha256")
+
     def test_duplicate_server_id_rejected(self) -> None:
         action_id = "a_dup_sid"
         program_id = "policy_unified_v1"

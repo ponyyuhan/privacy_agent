@@ -11,7 +11,7 @@ class WebhookExec:
         self.handles = handles
         self.policy = policy
 
-    def check_webhook_policy(self, inputs: Dict[str, Any], session: str, caller: str = "unknown") -> Dict[str, Any]:
+    def check_webhook_policy(self, inputs: Dict[str, Any], constraints: Dict[str, Any] | None = None, session: str = "", caller: str = "unknown") -> Dict[str, Any]:
         domain = str(inputs.get("domain", "example.com"))
         path = str(inputs.get("path", "/"))
         body = inputs.get("body")
@@ -19,10 +19,12 @@ class WebhookExec:
             # Allow passing a JSON-ish object and stringify (demo).
             body = str(body or "")
 
+        auth_ctx = (constraints or {}).get("_auth_ctx") if isinstance((constraints or {}).get("_auth_ctx"), dict) else {}
+        pv_constraints = {"_auth_ctx": dict(auth_ctx)} if auth_ctx else {}
         pv = self.policy.preview(
             intent_id="CheckWebhookPolicy",
             inputs={"domain": domain, "path": path, "text": body, "recipient": str(inputs.get("recipient", "")), "artifacts": []},
-            constraints={},
+            constraints=pv_constraints,
             session=session,
             caller=caller,
         )
@@ -58,9 +60,17 @@ class WebhookExec:
             body = str(body or "")
         tx_id = str(inputs.get("tx_id") or "").strip()
         user_confirm = bool((constraints or {}).get("user_confirm", False))
+        auth_ctx = (constraints or {}).get("_auth_ctx") if isinstance((constraints or {}).get("_auth_ctx"), dict) else {}
+        pv_constraints = {"_auth_ctx": dict(auth_ctx)} if auth_ctx else {}
 
         if tx_id:
-            auth = self.policy.commit_from_tx(tx_id=tx_id, intent_id="PostWebhook", constraints={"user_confirm": user_confirm}, session=session, caller=caller)
+            auth = self.policy.commit_from_tx(
+                tx_id=tx_id,
+                intent_id="PostWebhook",
+                constraints={"user_confirm": user_confirm, "_auth_ctx": dict(auth_ctx)} if auth_ctx else {"user_confirm": user_confirm},
+                session=session,
+                caller=caller,
+            )
             if auth.get("status") != "OK":
                 return auth
             commit_ev = (auth.get("data") or {}).get("commit_evidence") or {}
@@ -70,7 +80,7 @@ class WebhookExec:
             pv = self.policy.preview(
                 intent_id="PostWebhook",
                 inputs={"domain": domain, "path": path, "text": body, "recipient": str(inputs.get("recipient", "")), "artifacts": []},
-                constraints={},
+                constraints=pv_constraints,
                 session=session,
                 caller=caller,
             )
@@ -108,6 +118,8 @@ class WebhookExec:
             user_confirm=bool(user_confirm),
             recipient=str(dummy_recipient),
             text=body,
+            external_principal=str(auth_ctx.get("external_principal") or ""),
+            delegation_jti=str(auth_ctx.get("delegation_jti") or ""),
         )
         if resp.get("status") != "OK":
             return {"status": "DENY", "summary": "Executor denied the action.", "data": {"domain": domain, "path": path}, "artifacts": [], "reason_code": str(resp.get("reason_code") or "EXECUTOR_DENY")}

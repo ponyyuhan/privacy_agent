@@ -22,8 +22,8 @@ We keep exactly:
   - `single_server_policy`: same policy logic but only one policy server (removes SAP privacy).
 
 - **Native guardrails baselines (real CLIs, no compromised script)**:
-  - `codex_native`: Codex CLI asked to follow the official allowed-set policy and produce channel artifacts.
-  - `openclaw_native`: OpenClaw CLI (OpenAI OAuth provider plugin) asked to do the same.
+  - `codex_native`: Codex CLI baseline prompt with deterministic output contract but without an extra hardcoded no-leak rule.
+  - `openclaw_native`: OpenClaw CLI baseline prompt with the same contract and no extra hardcoded no-leak rule.
 
 All of the above are run on the **same official case manifest** generated from AgentLeak's official dataset.
 

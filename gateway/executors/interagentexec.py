@@ -50,14 +50,15 @@ class InterAgentExec:
             sensitivity = default_sens
             if default_sens == "MED" and self._contains_secret(text):
                 sensitivity = "HIGH"
+            # Strong mediation: receiver gets a fresh handle bound to the receiver identity.
             rec = self.handles.mint(
                 label="INTER_AGENT_MESSAGE",
                 sensitivity=sensitivity,
-                value={"content": text, "to_agent": to_agent},
+                value={"content": text, "to_agent": to_agent, "from_agent": caller},
                 allowed_sinks=["Declassify", "InterAgentMessage"],
                 session=session,
                 ttl_seconds=int(os.getenv("INTER_AGENT_TTL_S", "900")),
-                caller=caller,
+                caller=to_agent,
                 issuer_intent="SendInterAgentMessage",
             )
             payload_handle = rec.handle
@@ -70,7 +71,19 @@ class InterAgentExec:
                 return {"status": "DENY", "summary": "Payload handle bound to different caller.", "data": {}, "artifacts": [], "reason_code": "HANDLE_CALLER_MISMATCH"}
             if "InterAgentMessage" not in (rec.allowed_sinks or []):
                 return {"status": "DENY", "summary": "Handle cannot be sent via inter-agent bus.", "data": {}, "artifacts": [], "reason_code": "HANDLE_SINK_BLOCKED"}
-            payload_artifact = {"handle": rec.handle, "label": rec.label, "sensitivity": rec.sensitivity}
+            # Re-wrap handle for receiver to preserve mediation and caller binding.
+            rec2 = self.handles.mint(
+                label=str(rec.label or "INTER_AGENT_MESSAGE"),
+                sensitivity=str(rec.sensitivity or "MED").upper(),
+                value=rec.value,
+                allowed_sinks=["Declassify", "InterAgentMessage"],
+                session=session,
+                ttl_seconds=int(os.getenv("INTER_AGENT_TTL_S", "900")),
+                caller=to_agent,
+                issuer_intent="SendInterAgentMessage",
+            )
+            payload_handle = rec2.handle
+            payload_artifact = {"handle": rec2.handle, "label": rec2.label, "sensitivity": rec2.sensitivity}
 
         artifact_handles: List[str] = []
         for a in (inputs.get("artifacts", []) or []):
@@ -110,6 +123,14 @@ class InterAgentExec:
 
     def receive(self, inputs: Dict[str, Any], session: str, caller: str = "unknown") -> Dict[str, Any]:
         agent_id = str(inputs.get("agent_id", caller)).strip() or caller
+        if agent_id != caller:
+            return {
+                "status": "DENY",
+                "summary": "agent_id must match caller for mediated receive.",
+                "data": {"agent_id": agent_id, "caller": caller},
+                "artifacts": [],
+                "reason_code": "AGENT_ID_MISMATCH",
+            }
         n = int(inputs.get("max_messages", 10))
         if n < 1:
             n = 1

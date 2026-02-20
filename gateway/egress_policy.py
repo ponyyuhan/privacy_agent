@@ -18,7 +18,7 @@ from common.sanitize import (
     PATCH_REWRITE_DOMAIN_TO_PROXY,
     SanitizePatch,
 )
-from .capabilities import get_capabilities
+from .capabilities import get_effective_capabilities
 from .fss_pir import PirClient
 from .guardrails import fourgram_indices, stable_idx
 from .handles import HandleStore
@@ -486,7 +486,14 @@ class EgressPolicyEngine:
         """Run PREVIEW for a side-effect intent and return a tx_id to commit later."""
         if self._unified is not None:
             return self._unified.preview_egress(intent_id=intent_id, inputs=inputs, constraints=constraints, session=session, caller=caller)
-        _ = constraints  # reserved for future policy fields (rate limits, budgets, etc)
+        auth_ctx = (constraints or {}).get("_auth_ctx") if isinstance((constraints or {}).get("_auth_ctx"), dict) else {}
+        external_principal = str((auth_ctx or {}).get("external_principal") or "")
+        delegation_jti = str((auth_ctx or {}).get("delegation_jti") or "")
+        hash_ctx: dict[str, Any] = {}
+        if external_principal:
+            hash_ctx["external_principal"] = external_principal
+        if delegation_jti:
+            hash_ctx["delegation_jti"] = delegation_jti
         intent = str(intent_id)
         if intent not in ("SendMessage", "FetchResource", "PostWebhook", "CheckMessagePolicy", "CheckWebhookPolicy", "CheckFetchPolicy"):
             raise ValueError("unsupported intent for egress policy preview")
@@ -529,7 +536,7 @@ class EgressPolicyEngine:
             }
 
         # Capabilities (caller projection) is secret-shared into the MPC inputs.
-        caps = get_capabilities(caller)
+        caps = get_effective_capabilities(caller, external_principal=(external_principal or None))
         cap_send = 1 if caps.egress_ok(kind="send_message") else 0
         cap_fetch = 1 if caps.egress_ok(kind="fetch_resource") else 0
         cap_webhook = 1 if caps.egress_ok(kind="post_webhook") else 0
@@ -550,7 +557,13 @@ class EgressPolicyEngine:
             sha_inputs["path"] = path_real
             sha_inputs["body"] = text
 
-        request_sha = request_sha256_v1(intent_id=canonical_intent, caller=caller, session=session, inputs=sha_inputs)
+        request_sha = request_sha256_v1(
+            intent_id=canonical_intent,
+            caller=caller,
+            session=session,
+            inputs=sha_inputs,
+            context=hash_ctx,
+        )
 
         # Baseline-only insecure mode: bypass policy checks and PIR/MPC entirely.
         # This is used for ablations such as "sandbox-only".
@@ -560,6 +573,7 @@ class EgressPolicyEngine:
                 "program_id": "egress_v1",
                 "action_id": action_id,
                 "request_sha256": request_sha,
+                "auth_context": hash_ctx,
                 "allow_pre": True,
                 "need_confirm": False,
                 "patch": patch.to_dict(),
@@ -742,6 +756,7 @@ class EgressPolicyEngine:
             "program_id": program_id,
             "action_id": action_id,
             "request_sha256": request_sha,
+            "auth_context": hash_ctx,
             "allow_pre": bool(allow_pre == 1),
             "need_confirm": bool(need_confirm == 1),
             "patch": patch.to_dict(),
@@ -794,6 +809,18 @@ class EgressPolicyEngine:
             return {"status": "DENY", "summary": "tx_id bound to a different caller.", "data": {}, "artifacts": [], "reason_code": "TX_CALLER_MISMATCH"}
 
         pv = rec.preview or {}
+        auth_ctx = (constraints or {}).get("_auth_ctx") if isinstance((constraints or {}).get("_auth_ctx"), dict) else {}
+        expected_ctx = pv.get("auth_context") if isinstance(pv.get("auth_context"), dict) else {}
+        if expected_ctx:
+            # Request-hash context must remain stable across preview and commit.
+            if dict(expected_ctx) != dict(auth_ctx):
+                return {
+                    "status": "DENY",
+                    "summary": "tx_id bound to a different auth context.",
+                    "data": {"tx_id": rec.tx_id, "expected_auth_context": expected_ctx},
+                    "artifacts": [],
+                    "reason_code": "TX_AUTH_CONTEXT_MISMATCH",
+                }
         allow_pre = bool(pv.get("allow_pre", False))
         need_confirm = bool(pv.get("need_confirm", False))
         patch_dict = pv.get("patch") or {}

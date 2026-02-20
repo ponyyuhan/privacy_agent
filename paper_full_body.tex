@@ -135,6 +135,30 @@ The artifact field may include sealed handles and commit evidence.
 The executor exports effectful endpoints such as send message and skill install.
 Each effectful request includes a commit object that contains two policy server commit proofs.
 
+\subsection{Multi agent federation and delegated authority}
+\label{sec:multiagent}
+
+SecureClaw supports cross agent requests by introducing a delegated authority tuple
+\[
+\delta := (\mathsf{iss}, \mathsf{sub}, \mathsf{scope}, \mathsf{session}, \mathsf{exp}, \mathsf{jti})
+\]
+that is signed with an operator managed key.
+Here $\mathsf{iss}$ is an external principal, $\mathsf{sub}$ is the internal actor pattern, $\mathsf{scope}$ is an intent scope set, and $\mathsf{jti}$ is a revocable token identifier.
+
+The gateway verifies $\delta$ on every request and enforces four checks.
+First, session binding must match the active session.
+Second, caller binding must satisfy the subject pattern.
+Third, scope must include the requested intent.
+Fourth, the token identifier must not be present in the persistent revocation list.
+If any check fails, the gateway fails closed before dispatch.
+
+The effective authorization for each request is an intersection of internal actor capability and external principal capability.
+This dual subject rule prevents an external principal from upgrading an internal actor and prevents an internal actor from bypassing external policy constraints.
+
+Ingress federation is modeled as a separate authenticated edge.
+The HTTP gateway can require a pinned client certificate hash, a signed request envelope with freshness and nonce replay checks, and a short lived proof token.
+When enabled, these ingress claims are bound into request hashing context, so PREVIEW authorization cannot be replayed under a different principal or delegation identifier.
+
 \subsection{Sealed handles}
 
 A sealed handle is an opaque identifier $h$ minted by the gateway.
@@ -379,6 +403,16 @@ We compute Wilson confidence intervals with $z=1.96$ for each rate.
 We compute two sided Fisher exact test values for pairwise comparisons of leakage counts and block counts against the full system.
 We decompose error modes by channel, by task vertical, by attack family, and by reason code.
 All statistics are implemented in \texttt{scripts/fair\_full\_stats.py}.
+
+\subsection{Multi agent delegated workflow evaluation}
+\label{sec:multiagent-eval}
+
+We run a deterministic multi agent campaign that exercises delegated cross agent messaging and mediated memory access.
+The campaign includes seven cases: delegated $C2$ send, delegated $C2$ receive, missing delegation denial, explicit revocation, revoked token denial, dual principal denial for disallowed external intent, and delegated $C5$ mediated memory read.
+The campaign implementation is \texttt{scripts/multi\_agent\_federated\_eval.py} and output is \texttt{artifact\_out\_compare/multi\_agent\_federated\_eval.json}.
+
+The current artifact run reports seven of seven expected outcomes, with median latency $0.41$ milliseconds and $p95$ latency $8.28$ milliseconds for gateway level checks.
+These results validate that delegated authority and dual principal constraints are enforceable without adding high runtime overhead to the non effectful policy path.
 
 \section{Performance and deployability}
 \label{sec:perf}

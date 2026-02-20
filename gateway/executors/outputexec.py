@@ -24,6 +24,8 @@ class OutputExec:
         text = str(inputs.get("text", ""))
         artifacts = inputs.get("artifacts", []) or []
         user_confirm = bool((constraints or {}).get("user_confirm", False))
+        auth_ctx = (constraints or {}).get("_auth_ctx") if isinstance((constraints or {}).get("_auth_ctx"), dict) else {}
+        pv_constraints = {"_auth_ctx": dict(auth_ctx)} if auth_ctx else {}
         confirm_always = bool(int(os.getenv("MIRAGE_FINAL_OUTPUT_CONFIRM_ALWAYS", "1")))
 
         pv = self.policy.preview(
@@ -35,7 +37,7 @@ class OutputExec:
                 "text": text,
                 "artifacts": list(artifacts),
             },
-            constraints={},
+            constraints=pv_constraints,
             session=session,
             caller=caller,
         )
@@ -68,7 +70,7 @@ class OutputExec:
             auth = self.policy.commit_from_tx(
                 tx_id=tx_id,
                 intent_id="CheckMessagePolicy",
-                constraints={"user_confirm": True},
+                constraints={"user_confirm": True, "_auth_ctx": dict(auth_ctx)} if auth_ctx else {"user_confirm": True},
                 session=session,
                 caller=caller,
             )

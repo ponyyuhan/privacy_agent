@@ -26,7 +26,7 @@ from common.sanitize import (
     SanitizePatch,
 )
 
-from .capabilities import get_capabilities
+from .capabilities import get_effective_capabilities
 from .fss_pir import MixedPirClient, PirClient
 from .guardrails import fourgram_indices, stable_idx
 from .handles import HandleStore
@@ -1319,7 +1319,14 @@ class UnifiedPolicyEngine:
         session: str,
         caller: str,
     ) -> Dict[str, Any]:
-        _ = constraints
+        auth_ctx = (constraints or {}).get("_auth_ctx") if isinstance((constraints or {}).get("_auth_ctx"), dict) else {}
+        external_principal = str((auth_ctx or {}).get("external_principal") or "")
+        delegation_jti = str((auth_ctx or {}).get("delegation_jti") or "")
+        hash_ctx: dict[str, Any] = {}
+        if external_principal:
+            hash_ctx["external_principal"] = external_principal
+        if delegation_jti:
+            hash_ctx["delegation_jti"] = delegation_jti
         if self.handles is None:
             raise RuntimeError("unified_egress_requires_handle_store")
         intent = str(intent_id)
@@ -1377,7 +1384,13 @@ class UnifiedPolicyEngine:
         else:
             sha_inputs["path"] = path_real
             sha_inputs["body"] = text
-        request_sha = request_sha256_v1(intent_id=canonical_intent, caller=caller, session=session, inputs=sha_inputs)
+        request_sha = request_sha256_v1(
+            intent_id=canonical_intent,
+            caller=caller,
+            session=session,
+            inputs=sha_inputs,
+            context=hash_ctx,
+        )
 
         if self.policy_bypass:
             patch = SanitizePatch(PATCH_NOOP, {})
@@ -1385,6 +1398,7 @@ class UnifiedPolicyEngine:
                 "program_id": self.program_id,
                 "action_id": action_id,
                 "request_sha256": request_sha,
+                "auth_context": hash_ctx,
                 "allow_pre": True,
                 "need_confirm": False,
                 "patch": patch.to_dict(),
@@ -1413,7 +1427,7 @@ class UnifiedPolicyEngine:
                 "request_sha256": request_sha,
             }
 
-        caps = get_capabilities(caller)
+        caps = get_effective_capabilities(caller, external_principal=(external_principal or None))
         cap_send = 1 if caps.egress_ok(kind="send_message") else 0
         cap_fetch = 1 if caps.egress_ok(kind="fetch_resource") else 0
         cap_webhook = 1 if caps.egress_ok(kind="post_webhook") else 0
@@ -1523,6 +1537,7 @@ class UnifiedPolicyEngine:
             "program_id": str(self.program_id),
             "action_id": action_id,
             "request_sha256": request_sha,
+            "auth_context": hash_ctx,
             "allow_pre": bool(allow_pre == 1),
             "need_confirm": bool(need_confirm == 1),
             "patch": patch.to_dict(),
@@ -1561,8 +1576,18 @@ class UnifiedPolicyEngine:
         base64_obf: bool,
         session: str,
         caller: str,
+        auth_context: Dict[str, Any] | None = None,
     ) -> Dict[str, Any]:
-        caps = get_capabilities(caller)
+        auth_ctx = dict(auth_context or {})
+        external_principal = str(auth_ctx.get("external_principal") or "")
+        delegation_jti = str(auth_ctx.get("delegation_jti") or "")
+        hash_ctx: dict[str, Any] = {}
+        if external_principal:
+            hash_ctx["external_principal"] = external_principal
+        if delegation_jti:
+            hash_ctx["delegation_jti"] = delegation_jti
+
+        caps = get_effective_capabilities(caller, external_principal=(external_principal or None))
         cap_install = 1 if caps.egress_ok(kind="skill_install") else 0
 
         action_id = f"a_{secrets.token_urlsafe(12)}"
@@ -1571,6 +1596,7 @@ class UnifiedPolicyEngine:
             caller=str(caller),
             session=str(session),
             inputs={"skill_id": str(skill_id), "skill_digest": str(skill_digest)},
+            context=hash_ctx,
         )
 
         if self.policy_bypass:
@@ -1579,6 +1605,7 @@ class UnifiedPolicyEngine:
                 "program_id": str(self.program_id),
                 "action_id": action_id,
                 "request_sha256": request_sha,
+                "auth_context": hash_ctx,
                 "allow_pre": True,
                 "need_confirm": False,
                 "patch": patch.to_dict(),
@@ -1688,6 +1715,7 @@ class UnifiedPolicyEngine:
             "program_id": str(self.program_id),
             "action_id": action_id,
             "request_sha256": request_sha,
+            "auth_context": hash_ctx,
             "allow_pre": bool(allow_pre == 1),
             "need_confirm": bool(need_confirm == 1),
             "patch": patch.to_dict(),

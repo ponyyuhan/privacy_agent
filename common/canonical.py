@@ -14,7 +14,14 @@ def sha256_hex(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def request_sha256_v1(*, intent_id: str, caller: str, session: str, inputs: Dict[str, Any]) -> str:
+def request_sha256_v1(
+    *,
+    intent_id: str,
+    caller: str,
+    session: str,
+    inputs: Dict[str, Any],
+    context: Dict[str, Any] | None = None,
+) -> str:
     """Hash a side-effecting request for PREVIEW->COMMIT binding.
 
     Important:
@@ -27,6 +34,6 @@ def request_sha256_v1(*, intent_id: str, caller: str, session: str, inputs: Dict
         "caller": str(caller),
         "session": str(session),
         "inputs": inputs or {},
+        "context": context or {},
     }
     return sha256_hex(canonical_json_bytes(payload))
-
