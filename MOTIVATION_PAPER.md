@@ -8,10 +8,12 @@ The primary security gap in modern agent systems is not risk detection quality, 
 SecureClaw addresses this by moving trust from model compliance to a verifiable execution line:
 
 1. A single high-level action surface (`act`) for untrusted runtimes.
-2. Privacy-preserving outsourced policy checks via 2-server PIR (DPF/FSS).
+2. Handle-first secret flow by default, with explicit declassification gates for plaintext release.
 3. Transactional `PREVIEW -> COMMIT` with MPC-derived commit evidence.
 4. A separate executor that fail-closes without dual policy proofs.
-5. Capsule confinement to prevent direct local/network bypass by malicious skills.
+5. Executor-enforced sanitize patch application before effect commit (PEI).
+6. Capsule confinement to prevent direct local/network bypass by malicious skills.
+7. Delegation-aware hash-context binding for multi-principal federation paths.
 
 This document formalizes motivation, problem definition, objectives, and solution design based on the current project state and artifact outputs.
 
@@ -90,19 +92,27 @@ Assumptions:
 
 ### 3.1 NBE: Non-Bypassable Effects
 
-Any successful side effect in `SE` must include valid commit proofs from both policy servers, bound to the same `(action_id, program_id, request_sha256)`.
+Any successful side effect in `SE` must include valid commit proofs from both policy servers, bound to the same `(action_id, program_id, request_sha256)` where `request_sha256` binds `(v, intent_id, caller, session, inputs, auth_context)`.
 
 ### 3.2 SM: Secret Myopia
 
 Sensitive data must not be released as plaintext to untrusted runtimes by default; only opaque handles are returned unless explicit declassification constraints are met.
 
-### 3.3 SAP: Single-Auditor Privacy
+### 3.3 PEI: Patch-Carrying Egress Integrity
 
-A single policy server’s local transcript should not reveal concrete queried identities (recipient/domain/token) beyond declared leakage shape.
+If policy outputs require a sanitize patch, commit must apply it at the executor before side effects execute; patch bypass must fail closed.
 
 ### 3.4 SCS: Skill-Confined Safety
 
 Under capsule mediation assumptions, malicious skill code should be unable to bypass the `act` execution line via direct local process/network/file capabilities.
+
+### 3.5 DAS: Delegation-Aware Binding Safety
+
+Delegation and federated ingress context must be bound into `ReqHash(rho)` via `hctx`; cross-principal, cross-session, or cross-delegation replay of PREVIEW evidence must be rejected at COMMIT.
+
+### 3.6 SAP: Single-Auditor Privacy (optional deployment mode)
+
+A single policy server’s local transcript should not reveal concrete queried identities (recipient/domain/token) beyond declared leakage shape.
 
 ---
 
@@ -114,16 +124,22 @@ Under capsule mediation assumptions, malicious skill code should be unable to by
 2. **Sensitive data containment**  
    Read flows produce sealed handles instead of plaintext, with session/caller binding and confirmation gates.
 
-3. **Policy outsourcing with reduced single-point visibility**  
+3. **Patch-to-commit consistency**  
+   Required sanitize patches are enforced by executor commit semantics, not left to runtime discretion.
+
+4. **Policy outsourcing with reduced single-point visibility (optional mode)**  
    Membership checks run via 2-server PIR (DPF/FSS), avoiding cleartext index/value disclosure to one server.
 
-4. **Skill install as guarded side effect**  
+5. **Skill install as guarded side effect**  
    Skill enablement is moved into `PREVIEW -> COMMIT`, preventing direct “import-and-execute” trust collapse.
 
-5. **Runtime-level confinement path**  
+6. **Runtime-level confinement path**  
    Capsule + UDS netless mode addresses direct local bypass paths used by malicious skills.
 
-6. **Real-agent compatibility**  
+7. **Multi-principal replay resistance**  
+   Delegation + capability intersection + hash-context binding blocks cross-principal proof reuse.
+
+8. **Real-agent compatibility**  
    Mechanisms run not only in scripted demos but also in OpenClaw and NanoClaw runtime paths.
 
 ---
@@ -139,7 +155,7 @@ Routing and capability checks occur in `gateway/router.py`.
 
 - Sensitive read intents mint handles with `{session, caller, ttl, sensitivity}` bindings.
 - High-sensitivity handles cannot flow to egress sinks.
-- Declassification requires explicit confirmation.
+- Declassification requires explicit confirmation and can be budget/audit-accounted.
 
 ### 5.3 2-server PIR for policy membership (SAP)
 
@@ -155,19 +171,25 @@ This applies to recipient/domain allowlists, IOC domains, install markers, and D
 
 `PREVIEW`:
 
-1. Canonical request hash binding (`request_sha256_v1`).
+1. Canonical request hash binding (`request_sha256_v1`) over `(v, intent_id, caller, session, inputs, context)` where context carries `external_principal` and `delegation_jti` when present.
 2. Fixed-shape PIR query set for leakage reduction.
 3. MPC evaluation of policy DSL (`policy_server/policy.yaml`) via GMW + Beaver.
 4. `tx_id` issuance and commit evidence packaging.
 
 `COMMIT`:
 
-1. `tx_id` is validated for session/caller/TTL binding.
+1. `tx_id` is validated for session/caller/TTL/auth-context binding.
 2. Executor verifies dual commit proofs (MAC + metadata consistency).
 3. Executor reconstructs outputs and enforces sanitize patch internally.
 4. Side effect executes only if all constraints pass.
 
-### 5.5 Skill ingress control plane
+### 5.5 Patch-carrying egress integrity (PEI)
+
+- PREVIEW evidence carries patch constraints (identifier and/or patch-parameter binding).
+- COMMIT applies `sanitize(payload, patch)` in executor before effect execution.
+- If patch is required but payload is unsanitized, executor returns DENY.
+
+### 5.6 Skill ingress control plane
 
 Pipeline:
 
@@ -177,17 +199,23 @@ Pipeline:
 - Policy check combines PIR-derived IOC/install signals and obfuscation features.
 - Commit requires dual proofs; success mints workload token.
 
-### 5.6 Per-skill workload identity and least privilege
+### 5.7 Per-skill workload identity and least privilege
 
 `workload_token` (HMAC, session-bound) allows gateway to override untrusted `caller` into `skill:<digest>`, enabling least-privilege capability projection.
 
-### 5.7 Capsule mediation (SCS support)
+### 5.8 Capsule mediation (SCS support)
 
 Recommended secure mode:
 
 - Gateway exposed over UDS.
 - Capsule runtime has network disabled.
 - Direct local process execution and secret-path reads are denied by profile/namespace controls.
+
+### 5.9 Delegation + dual-subject intersection + federated binding (DAS)
+
+- Delegation token semantics: `delta=(iss,sub,scope,session,exp,jti)` with signature/session/scope/revocation checks.
+- Effective authorization uses capability intersection: `caps(caller) ∩ caps(external_principal)`.
+- `external_principal` and `delegation_jti` are bound into `hctx` and then into `ReqHash(rho)` to prevent cross-context replay.
 
 ---
 
@@ -233,13 +261,13 @@ Malicious flow observations:
 
 ### 6.4 Leakage-shaping evidence (single server transcript)
 
-- Unshaped mode: `n_unique_features = 17`, `accuracy = 0.5556`
-- Shaped mode: `n_unique_features = 1`, `accuracy = 0.2222`
+Primary source: `artifact_out_compare/leakage_sweep/leakage_model_sweep.json`.
 
-Outsourcing contrast:
+- Unshaped PIR transcript: `mi_bits = 0.4143349401222639`, `map_acc = 0.5144508670520231`, `chance_acc = 0.3333333333333333`.
+- Full-shaping PIR transcript (`shaped_pad4_cover1`): `mi_bits = 0.0`, `map_acc = 0.34545454545454546`.
+- Full-shaping MPC transcript (`shaped_pad4_cover1`): `mi_bits = 2.0776676398894596e-06`, `map_acc = 0.3175635718509758`.
 
-- Cleartext outsourcing: `id_accuracy = 1.0`
-- PIR outsourced transcript (single-server view): `id_accuracy = 0.0`
+Interpretation: under unified + bundled + fixed-shape routing, single-server distinguishability collapses to chance-level.
 
 ### 6.5 Performance evidence
 
@@ -259,10 +287,11 @@ Interpretation: compiled/vectorized backend substantially improves O(N) PIR eval
 
 ## 7. Research Contributions (Current State)
 
-1. A concrete non-bypassable enforcement line for agent side effects using dual-proof executor authorization.
-2. A practical integration of 2-server PIR (DPF/FSS) with policy externalization under single-auditor privacy constraints.
-3. Transactional skill ingress control with PREVIEW->COMMIT semantics and post-enable workload identity projection.
-4. Reproducible artifact with baselines/ablations plus real-agent validation paths.
+1. A concrete non-bypassable enforcement line for agent side effects using dual-proof executor authorization (NBE).
+2. Secret-myopia dataflow with explicit declassification and executor-enforced patch-carrying commit integrity (SM + PEI).
+3. Transactional skill ingress with capsule-contract-backed confinement semantics (SCS).
+4. Delegation-aware, multi-principal hash-context binding and capability-intersection enforcement (DAS).
+5. Optional single-auditor privacy mode for outsourced policy checks via 2-server PIR and fixed-shape leakage contracts (SAP).
 
 ---
 
@@ -270,8 +299,10 @@ Interpretation: compiled/vectorized backend substantially improves O(N) PIR eval
 
 1. Current MPC is a research implementation, not a full production 2PC framework replacement.
 2. Traffic-shape hiding is partial (fixed-shape/padding/bundle); full cover traffic remains future work.
-3. Capsule is MVP-level and platform-hardening-complete claims are out of scope.
-4. Benchmark scale and policy language coverage are still narrower than a full production deployment.
+3. Capsule is MVP-level and platform-hardening-complete claims are out of scope; SCS claims are conditional on contract verification passing.
+4. SAP is an optional mode and depends on non-collusion plus fixed-shape leakage assumptions.
+5. Request-hash binding claims rely on canonicalization consistency and correct key/revocation store operations.
+6. Benchmark scale and policy language coverage are still narrower than a full production deployment.
 
 These limitations do not negate the core systems claim; they define the current artifact boundary.
 
@@ -429,8 +460,8 @@ Generated artifacts used below:
 | R-12 | Suspicious skill install | Requires confirm | `report.json:skill_ingress.suspicious.check.reason_code=REQUIRE_CONFIRM` |
 | R-13 | IOC-tagged skill install | Blocked | `report.json:skill_ingress.ioc_blocked.check.reason_code=IOC_BLOCKED` |
 | R-14 | Compromised skill over-privilege attempt | Caller projected to `skill:<digest>`, `SendMessage` denied | `report.json:workload_identity.send_message.reason_code=CAPABILITY_DENY` |
-| R-15 | Policy outsourcing identity leakage | Cleartext outsourcing: `id_accuracy=1.0`; PIR outsourcing: `id_accuracy=0.0` | `report.json:outsourcing_comparison` |
-| R-16 | Transcript-shape side channel | `n_unique_features` reduced `17 -> 1`; inference accuracy reduced (`0.5556 -> 0.1111`) | `report.json:leakage_eval` |
+| R-15 | Policy outsourcing transcript leakage | Unshaped PIR transcript contains separable signal (`mi_bits=0.4143`, `map_acc=0.5145`) | `artifact_out_compare/leakage_sweep/leakage_model_sweep.json` |
+| R-16 | Constant-shape leakage suppression | Full shaping collapses signal (`pir.mi_bits=0.0`, `pir.map_acc=0.3455`; `mpc.mi_bits≈0`) near chance | `artifact_out_compare/leakage_sweep/leakage_model_sweep.json` |
 
 ### 14.3 Performance and deployment realism from this run
 

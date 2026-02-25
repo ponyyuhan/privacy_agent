@@ -24,6 +24,10 @@ We keep exactly:
 - **Native guardrails baselines (real CLIs, no compromised script)**:
   - `codex_native`: Codex CLI baseline prompt with deterministic output contract but without an extra hardcoded no-leak rule.
   - `openclaw_native`: OpenClaw CLI baseline prompt with the same contract and no extra hardcoded no-leak rule.
+- **Defense baselines (no anti-leak prompt tuning, runtime mediation wrappers)**:
+  - `codex_drift`: DRIFT-style injection isolation wrapper (`--defense drift`).
+  - `codex_ipiguard`: IPIGuard-style dependency sink guard wrapper (`--defense ipiguard`).
+  - `codex_agentarmor`: AgentArmor-style fail-closed runtime trace guard wrapper (`--defense agentarmor`).
 
 All of the above are run on the **same official case manifest** generated from AgentLeak's official dataset.
 
@@ -45,11 +49,11 @@ Therefore, we do not present it as the Codex/OpenClaw “native” baseline in t
 ## 3. Same-Cases / Same-Seed / Same-Metrics Procedure
 
 1. Generate an **official case manifest** (JSONL), derived from AgentLeak's official dataset and a fixed seed:
-   - `artifact_out_compare/fair_cases.jsonl`
+   - `artifact_out_compare_noprompt/fair_cases.jsonl`
 
 2. Run SecureClaw modes using our official-harness runner with `AGENTLEAK_CASES_MANIFEST_PATH` pinned to that manifest:
-   - output: `artifact_out_compare/fair_mirage/agentleak_eval/agentleak_channel_summary.json`
-   - per-case rows: `artifact_out_compare/fair_mirage/agentleak_eval/agentleak_eval_rows.csv`
+   - output: `artifact_out_compare_noprompt/fair_mirage/agentleak_eval/agentleak_channel_summary.json`
+   - per-case rows: `artifact_out_compare_noprompt/fair_mirage/agentleak_eval/agentleak_eval_rows.csv`
 
 3. Run native baselines against the *same manifest*:
    - runner: `scripts/native_official_baseline_eval.py`
@@ -57,7 +61,7 @@ Therefore, we do not present it as the Codex/OpenClaw “native” baseline in t
      - `.../native_official_baseline_summary.json` (includes per-case rows + summary)
 
 4. Aggregate into the single paper-facing file:
-   - `artifact_out_compare/fair_full_report.json`
+   - `artifact_out_compare_noprompt/fair_full_report.json`
 
 5. Produce statistics / breakdowns / significance tests:
    - `scripts/fair_full_stats.py` (Wilson 95% CI + two-sided Fisher exact tests vs `mirage_full`)
@@ -69,11 +73,12 @@ Therefore, we do not present it as the Codex/OpenClaw “native” baseline in t
 ## 4. Reproducing the Fair Report
 
 ```bash
-OUT_DIR=artifact_out_compare MIRAGE_SEED=7 \
+OUT_DIR=artifact_out_compare_noprompt MIRAGE_SEED=7 \
   FAIR_FULL_REUSE_NATIVE=1 FAIR_FULL_REUSE_SECURECLAW=1 \
+  DEFENSE_BASELINES=drift,ipiguard,agentarmor \
   python scripts/fair_full_compare.py
-python scripts/fair_full_stats.py --report artifact_out_compare/fair_full_report.json
-python scripts/fair_utility_breakdown.py --report artifact_out_compare/fair_full_report.json
+python scripts/fair_full_stats.py --report artifact_out_compare_noprompt/fair_full_report.json
+python scripts/fair_utility_breakdown.py --report artifact_out_compare_noprompt/fair_full_report.json
 ```
 
 Notes:
@@ -85,6 +90,8 @@ Notes:
 - To reduce cost, you can cap the number of scenario groups evaluated by both native baselines:
   - `NATIVE_BASELINE_MAX_GROUPS=50` (evaluates the first 50 scenarios, still mapped to all channel-cases in aggregation).
 - OpenClaw baseline uses `OPENCLAW_NATIVE_MODEL=openai-codex/gpt-5.1-codex-mini` by default and the OpenAI OAuth provider plugin shipped under `integrations/openclaw_runner/extensions/openai-codex-auth`.
+- Defense baselines are evaluated via `scripts/native_official_baseline_eval.py --defense ...` and do not add anti-leak prompt instructions.
+- `codex_drift` can be grounded by the official DRIFT implementation cloned under `third_party/DRIFT` when external credentials/environment are available.
 - `scripts/fair_utility_breakdown.py` fails fast when native summaries are missing. Use `--allow-missing-native 1` only for partial debug runs.
 
 ---

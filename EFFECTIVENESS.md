@@ -4,16 +4,20 @@
 
 ## 术语与性质（与 `neurips_2025.tex` 对齐）
 
-本 repo 的“可验证有效性”主要围绕 4 个性质（缩写用于论文表述）：
+本 repo 的“可验证有效性”主要围绕 5 个主性质 + 1 个可选隐私性质（缩写用于论文表述）：
 
 1. **NBE（Non‑Bypassable Effects，不可绕过副作用）**  
    任意外部副作用（发送消息/外联/启用技能等）必须在 executor 端验证来自两台 policy server 的有效 commit 证明（MAC 绑定 `action_id` + `request_sha256` + `program_id`），否则 fail‑closed。
 2. **SM（Secret Myopia，秘密近视）**  
    不可信 agent/skill 永远拿不到敏感明文，只得到 sealed handle（不透明句柄），且 handle 绑定 session/caller 并可撤销。
-3. **SAP（Single‑Auditor Privacy，单审计方隐私）**  
-   任意单个 policy server 的观测 transcript 在计算上不泄露被检查的 recipient/domain/token/IOC（在允许的 leakage function 边界内）。实现上使用 2‑server PIR（DPF/FSS）+ 2PC/MPC（GMW+Beaver）并配合 shaping/bundling。
+3. **PEI（Patch-Carrying Egress Integrity，补丁携带外发完整性）**  
+   若策略输出要求 sanitize patch，executor 在 commit 前必须强制应用补丁；绕过补丁提交应 fail‑closed。
 4. **SCS（Skill‑Confined Safety，技能受限安全）**  
    在 capsule mediation 假设成立时（不可信 runtime 无 direct host secret / direct network / 任意 exec），恶意 skill 不能绕过 `act` 直接外联/偷钥/执行二阶段 payload。
+5. **DAS（Delegation-Aware Binding Safety，委托感知绑定安全）**  
+   `external_principal` 与 `delegation_jti` 绑定进 `ReqHash(rho)` 的 `hctx`，阻断跨主体/跨委托重放。
+6. **SAP（Single‑Auditor Privacy，单审计方隐私，可选模式）**  
+   任意单个 policy server 的观测 transcript 在计算上不泄露被检查的 recipient/domain/token/IOC（在允许的 leakage function 边界内）。实现上使用 2‑server PIR（DPF/FSS）+ 2PC/MPC（GMW+Beaver）并配合 shaping/bundling。
 
 ## 我们证明什么（Demo 范围内）
 
@@ -21,6 +25,8 @@
 2. **Level 2（Myopic Intent Routing）**：不可信 agent/skill 不能直接调用底层工具原语（shell/http/file 等），只能向网关提交高层 `intent_id`。
 3. **Oblivious Guardrails（2-server PIR via DPF-based FSS）**：在外发/外联前，网关对两个“不合谋”的 policy server 执行隐私保护检查，使得**任意单个 policy server 看不到被检查的 recipient/domain/token**。
 4. **双授权不可绕过（Executor + MAC proofs）**：外发/外联动作由独立执行器完成，执行器要求来自两台 policy server 的 **MAC 证明**（绑定 `action_id` + 请求/响应摘要），缺一不可，且可复核 DLP/DFA 的判定结果。
+5. **PEI 强制补丁执行**：若 PREVIEW 输出要求 `sanitize_patch`，COMMIT 仅在 executor 应用补丁后才允许 effect commit。
+6. **DAS 上下文绑定**：多主体联邦请求的 `external_principal/delegation_jti` 绑定进入 `hctx`，跨主体重放无效。
 
 显式假设：
 
@@ -95,10 +101,16 @@ bash scripts/run_openclaw.sh
   - `artifact_out/report.json:malicious.declassify`：未确认的 `Declassify(handle)` 必须 `REQUIRE_CONFIRM`
   - 句柄与会话绑定/撤销：`gateway/handles.py`
   - 文件 executor：`gateway/executors/fsexec.py`
+- **PEI**（补丁携带外发完整性）：
+  - `artifact_out/security_game_nbe.json`：包含 patch/confirm 一致性检查，状态应为 `OK`
+  - 执行点：`executor_server/server.py`（提交前强制 patch 约束）
+- **DAS**（委托感知绑定安全）：
+  - `artifact_out_compare/multi_agent_federated_eval.json`：7/7 场景通过（含缺失委托/撤销/双主体不匹配拒绝）
+  - 请求绑定实现：`common/canonical.py` + `gateway/router.py`
 - **SAP**（单审计方隐私）：
   - 2‑server PIR：`gateway/fss_pir.py` + `fss/dpf.py` + `policy_server/server.py`
-  - transcript 实证评估（shaped vs unshaped）：`artifact_out/report.json:leakage_eval`
-  - 本地规则 vs 外包规则对比：`artifact_out/report.json:outsourcing_comparison`
+  - transcript 实证评估（shaped vs unshaped）：`artifact_out_compare/leakage_sweep/leakage_model_sweep.json`
+  - 官方同口径主报告（`C1..C5`）：`artifact_out_compare_noprompt/fair_full_report.json`
   - `USE_POLICY_BUNDLE=1` 隐藏 db_name：`policy_server/build_dbs.py` + `gateway/egress_policy.py` / `gateway/skill_policy.py`
 - **SCS**（技能受限安全）：
   - capsule smoke：`artifact_out/report.json:capsule_smoke`

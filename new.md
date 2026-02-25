@@ -42,7 +42,7 @@
 * **在什么假设下成立？**（capsule 是否跨平台、是否能保证“act 是唯一出口”）
 * **如果 capsule 只是 MVP（macOS sandbox-exec），你怎么论证它不是纸糊的？**
 
-> 需要：把你的目标写成 2–3 个清晰性质（例如 NBE/SM/SAP/SCS），并让 artifact 里每个性质都有对应 testcase + report 字段。
+> 需要：把你的目标写成清晰性质（例如 NBE/SM/PEI/SCS/DAS，外加可选 SAP），并让 artifact 里每个性质都有对应 testcase + report 字段。
 
 ### P1：对 ClawHub/恶意 SKILL.md 的覆盖要“量化、可对比”
 
@@ -274,7 +274,7 @@
 
 ### (1) 写作与形式化
 
-* [x] 在 `EFFECTIVENESS.md` 增加一节：正式定义 NBE/SM/SAP/SCS（1–2 页）并把每条性质映射到哪个测试用例/哪个代码路径
+* [x] 在 `EFFECTIVENESS.md` 增加一节：正式定义 NBE/SM/PEI/SCS/DAS（+ 可选 SAP）（1–2 页）并把每条性质映射到哪个测试用例/哪个代码路径
 * [x] 在 README 里把“capsule mediation assumption”写成显式假设
 
 ### (2) capsule

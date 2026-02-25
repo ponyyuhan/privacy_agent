@@ -32,23 +32,30 @@ Therefore, we validate `C6/C7` using the artifact's **synthetic channel suite** 
 
 Fair, same-cases comparison (SecureClaw 4 modes + native baselines):
 
-- `artifact_out_compare/fair_full_report.json`
+- `artifact_out_compare_noprompt/fair_full_report.json`
   - Contains overall rates, per-channel rates, and latency/throughput summaries.
-  - The manifest is pinned at `artifact_out_compare/fair_cases.jsonl` (derived from the official dataset with a fixed seed).
+  - The manifest is pinned at `artifact_out_compare_noprompt/fair_cases.jsonl` (derived from the official dataset with a fixed seed).
+
+Three-track consolidated report (privacy / injection / protocol):
+
+- `artifact_out_compare_noprompt/multi_track_eval.json`
+  - Produced by `scripts/multi_track_eval.py`.
+  - Includes main comparison (`SecureClaw`, `codex_native`, `openclaw_native`) plus defense baselines (`codex_drift`, `codex_ipiguard`, `codex_agentarmor`).
 
 SecureClaw-only official harness run (used internally by the fair report):
 
-- `artifact_out_compare/fair_mirage/agentleak_eval/agentleak_channel_summary.json`
-- `artifact_out_compare/fair_mirage/agentleak_eval/agentleak_eval_rows.csv`
+- `artifact_out_compare_noprompt/fair_mirage/agentleak_eval/agentleak_channel_summary.json`
+- `artifact_out_compare_noprompt/fair_mirage/agentleak_eval/agentleak_eval_rows.csv`
 
 Reproduce:
 
 ```bash
-OUT_DIR=artifact_out_compare MIRAGE_SEED=7 \
+OUT_DIR=artifact_out_compare_noprompt MIRAGE_SEED=7 \
   FAIR_FULL_REUSE_NATIVE=1 FAIR_FULL_REUSE_SECURECLAW=1 \
   python scripts/fair_full_compare.py
-python scripts/fair_full_stats.py --report artifact_out_compare/fair_full_report.json
-python scripts/fair_utility_breakdown.py --report artifact_out_compare/fair_full_report.json
+python scripts/fair_full_stats.py --report artifact_out_compare_noprompt/fair_full_report.json
+python scripts/fair_utility_breakdown.py --report artifact_out_compare_noprompt/fair_full_report.json
+python scripts/multi_track_eval.py --out-dir artifact_out_compare_noprompt --run-protocol-tests 1
 ```
 
 ---
@@ -113,7 +120,47 @@ because system reviewers often prefer an *attack-driven* leakage demonstration.
 
 ---
 
-## 5. What “Zero Leak” Means Here (and What It Does Not Mean)
+## 5. Latest Snapshot (2026-02-25)
+
+The following paths and numbers are synchronized with the latest A/B/C/D execution closure.
+
+Official coverage (`C1..C5`):
+
+- `artifact_out_compare_noprompt/fair_full_report.json`
+  - `systems.mirage_full.attack_leak_rate = 0.0`
+  - `systems.mirage_full.benign_allow_rate = 0.8`
+  - `systems.mirage_full.n_attack = 744`, `n_benign = 2520`
+
+Synthetic full-channel coverage (`C1..C7`, including `C6/C7`):
+
+- `artifact_out_compare/leakage_sys_synth_v2/agentleak_eval/agentleak_channel_summary.json`
+  - `modes.mirage_full.attack_leak_rate = 0.0`
+  - `modes.mirage_full.benign_allow_rate = 0.8571428571428571`
+  - `modes.mirage_full.per_channel.C6.attack_leak_rate = 0.0`, `benign_allow_rate = 1.0`
+  - `modes.mirage_full.per_channel.C7.attack_leak_rate = 0.0`, `benign_allow_rate = 1.0`
+
+`L_policy` distinguishability:
+
+- `artifact_out_compare/leakage_sweep/leakage_model_sweep.json`
+  - `unshaped.pir.mi_bits = 0.4143349401222639`
+  - `unshaped.pir.map_acc = 0.5144508670520231` vs `chance = 0.3333333333333333`
+  - `shaped_pad4_cover1.pir.mi_bits = 0.0`, `map_acc = 0.34545454545454546`
+  - `shaped_pad4_cover1.mpc.mi_bits = 2.0776676398894596e-06`, `map_acc = 0.3175635718509758`
+- Unified report:
+  - `artifact_out_compare/leakage_channel_report.json` (`status = OK`)
+
+Ablation and budget-enforcement evidence:
+
+- `PAD_DFA_STEPS` sweep outputs:
+  - `artifact_out_compare/leakage_sweep_pad_dfa0/leakage_model_sweep.json`
+  - `artifact_out_compare/leakage_sweep_pad_dfa1/leakage_model_sweep.json`
+- Leakage-budget explicit reason-code run:
+  - `artifact_out_compare/leakage_budget_exhaust/agentleak_eval/agentleak_channel_summary.json`
+  - Contains `LEAKAGE_BUDGET_EXCEEDED` reason entries (4 occurrences in this snapshot).
+
+---
+
+## 6. What “Zero Leak” Means Here (and What It Does Not Mean)
 
 In the channel harness, an "attack leak" is defined as the appearance of a scenario-specific secret token (forbidden field value) in the corresponding channel artifact.
 

@@ -43,7 +43,7 @@
 - 生产级跨平台沙箱硬化（完整 seccomp/AppContainer/内核逃逸对抗）。
 
 ### 1.4 论文/Artifact 关键文档索引（建议按此顺序阅读）
-- `FORMAL_SECURITY.md`：形式化安全主张（NBE/SM/SAP/SCS）的游戏/定理框架与代码映射。
+- `FORMAL_SECURITY.md`：形式化安全主张（NBE/SM/PEI/SCS/DAS，外加可选 SAP）的游戏/定理框架与代码映射。
 - `appendix_security.tex`：附录级归约证明链（无双证明不可提交副作用，归约到 MAC 不可伪造 + 哈希绑定一致性 + replay/TTL/session/caller 绑定）。
 - `LEAKAGE_MODEL.md`：允许泄露函数 `L_policy`/`L_sys` 的严格定义与 shaping/bundling/confirm-path 的通道分解。
 - `spec/SECURECLAW_PROTOCOL_RFC_v1.md`：`act`/PREVIEW/COMMIT/evidence/accept predicate 的 RFC 风格接口规范（字段、错误码、不变量、版本兼容）。
@@ -53,6 +53,41 @@
 - `PERFORMANCE.md`：固定形状（pad+cover+mixer）下的吞吐/延迟曲线与多核 scaling 叙事。
 - `ALGORITHMS.md` / `ALGORITHMS_CN.md`：协议与算法描述（含稀疏 PIR 快路径等）。
 - `MOTIVATION_PAPER.md` / `MOTIVATION_PAPER_CN.md`：论文级动机与问题定义（中英文）。
+- `BENCHMARK_MOTIVATION_PROGRESS.md`：外部 benchmark（AgentDojo/ASB/WASP/VPI/IPIGuard/DRIFT）当前思路、motivation、进展与后续计划。
+
+### 1.5 外部 Benchmark 当前状态（进行中）
+以下为最近一次进度快照（时间：`2026-02-20 21:15 CET`）：
+- 目标：按“官方 benchmark 原生路径”完成全量评估，不做映射替代。
+- AgentDojo（`v1.2.2`, model dir: `third_party/agentdojo/runs/gpt-4o-mini-2024-07-18`）：
+  - `workspace`: `614 / 614`（完成）
+  - `travel`: `167 / 167`（完成）
+  - `banking`: `169 / 169`（完成）
+  - `slack`: `131 / 131`（完成）
+- ASB（官方口径全量，低内存有界调度）：
+  - 串行顺序：`naive -> escape_characters -> fake_completion`
+  - 当前运行：`naive-all_lowmem_20260220_official.csv`（`rows_done=15/400`，持续增长中）
+  - 运行参数：`TASK_NUM=1`, `MAX_WORKERS=4`, `MAX_INFLIGHT=4`
+  - 稳定化参数：`ASB_LLM_REQUEST_TIMEOUT=120`, `ASB_REFUSE_JUDGE_MODE=heuristic`
+- DRIFT/IPIGuard：由统一串行管线在 ASB 后自动接续执行。
+- 全链路管线脚本与日志：
+  - `scripts/run_full_external_eval_pipeline.sh`
+  - `artifact_out_external_runtime/full_pipeline_20260220.log`
+- 状态快照文件（实时更新）：`artifact_out_external_runtime/runtime_status.json`。
+
+### 1.6 README 旧内容校准说明
+- 第 24 节展示的是 SecureClaw 主流水线与本地样例，不等价于“外部 benchmark（AgentDojo/ASB/DRIFT/IPIGuard/WASP/VPI）已全量完成”。
+- 外部 benchmark 的正式进度以第 1.5 节与 `BENCHMARK_MOTIVATION_PROGRESS.md` 为准，未完成项均以“进行中/阻塞”标注。
+- 三轨统一评测目前存在两套输出口径：
+  - 历史口径：`artifact_out_compare/multi_track_eval.json`
+  - 当前无 anti-leak prompt 口径：`artifact_out_compare_noprompt/multi_track_eval.json`
+- 外部 benchmark 全量收敛后，会在 README 增补“最终冻结结果索引（commit/tag + 路径）”。
+
+实时查看命令：
+```bash
+PYTHONPATH=third_party/agentdojo/src python scripts/agentdojo_progress.py \
+  --model-dir third_party/agentdojo/runs/gpt-4o-mini-2024-07-18 \
+  --benchmark-version v1.2.2
+```
 
 ---
 
@@ -93,7 +128,7 @@ python main.py paper-artifact
 可选（更论文级、但更耗时）：
 - official AgentLeak `C1..C5` 同口径 fair compare（SecureClaw + Codex + OpenClaw）：
   - 设置 `RUN_FAIR_FULL=1`
-  - 输出：`artifact_out_compare/fair_full_report.json`、`artifact_out_compare/stats/fair_full_stats.json`、`artifact_out_compare/stats/fair_utility_breakdown.json`
+  - 输出：`artifact_out_compare_noprompt/fair_full_report.json`、`artifact_out_compare_noprompt/stats/fair_full_stats.json`、`artifact_out_compare_noprompt/stats/fair_utility_breakdown.json`
   - 提示：这一步会调用外部模型，可能非常耗 token。可用环境变量降低成本/缩短运行时间：
     - `CODEX_BASELINE_MODEL=gpt-5.1-codex-mini`（默认）
     - `CODEX_BASELINE_REASONING=low`（默认）
@@ -105,10 +140,11 @@ python main.py paper-artifact
     - `FAIR_FULL_REUSE_SECURECLAW=1`（复用已有 SecureClaw official summary，避免重复本地重跑）
 
 当前仓库中的最新同口径汇总快照见：
-- `artifact_out_compare/fair_full_report.json`
-- `artifact_out_compare/stats/fair_full_stats.json`
-- `artifact_out_compare/stats/fair_utility_breakdown.json`
-- `artifact_out_compare/SUBMISSION_CONVERGENCE.md`
+- `artifact_out_compare_noprompt/fair_full_report.json`
+- `artifact_out_compare_noprompt/stats/fair_full_stats.json`
+- `artifact_out_compare_noprompt/stats/fair_utility_breakdown.json`
+- `artifact_out_compare_noprompt/SUBMISSION_CONVERGENCE.md`
+- 历史口径（legacy）：`artifact_out_compare/*`
 
 ### 2.4 真实 agent（OpenClaw + OpenAI OAuth）
 ```bash
@@ -455,8 +491,9 @@ Router 行为：
 - `tx_id` 事务 token 绑定 caller+session+request hash。
 
 ### 8.3 request hash 绑定（`common/canonical.py`）
-`request_sha256_v1(intent_id, caller, session, inputs)`
+`request_sha256_v1(intent_id, caller, session, inputs, context)`
 - gateway 与 executor 必须一致计算。
+- `context` 在存在时包含 `external_principal`、`delegation_jti`（否则为 `{}`），用于 PREVIEW/COMMIT 的授权上下文绑定。
 - commit-phase 的 `user_confirm` 不参与 hash（允许同一 preview token 被 confirm）。
 
 ### 8.4 sanitize patch（`common/sanitize.py`）
@@ -660,7 +697,7 @@ Router 已实现的 intent（是否可用取决于 capability 配置）：
 4. AgentLeak-style 逐通道评测（`C1..C7`，synthetic suite；`scripts/agentleak_channel_eval.py`）
 5. official AgentLeak `C1..C5` 的同口径 fair compare（可选，SecureClaw + Codex + OpenClaw；见 `BASELINES_FAIRNESS.md`）
    - 默认跳过；设置 `RUN_FAIR_FULL=1`
-   - 输出：`artifact_out_compare/fair_full_report.json`、`artifact_out_compare/stats/fair_full_stats.json`、`artifact_out_compare/stats/fair_utility_breakdown.json`
+   - 输出：`artifact_out_compare_noprompt/fair_full_report.json`、`artifact_out_compare_noprompt/stats/fair_full_stats.json`、`artifact_out_compare_noprompt/stats/fair_utility_breakdown.json`
    - 默认复用已有结果：`FAIR_FULL_REUSE_NATIVE=1`、`FAIR_FULL_REUSE_SECURECLAW=1`
 6. policy server 吞吐曲线（`scripts/bench_policy_server_curves.py`）
 7. policy server 单核/多核 scaling + JSON/Binary 传输对比（`scripts/bench_policy_server_scaling.py`）
@@ -728,8 +765,8 @@ Router 已实现的 intent（是否可用取决于 capability 配置）：
 - 输出：`n`, `accuracy`, `confusion`, `sample_errors`
 
 ### 15.6 `leakage_eval`
-- 对比 `unshaped` 与 `shaped` 的 `n_unique_features` / `accuracy`
-- 趋势目标：shaped 显著压缩单点可见特征空间
+- 对比 `artifact_out_compare/leakage_sweep/leakage_model_sweep.json` 中 `unshaped` 与 `shaped_pad4_cover1` 的 `mi_bits` / `map_acc` / `chance_acc`
+- 趋势目标：在 full shaping（`unified + bundled + fixed-shape + mixer/pad`）下，单点 transcript 区分能力塌缩到 chance 附近
 
 ### 15.7 `outsourcing_comparison`
 - `local_rules`: 规则不外包基线
@@ -765,8 +802,8 @@ Router 已实现的 intent（是否可用取决于 capability 配置）：
 - SkillDocBench:
   - `n=100`, `accuracy=1.0`
 - Leakage:
-  - `unshaped.n_unique_features=17`
-  - `shaped.n_unique_features=1`
+  - `unshaped.pir.mi_bits=0.4143349401222639`, `map_acc=0.5144508670520231`
+  - `shaped_pad4_cover1.pir.mi_bits=0.0`, `map_acc=0.34545454545454546`
 
 ### 16.1 AgentLeak 风格 C1..C7 复现评测
 运行：
@@ -1000,7 +1037,7 @@ OPENCLAW_STATE_DIR="artifact_out/openclaw_state" \
 - `ALGORITHMS.md`: 英文版算法/协议说明（对应主要贡献点；含正确性与验证映射）
 - `ALGORITHMS_CN.md`: 中文版算法/协议说明（与 `ALGORITHMS.md` 对应）
 - `EFFECTIVENESS.md`: 有效性定义与对应证据
-- `FORMAL_SECURITY.md`: NBE/SM/SAP/SCS 的严格定义、安全游戏与可验证命题
+- `FORMAL_SECURITY.md`: NBE/SM/PEI/SCS/DAS（+ 可选 SAP）的严格定义、安全游戏与可验证命题
 - `MOTIVATION_PAPER.md`: 英文论文级 Motivation/Problem/Goals/Approach（含 baseline 能力矩阵与案例映射）
 - `MOTIVATION_PAPER_CN.md`: 中文对应版本
 - `new.md`: 当前工作包与完成项追踪
@@ -1134,11 +1171,16 @@ native runtime baselines（无 SecureClaw 执行线）：
   - `artifact_out_tmp/native_smoke2/native_baselines/native_guardrail_eval.json`
   - `third_party/agentleak_official/benchmarks/ieee_repro/results/model_stats.json`
 
-official AgentLeak `C1..C5` 同口径 fair compare（SecureClaw + Codex + OpenClaw）：
+official AgentLeak `C1..C5` 同口径 fair compare（保留主对比：SecureClaw + Codex + OpenClaw）：
 - `scripts/fair_full_compare.py`
-- 输出：`artifact_out_compare/fair_full_report.json`
-- 统计分解与显著性：`scripts/fair_full_stats.py` -> `artifact_out_compare/stats/fair_full_stats.json`
-- 效用/误报分解：`scripts/fair_utility_breakdown.py` -> `artifact_out_compare/stats/fair_utility_breakdown.json`
+- 输出：`artifact_out_compare_noprompt/fair_full_report.json`
+- 可选新增防护基线：`DEFENSE_BASELINES=drift,ipiguard,agentarmor`（脚本支持已完成；外部 benchmark 全量结果见第 1.5 节进度）
+  - 对应系统键：`codex_drift`, `codex_ipiguard`, `codex_agentarmor`
+- 统计分解与显著性：`scripts/fair_full_stats.py` -> `artifact_out_compare_noprompt/stats/fair_full_stats.json`
+- 效用/误报分解：`scripts/fair_utility_breakdown.py` -> `artifact_out_compare_noprompt/stats/fair_utility_breakdown.json`
+- 三轨统一评测（隐私泄漏/注入鲁棒性/协议实现）：`scripts/multi_track_eval.py` ->
+  - `artifact_out_compare/multi_track_eval.json`（历史口径）
+  - `artifact_out_compare_noprompt/multi_track_eval.json`（当前主用口径）
 - 语义与威胁模型解释：`BASELINES_FAIRNESS.md`
 
 生产性能与泄露统一汇总：
@@ -1188,7 +1230,7 @@ official AgentLeak `C1..C5` 同口径 fair compare（SecureClaw + Codex + OpenCl
 - Scripted MCP：`benign_allow_rate=1.0`，`attack_block_rate=1.0`（`n_ok=1`）
 - NanoClaw：若缺少凭据会被标记为 `SKIPPED`（不影响流水线其他部分）
 
-本 README 的第 16 节仍保留了 demo artifact 的样例数值；paper-grade 结果以第 24 节这些输出为准（可在论文中引用并附上 seed/commit）。
+本 README 的第 16 节仍保留了 demo artifact 的样例数值；paper-grade 结果以第 24 节输出为准。外部 benchmark 的最终全量结论以第 1.5 节状态收敛后的冻结索引为准（可在论文中引用并附上 seed/commit）。
 
 ### 24.9 生产量级性能章节建议引用（本仓库最新一组）
 
@@ -1211,3 +1253,30 @@ official AgentLeak `C1..C5` 同口径 fair compare（SecureClaw + Codex + OpenCl
    - 1 线程约 `2.63e5 keys/s`
    - 8 线程约 `5.05e5 keys/s`
    - 1->8 线程 speedup 约 `1.92x`（当前瓶颈已部分转向调度/IO，而非纯算子）。
+
+### 24.10 2026-02-25 最新结果快照（A/B/C/D 收敛）
+
+本小节同步最新一次任务化执行（A/B/C/D）的关键产物路径与核心数值。
+
+- 复现清单：
+  - `artifact_out/repro_manifest.json`
+  - `artifact_out/security_game_nbe.json`（`status=OK`）
+- `L_policy` 区分性（`artifact_out_compare/leakage_sweep/leakage_model_sweep.json`）：
+  - `unshaped` PIR：`mi_bits=0.4143349401222639`, `map_acc=0.5144508670520231`, `chance=0.3333333333333333`
+  - `shaped_pad4_cover1` PIR：`mi_bits=0.0`, `map_acc=0.34545454545454546`, `chance=0.3333333333333333`
+  - `shaped_pad4_cover1` MPC：`mi_bits=2.0776676398894596e-06`, `map_acc=0.3175635718509758`, `chance=0.3333333333333333`
+- 统一泄露汇总（`artifact_out_compare/leakage_channel_report.json`）：
+  - `status=OK`
+  - 官方覆盖 `C1..C5`（`artifact_out_compare_noprompt/fair_full_report.json`）：`attack_leak_rate=0.0`，`benign_allow_rate=0.8`
+  - 合成覆盖 `C1..C7`（`artifact_out_compare/leakage_sys_synth_v2/agentleak_eval/agentleak_channel_summary.json`）：`attack_leak_rate=0.0`，`benign_allow_rate=0.8571428571428571`
+  - 其中 `C6/C7` 通道均为 `attack_leak_rate=0.0`，`benign_allow_rate=1.0`
+- `PAD_DFA_STEPS` 对照产物：
+  - `artifact_out_compare/leakage_sweep_pad_dfa0/leakage_model_sweep.json`
+  - `artifact_out_compare/leakage_sweep_pad_dfa1/leakage_model_sweep.json`
+- 预算门控显式证据（`artifact_out_compare/leakage_budget_exhaust/agentleak_eval/agentleak_channel_summary.json`）：
+  - 出现 `LEAKAGE_BUDGET_EXCEEDED`（本次产物中命中 `4` 次）
+- 联邦协议评测（`artifact_out_compare/multi_agent_federated_eval.json`）：
+  - `n_cases=7`, `n_pass=7`, `pass_rate=1.0`
+  - `latency_p50_ms=0.4094169707968831`, `latency_p95_ms=6.280291941948235`
+- Capsule 合同验证（`artifact_out/capsule_contract_verdict.json`）：
+  - `status=OK`, `n_ok=7`, `n_fail=0`
