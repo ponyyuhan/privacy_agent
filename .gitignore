@@ -16,6 +16,7 @@ artifact_out_tmp/
 artifact_out_compare*/
 artifact_out_full_official*/
 artifact_out_perf*/
+artifact_out_external_runtime/
 
 # Local scratch
 tmp/
@@ -43,6 +44,8 @@ gateway/demo_data/workspace/
 *.blg
 *.log
 *.out
+*.fdb_latexmk
+*.fls
 *.toc
 *.lof
 *.lot
