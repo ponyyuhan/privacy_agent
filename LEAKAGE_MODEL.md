@@ -60,7 +60,7 @@ Forbidden terms:
 
 1. True queried index.
 2. Logical unbundled db identity when bundling is enabled.
-3. Intent category if unified route is enabled.
+3. Intent category if unified route is enabled and observable MPC metadata remains intent-invariant; otherwise intent-correlated metadata is explicitly leaked via `L_MPC`.
 
 Primary code paths:
 
@@ -87,6 +87,10 @@ Allowed terms:
 3. Circuit shape metadata.
 4. Tick schedule metadata and padded session count.
 5. Coarse timing and batch occupancy at padded shape.
+
+Intent-category hiding condition:
+
+6. If intent hiding is claimed, `program_id`, endpoint class, and batch shape must be constant across covered intents. If any of these vary, that variation is an allowed leakage term.
 
 Forbidden terms:
 
@@ -117,6 +121,11 @@ Allowed terms:
 2. Confirm scan step count after any configured padding.
 3. Public DFA and block parameters.
 
+Operational interpretation:
+
+4. With `PAD_DFA_STEPS=1`, step count is fixed to `MAX_DFA_SCAN_CHARS` (up to implementation clamping) and no length-dependent step leakage remains in this term.
+5. With `PAD_DFA_STEPS=0`, step count is intentionally leaked via `L_CONFIRM`.
+
 Forbidden terms:
 
 1. Raw secret text scanned by confirm path.
@@ -140,6 +149,12 @@ Allowed terms:
 1. Coarsened timing bucket per tick.
 2. Number of observed ticks in a window.
 3. Public scheduler parameters.
+
+Bucket semantics:
+
+4. PIR layer bucket index `b_pir(t)=floor(t / Delta_pir)` with `Delta_pir = PIR_MIX_INTERVAL_MS / 1000`.
+5. MPC layer bucket index `b_mpc(t)=floor(t / Delta_mpc)` with `Delta_mpc = MPC_MIX_INTERVAL_MS / 1000`.
+6. If a mixer is disabled for a layer, fine-grained per-request timing for that layer is outside fixed-shape assumptions and must be treated as additional leakage.
 
 Forbidden terms:
 
@@ -169,7 +184,7 @@ Primary switches:
 | `C4` tool outputs | `(tool_status, summary_len_bucket, output_handle_ids, timing_bucket)` | tool wrapper response metadata | `gateway/executors/fsexec.py`, `gateway/executors/webexec.py`, `gateway/executors/httpexec.py` | handleization path, declass policy |
 | `C5` memory | `(namespace, key_id, record_count_bucket, memory_handle_ids, timing_bucket)` | memory API metadata | `gateway/executors/memoryexec.py`, `gateway/handles.py` | `LEAKAGE_BUDGET_C5`, handle constraints |
 | `C6` logs and audit | `(event_type, caller_id, session_id, reason_code, req_hash_meta, hash_chain_meta)` | structured audit pipeline | `gateway/audit.py`, `executor_server/server.py` | audit schema and hash-chain policy |
-| `C7` skill ingress | `(skill_digest, ioc_hit_bit, install_marker_bit, reason_code, timing_bucket)` | skill policy ingress checks | `gateway/mcp_server.py`, `gateway/policy_unified.py`, `gateway/capabilities.yaml` | skill install policy, IOC db, caller capability |
+| `C7` skill ingress | `(skill_digest, ioc_hit_bit, install_marker_bit, reason_code, timing_bucket)` | skill policy ingress checks | `gateway/mcp_server.py`, `gateway/policy_unified.py`, `gateway/capabilities.yaml`, `capsule/smoke.py` | skill install policy, IOC db, caller capability, capsule contract checks (`capsule/MC_CONTRACT_SPEC.md`, `spec/secureclaw_capsule_contract_v1.json`) |
 
 ### 4.2 Forbidden Cross-Channel Leakage
 
@@ -198,6 +213,7 @@ Allowed only via explicit policy path:
 | `reason_code` | denial and decision class | `gateway/mcp_server.py`, `executor_server/server.py` | reason-code registry in protocol RFC |
 | `audit hash chain metadata` | append-only linkage info | `gateway/audit.py` | audit persistence policy |
 | `skill digest and IOC bit` | skill ingress risk signal | `gateway/policy_unified.py`, skill install route | IOC and install marker policy db |
+| `capsule contract verdict terms` | SCS assumption evidence fields | `capsule/verify_contract.py`, `capsule/smoke.py` | `capsule/MC_CONTRACT_SPEC.md`, `spec/secureclaw_capsule_contract_v1.json` |
 
 ### 5.2 Leakage Budget Controls
 
@@ -221,6 +237,7 @@ Residual terms explicitly allowed in current artifact:
 1. Coarse scheduler timing buckets.
 2. Confirm-path invocation bit when confirm path is conditional.
 3. Unkeyed hash commitment observability in MPC initialization.
+4. Offline dictionary advantage against low-entropy request fields, bounded by `min(1, q_d / 2^k)` where `k` is conditional min-entropy and `q_d` is attacker trial count.
 
 Residual terms not allowed but out of model:
 
@@ -237,6 +254,11 @@ With unified bundle and fixed-shape mixers enabled:
 
 1. Distinguishability from transcript features should collapse toward chance under defined feature space.
 2. Remaining distinguishability should be attributable to allowed residual terms in Section 6.
+
+## 7.1 Coverage Boundary for `C6/C7`
+
+Official AgentLeak cases cover channels `C1..C5`.
+Channels `C6` and `C7` are validated using the repository synthetic full-channel suite; see `LEAKAGE_EVIDENCE.md` for artifact paths and reproduction commands.
 
 ## 8. Validation and Reproducibility Hooks
 
@@ -303,4 +325,4 @@ For each single policy server, transcripts are simulatable from `L_policy` under
 Claimed end-to-end leakage statement:
 
 Application-level runtime-observable leakage is bounded by `L_sys` tables above, subject to the same trust and non-goal assumptions.
-
+Intent-category hiding is claimed only under intent-invariant observable MPC metadata (`program_id`, endpoint class, batch shape).

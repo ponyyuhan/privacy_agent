@@ -57,6 +57,8 @@ if [[ "${RUN_FAIR_FULL:-0}" == "1" ]]; then
     | tee "$OUT_DIR_COMPARE/fair_full_stats_path.txt"
   PYTHONPATH=. python scripts/fair_utility_breakdown.py --report "$OUT_DIR_COMPARE/fair_full_report.json" --out "$OUT_DIR_COMPARE/stats/fair_utility_breakdown.json" \
     | tee "$OUT_DIR_COMPARE/fair_utility_breakdown_path.txt"
+  PYTHONPATH=. python scripts/multi_track_eval.py --out-dir "$OUT_DIR_COMPARE" --force-refresh-fair 0 --run-protocol-tests 1 \
+    | tee "$OUT_DIR_COMPARE/multi_track_eval_path.txt"
 else
   echo "[paper] skip fair_full_compare (set RUN_FAIR_FULL=1)" | tee "$OUT_DIR/fair_full_compare_skipped.txt"
 fi

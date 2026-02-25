@@ -92,11 +92,14 @@
 
 
 \begin{abstract}
-SecureClaw is a system level reference monitor for agentic tool use and skill supply chains.
-It reduces the trusted computing base to a small gateway and an executor, while treating the agent runtime and skills as adversarial.
-To prevent bypass, SecureClaw routes all high level intents through a non bypassable \textsf{PREVIEW}\,$\rightarrow$\,\textsf{COMMIT} transaction, and a dual authorization executor that requires commit proofs from two non colluding policy servers.
-To reconcile centralized policy databases with query privacy, the gateway performs fixed shape policy checks against two policy servers using two server PIR based on DPF and FSS and evaluates policy programs via two party computation over XOR shared inputs.
-We implement an end to end artifact including sealed handles for secret myopia, intent routing, capsule mediation, skill ingress, and real agent integrations, and we report deterministic evidence for non bypassable effects, secret myopia, single auditor privacy under a stated leakage function, and skill confined safety under an explicit capsule mediation assumption.
+Agent runtimes that can invoke tools or install skills are exposed to prompt injection and supply-chain compromise.
+The core security requirement is not advisory policy, but an execution boundary that cryptographically binds authorization to committed side effects.
+We present SecureClaw, a gateway-executor architecture with a non-bypassable \textsf{PREVIEW}\,$\rightarrow$\,\textsf{COMMIT} protocol.
+Commit succeeds only when the executor verifies dual policy proofs bound to the exact request context, freshness window, and replay state.
+SecureClaw composes this effect integrity boundary with handle-first plaintext confinement, commit-time patch integrity, capsule-conditional skill confinement, and delegation-aware context binding.
+For deployments that outsource policy evaluation, we add optional single-auditor privacy (SAP): fixed-shape policy routing with an explicit leakage contract under which each single policy server transcript is simulatable.
+On official C1--C5 benchmark coverage, SecureClaw achieves $0.00\%$ observed attack leakage and $100.00\%$ attack blocking with $80.00\%$ benign allow in our deterministic run.
+In transcript distinguishability sweeps, shaping reduces single-server intent signal from separable (PIR MI $0.414$ bits) to near-zero MI under unified fixed-shape mode.
 \end{abstract}
 
 \input{paper_full_body}

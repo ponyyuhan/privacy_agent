@@ -86,6 +86,16 @@ Global verdict:
 1. `status=OK` iff every assertion result has `ok=true`.
 2. `status=FAIL` otherwise.
 
+### 4.1 Clause-to-Assertion-to-Probe Mapping
+
+| Contract clause | Assertion id(s) in `spec/secureclaw_capsule_contract_v1.json` | Probe/report key in `capsule/smoke.py` | Verifier mapping |
+|---|---|---|---|
+| Filesystem deny for host secrets | `no_host_secret_read` | `direct_fs_read` | `capsule/verify_contract.py:_select_probe(kind="fs_read")` |
+| Process deny-by-default (arbitrary exec) | `no_arbitrary_exec_true`, `no_arbitrary_exec_sh` | `direct_exec_true`, `direct_exec_sh` | `capsule/verify_contract.py:_select_probe(kind="exec")` |
+| Network deny for public internet | `no_public_internet` | `direct_internet` | `capsule/verify_contract.py:_select_probe(kind="internet_get")` |
+| Network deny for loopback exfiltration | `no_loopback_http_exfil` | `direct_exfil_post` | `capsule/verify_contract.py:_select_probe(kind="http_post")` |
+| Transport/gateway path must remain usable | `gateway_act_allowed`, `gateway_mcp_act_allowed` | `gateway_act`, `gateway_mcp_act` | `capsule/verify_contract.py:_select_probe(kind="gateway_act|gateway_mcp_act")` |
+
 ## 5. Mandatory Assertions for SCS Claim
 
 SCS theorem may be claimed only if all mandatory assertion classes pass:
@@ -144,4 +154,3 @@ Success criteria:
 1. Process exit code is zero.
 2. Verdict JSON has `status="OK"`.
 3. All mandatory assertion IDs have `ok=true`.
-

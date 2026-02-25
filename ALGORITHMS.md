@@ -52,7 +52,7 @@ We bind every authorization to an immutable context:
 
 - action_id: opaque identifier minted by G (unique per action).
 - program_id: policy program identifier (e.g., "policy_unified_v1").
-- request_sha256: hash of a canonicalized request (intent_id, caller, session, inputs).
+- request_sha256: hash of a canonicalized request payload `(v, intent_id, caller, session, inputs, context)`, where `context` contains request-hash auth context fields (`external_principal`, `delegation_jti`) when present, else `{}`.
 
 In code, request_sha256 is computed by `common/canonical.py:request_sha256_v1`.
 
@@ -100,14 +100,14 @@ Output:
 
 Algorithm A1.GatewayPreviewCommit (high level):
 
-1. G computes request_sha256 := H(canonical(intent_id, caller, session, inputs)).
+1. G computes `hctx` from trusted auth context fields (`external_principal`, `delegation_jti`) and computes `request_sha256 := H(canonical(v=1, intent_id, caller, session, inputs, context=hctx))`.
 2. G runs privacy-preserving policy evaluation (PIR for features; MPC for boolean program outputs).
 3. Each Pi returns a commit proof share commit_proof_i (MAC-signed) bound to (action_id, program_id, request_sha256).
 4. G forwards (req, action_id, commit={policy0:commit_proof_0, policy1:commit_proof_1}) to E.
 
 Algorithm A1.ExecutorVerifyCommit:
 
-1. Recompute request_sha256 locally from (intent_id, caller, session, inputs) in req.
+1. Recompute request_sha256 locally from `(intent_id, caller, session, inputs, hctx)` in req, with the same canonicalization and context rules as PREVIEW.
 2. Verify each proof independently:
    - parse fields, check kind="commit", check freshness |now - ts| <= TTL;
    - check equality of (action_id, program_id, request_sha256);
@@ -128,7 +128,7 @@ the reconstructed outputs satisfy the local decision predicate (e.g., allow_pre=
 Any adversary that causes E to accept without obtaining both valid commit proofs for the executed context must either:
 
 - Forge a MAC under an unknown policy server key, or
-- Break the request binding (e.g., find a collision so that two different requests share the same request_sha256).
+- Break the request binding (e.g., find a collision so that two different `(intent_id, caller, session, inputs, hctx)` tuples share the same request_sha256).
 
 Formal games and the code-linked theorem are in `FORMAL_SECURITY.md`.
 
@@ -505,7 +505,7 @@ semantics. Therefore the reconstructed outputs at the end equal the clear evalua
 Compile multiple policy intents/categories into a **single constant-shape** MPC program so that:
 
 - policy surface does not branch on intent at the server side,
-- the same program_id can be used for all covered intents,
+- the same program_id can be used for all covered intents (if this is not true, program_id variation is explicit leakage),
 - intent/category leakage is reduced to what is explicitly allowed by L(.).
 
 ### Inputs and Outputs

@@ -55,13 +55,17 @@ and the multiset of action identifiers included in each tick.
 
 The policy program is evaluated using two party computation over XOR shared inputs.
 We assume honest but curious privacy for the two party computation protocol.
-In unified mode the circuit and program identifier are fixed and do not depend on the intent category.
+Intent-category hiding at this layer requires that observable MPC metadata be fixed across covered
+intents, in particular a constant \texttt{program\_id}, constant endpoint class, and constant batch
+shape parameters.
 
 We define $L_{\mathsf{mpc}}$ as the tuple containing
 the program identifier,
 the circuit shape metadata which is constant in unified mode,
 the tick schedule parameters,
 and the multiset of action identifiers included in each tick.
+If \texttt{program\_id} or endpoint class varies by intent, that variation is part of
+$L_{\mathsf{mpc}}$ and intent-category hiding is not claimed for those deployments.
 
 \subsubsection{Confirm path leakage $L_{\mathsf{confirm}}$}
 
@@ -74,15 +78,25 @@ the scan invocation bit,
 the number of scan steps after any configured padding,
 the public block size,
 and the public transition table parameters.
+Concretely, with \texttt{PAD\_DFA\_STEPS=1} and cap \texttt{MAX\_DFA\_SCAN\_CHARS}=M, the step count
+term becomes deterministic ($n_{\mathsf{confirm}}=M$); otherwise $n_{\mathsf{confirm}}$ may reveal
+message-length-correlated shape and is explicitly leaked.
 
 \subsubsection{Timing leakage $L_{\mathsf{time}}$}
 
 The policy server can observe coarse arrival times and response times.
 We do not model kernel side channels.
-We define a quantized timing bucket function and include only the bucket index per tick.
-This is enforced by fixed interval mixing when enabled.
-Concretely, if the tick interval is $\Delta$ then the policy server learns at most the number of
-ticks in a window and the bucketed offset within each interval.
+With mixers enabled we define per-layer bucket functions:
+\[
+b_{\mathsf{pir}}(t):=\left\lfloor t/\Delta_{\mathsf{pir}}\right\rfloor,\quad
+b_{\mathsf{mpc}}(t):=\left\lfloor t/\Delta_{\mathsf{mpc}}\right\rfloor,
+\]
+where $\Delta_{\mathsf{pir}}=\texttt{PIR\_MIX\_INTERVAL\_MS}/1000$ and
+$\Delta_{\mathsf{mpc}}=\texttt{MPC\_MIX\_INTERVAL\_MS}/1000$.
+Then $L_{\mathsf{time}}$ includes the bucket indices, tick counts per window, and public scheduler
+configuration.
+When a mixer is disabled, fine-grained per-request timing of that layer is treated as additional
+leakage and must be declared outside the fixed-shape claim.
 
 \subsection{System leakage function $L_{\mathsf{sys}}$}
 
@@ -139,12 +153,18 @@ $C3$ & \texttt{gateway/mcp\_server.py}, \texttt{gateway/policy\_unified.py} & un
 $C4$ & \texttt{gateway/executors/*} & output handleization, declassification \\
 $C5$ & \texttt{gateway/executors/memoryexec.py} & memory handle mediation, leakage budget \\
 $C6$ & \texttt{gateway/audit.py}, \texttt{executor\_server/server.py} & structured metadata logging, hash chain \\
-$C7$ & \texttt{gateway/policy\_unified.py}, \texttt{gateway/capabilities.yaml} & skill IOC checks, caller capability policy \\
+$C7$ & \texttt{gateway/policy\_unified.py}, \texttt{gateway/capabilities.yaml}, \texttt{capsule/smoke.py} & skill IOC checks, caller capability policy, capsule mediation checks \\
 \bottomrule
 \end{tabular}
 \caption{Per-channel leakage mapping to implementation and controls.}
 \label{tab:channel-map}
 \end{table}
+
+For $C7$, the capsule-mediation anchors are
+\texttt{capsule/MC\_CONTRACT\_SPEC.md},
+\texttt{spec/secureclaw\_capsule\_contract\_v1.json},
+\texttt{capsule/smoke.py}, and
+\texttt{capsule/verify\_contract.py}.
 
 \subsection{Residual leakage and allowed leakage items}
 
@@ -163,8 +183,18 @@ We treat the following as residual risks that are not eliminated by default conf
 
 \begin{itemize}
 \item Conditional confirm path invocation may leak a branch bit.
-\item Low entropy guessing attacks against unkeyed request hashes are possible in principle when an attacker can enumerate candidates.
+\item Low-entropy guessing attacks against unkeyed request hashes are possible in principle when an attacker can enumerate candidates.
+With conditional min-entropy $k$ over candidate inputs and $q_d$ offline hash trials, residual dictionary advantage is upper-bounded by
+\[
+\varepsilon_{\mathsf{dict}} \le \min(1,q_d/2^k).
+\]
 \end{itemize}
+
+\subsection{Evaluation coverage note for channels}
+
+Official AgentLeak cases cover channels $C1$ through $C5$ only.
+Channels $C6$ and $C7$ are evaluated with the artifact synthetic full-channel suite, with explicit
+evidence index and reproduction commands in \texttt{LEAKAGE\_EVIDENCE.md}.
 
 \subsection{Mapping to implementation and configuration}
 

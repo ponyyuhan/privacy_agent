@@ -49,7 +49,7 @@ SecureClaw 在仓库早期历史中曾被称为 MIRAGE-OG++。为保证复现兼
 
 - action_id：由 G 生成的动作标识（每次 action 唯一）。
 - program_id：策略程序标识（例如 `policy_unified_v1`）。
-- request_sha256：对规范化请求（intent_id, caller, session, inputs）求哈希得到的绑定值。
+- request_sha256：对规范化请求 `(v, intent_id, caller, session, inputs, context)` 求哈希得到的绑定值，其中 `context` 在存在时包含 `external_principal`、`delegation_jti`，否则为 `{}`。
 
 代码中 request_sha256 由 `common/canonical.py:request_sha256_v1` 计算。
 
@@ -96,14 +96,14 @@ E 的 effect endpoint 输入：
 
 算法 A1.GatewayPreviewCommit（高层描述）：
 
-1. G 计算 request_sha256 := H(canonical(intent_id, caller, session, inputs))。
+1. G 从可信认证上下文提取 `external_principal/delegation_jti` 形成 `hctx`，并计算 `request_sha256 := H(canonical(v=1, intent_id, caller, session, inputs, context=hctx))`。
 2. G 运行隐私保护策略评估（PIR 得到特征；MPC 得到策略程序输出）。
 3. P0 与 P1 分别返回 commit proof（MAC 签名），绑定到 (action_id, program_id, request_sha256)。
 4. G 将 (req, action_id, commit={policy0:..., policy1:...}) 发送给 E。
 
 算法 A1.ExecutorVerifyCommit：
 
-1. E 从 req 本地重新计算 request_sha256（同 canonical 规则）。
+1. E 按与 PREVIEW 相同的 canonical 规则，从 `(intent_id, caller, session, inputs, hctx)` 本地重新计算 request_sha256。
 2. 分别验证两份 proof：
    - 字段与 kind 检查、freshness 检查（|now - ts| <= TTL）；
    - (action_id, program_id, request_sha256) 必须完全一致；
@@ -123,7 +123,7 @@ E 的 effect endpoint 输入：
 若对手在未获得双份有效 commit proof 的情况下让 E 接受，则必须至少破坏以下之一：
 
 - 在未知 Ki 下伪造 MAC；
-- 破坏 request_sha256 的绑定（例如构造碰撞使不同请求共享同一 request_sha256）。
+- 破坏 request_sha256 的绑定（例如构造碰撞使不同 `(intent_id, caller, session, inputs, hctx)` 共享同一 request_sha256）。
 
 形式化安全游戏与命题见 `FORMAL_SECURITY.md`。
 
@@ -460,7 +460,7 @@ bitset DB 的 PIR 答案份额为：
 将多个意图/类别的策略编译进一套统一常形状 MPC 程序，实现：
 
 - 服务器侧不按 intent 分支（减少 intent/category 泄露）
-- 所有 covered intents 共用同一 program_id
+- 所有 covered intents 共用同一 program_id（否则 program_id 变化本身就是显式泄露）
 - 泄露边界由 L(.) 明确界定，而非泛泛宣称“完全不泄露”
 
 ### 输入与输出

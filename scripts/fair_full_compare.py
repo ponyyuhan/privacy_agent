@@ -11,6 +11,7 @@ import time
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
+import shutil
 
 
 def _pick_port() -> int:
@@ -78,6 +79,15 @@ def _extract_system_metrics(ms: dict[str, Any]) -> dict[str, Any]:
     if isinstance(per, dict):
         out["per_channel"] = per
     return out
+
+
+def _safe_copytree_or_link(src: Path, dst: Path) -> None:
+    if dst.exists():
+        return
+    try:
+        dst.symlink_to(src, target_is_directory=True)
+    except Exception:
+        shutil.copytree(src, dst)
 
 
 def _openclaw_run_script_once(
@@ -282,6 +292,8 @@ def main() -> None:
     max_groups = int(os.getenv("NATIVE_BASELINE_MAX_GROUPS", "0") or 0)
     max_groups_arg = ["--max-groups", str(max_groups)] if max_groups > 0 else []
     reuse_native = bool(int(os.getenv("FAIR_FULL_REUSE_NATIVE", "0")))
+    defense_list_raw = str(os.getenv("DEFENSE_BASELINES", "drift,ipiguard,agentarmor")).strip()
+    defense_baselines = [x.strip().lower() for x in defense_list_raw.split(",") if x.strip()]
 
     codex_out = out_root / "fair_codex_native_guardrails"
     codex_out.mkdir(parents=True, exist_ok=True)
@@ -324,6 +336,77 @@ def main() -> None:
                 for k in ("model_call_count", "model_ops_s", "model_latency_p50_ms", "model_latency_p95_ms"):
                     if k in sm:
                         systems["codex_native"][k] = sm.get(k)
+
+    # 2.1) Defense baselines over codex-native outputs (no anti-leak prompt tuning).
+    # These baselines run mediation logic (`--defense`) while reusing codex scenario
+    # outputs to avoid introducing model-side prompt changes.
+    for defense in defense_baselines:
+        if defense not in {"drift", "ipiguard", "agentarmor"}:
+            continue
+        defense_key = f"codex_{defense}"
+        defense_out = out_root / f"fair_{defense_key}_baseline"
+        defense_out.mkdir(parents=True, exist_ok=True)
+        defense_summary_path = defense_out / "native_official_baseline_summary.json"
+        if reuse_native and defense_summary_path.exists():
+            dd = _load_json(defense_summary_path)
+            smd = (dd.get("summary") or {}) if isinstance(dd, dict) else {}
+            systems[defense_key] = {
+                "status": "OK",
+                "runtime": "codex",
+                "defense": defense,
+                **_extract_system_metrics(smd),
+                "source_path": str(defense_summary_path),
+                "reused_existing": True,
+                "implementation": "native_official_baseline_eval.py --defense",
+            }
+            continue
+
+        # Reuse codex scenario cache to avoid additional model calls for defense-only eval.
+        codex_scen = codex_out / "scenarios"
+        if codex_scen.exists():
+            _safe_copytree_or_link(codex_scen, defense_out / "scenarios")
+
+        d_env = os.environ.copy()
+        d_env.setdefault("NATIVE_BASELINE_RETRY_BAD", "0")
+        dr = _run(
+            [
+                sys.executable,
+                str(native_script),
+                "--cases",
+                str(cases_manifest),
+                "--out",
+                str(defense_out),
+                "--runtime",
+                "codex",
+                "--defense",
+                defense,
+                *max_groups_arg,
+            ],
+            env=d_env,
+            cwd=repo_root,
+            timeout_s=24 * 3600,
+        )
+        if dr.returncode != 0 or not defense_summary_path.exists():
+            systems[defense_key] = {
+                "status": "ERROR",
+                "runtime": "codex",
+                "defense": defense,
+                "rc": int(dr.returncode),
+                "stderr": dr.stderr[:2000],
+                "stdout": dr.stdout[:2000],
+            }
+        else:
+            dd = _load_json(defense_summary_path)
+            smd = (dd.get("summary") or {}) if isinstance(dd, dict) else {}
+            systems[defense_key] = {
+                "status": "OK",
+                "runtime": "codex",
+                "defense": defense,
+                **_extract_system_metrics(smd),
+                "source_path": str(defense_summary_path),
+                "reused_existing": False,
+                "implementation": "native_official_baseline_eval.py --defense",
+            }
 
     openclaw_out = out_root / "fair_openclaw_native_guardrails"
     openclaw_out.mkdir(parents=True, exist_ok=True)
@@ -374,6 +457,7 @@ def main() -> None:
         "baseline_set": {
             "secureclaw_modes": ["mirage_full", "policy_only", "sandbox_only", "single_server_policy"],
             "native_baselines": ["codex_native", "openclaw_native"],
+            "defense_baselines": [f"codex_{d}" for d in defense_baselines if d in {"drift", "ipiguard", "agentarmor"}],
         },
         "systems": systems,
     }

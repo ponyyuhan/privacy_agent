@@ -19,9 +19,20 @@ class Rho:
     caller: str
     session: str
     inputs: tuple[tuple[str, str], ...]
+    external_principal: str | None = None
+    delegation_jti: str | None = None
 
     def inputs_dict(self) -> dict[str, str]:
         return {k: v for k, v in self.inputs}
+
+
+def _hctx_from_rho(rho: Rho) -> dict[str, str]:
+    ctx: dict[str, str] = {}
+    if rho.external_principal:
+        ctx["external_principal"] = str(rho.external_principal)
+    if rho.delegation_jti:
+        ctx["delegation_jti"] = str(rho.delegation_jti)
+    return ctx
 
 
 @dataclass(frozen=True)
@@ -72,6 +83,7 @@ def _req_sha(rho: Rho) -> str:
         caller=rho.caller,
         session=rho.session,
         inputs=rho.inputs_dict(),
+        context=_hctx_from_rho(rho),
     )
 
 
@@ -161,6 +173,7 @@ def _accept_commit(
     mac_ttl_s: int,
     replay_ttl_s: int,
     accepted: tuple[tuple[str, int], ...],
+    payload_sanitized: bool = True,
 ) -> bool:
     if p0.v != 1 or p1.v != 1:
         return False
@@ -190,6 +203,9 @@ def _accept_commit(
     if int(outs.get("allow_pre", 0)) != 1:
         return False
     if int(outs.get("need_confirm", 0)) == 1 and not bool(user_confirm):
+        return False
+    patch_required = int(outs.get("patch0", 0)) == 1 or int(outs.get("patch1", 0)) == 1
+    if patch_required and not bool(payload_sanitized):
         return False
     return True
 
@@ -398,6 +414,134 @@ def check_model_sm(*, max_depth: int = 6, max_mint: int = 1) -> tuple[bool, dict
     return True, {"ok": True, "property": "SM", "states": len(seen), "max_depth": max_depth, "max_mint": max_mint}
 
 
+# --- Patch-carrying egress integrity: executor patch enforcement ---
+
+
+def check_model_pei() -> tuple[bool, dict[str, Any]]:
+    rho = Rho(
+        intent_id="SendMessage",
+        caller="caller0",
+        session="sess0",
+        inputs=(
+            ("channel", "email"),
+            ("recipient", "alice@example.com"),
+            ("domain", ""),
+            ("text", "status update"),
+        ),
+    )
+    iss = _commit_oracle(rho=rho, action_id="a0", now=0)
+    outs = _xor_outputs(iss.p0.outputs_dict(), iss.p1.outputs_dict())
+    patch_required = int(outs.get("patch0", 0)) == 1 or int(outs.get("patch1", 0)) == 1
+
+    matrix: list[dict[str, Any]] = []
+    bad: dict[str, Any] | None = None
+    for user_confirm in (False, True):
+        for payload_sanitized in (False, True):
+            accepted = _accept_commit(
+                rho=rho,
+                action_id=iss.action_id,
+                p0=iss.p0,
+                p1=iss.p1,
+                user_confirm=user_confirm,
+                now=0,
+                mac_ttl_s=1,
+                replay_ttl_s=2,
+                accepted=tuple(),
+                payload_sanitized=payload_sanitized,
+            )
+            row = {
+                "user_confirm": bool(user_confirm),
+                "payload_sanitized": bool(payload_sanitized),
+                "accepted": bool(accepted),
+            }
+            matrix.append(row)
+            if bool(accepted) and bool(patch_required) and not bool(payload_sanitized):
+                bad = row
+
+    if bad is not None:
+        return False, {"ok": False, "property": "PEI", "counterexample": bad, "matrix": matrix}
+
+    return True, {"ok": True, "property": "PEI", "patch_required": bool(patch_required), "matrix": matrix}
+
+
+# --- Delegation-aware binding safety: auth-context hash binding ---
+
+
+def _binding_tuple(rho: Rho) -> tuple[str, str, str | None, str | None]:
+    return (str(rho.caller), str(rho.session), rho.external_principal, rho.delegation_jti)
+
+
+def check_model_das() -> tuple[bool, dict[str, Any]]:
+    issued_rho = Rho(
+        intent_id="SendMessage",
+        caller="caller0",
+        session="sess0",
+        inputs=(
+            ("channel", "email"),
+            ("recipient", "alice@example.com"),
+            ("domain", ""),
+            ("text", "hello"),
+        ),
+        external_principal="extA",
+        delegation_jti="jti-1",
+    )
+    iss = _commit_oracle(rho=issued_rho, action_id="a0", now=0)
+
+    cases: list[tuple[str, Rho]] = [
+        ("exact", issued_rho),
+        (
+            "principal_swap",
+            dataclasses.replace(issued_rho, external_principal="extB"),
+        ),
+        (
+            "jti_swap",
+            dataclasses.replace(issued_rho, delegation_jti="jti-2"),
+        ),
+        (
+            "context_removed",
+            dataclasses.replace(issued_rho, external_principal=None, delegation_jti=None),
+        ),
+        (
+            "caller_swap",
+            dataclasses.replace(issued_rho, caller="caller1"),
+        ),
+        (
+            "session_swap",
+            dataclasses.replace(issued_rho, session="sess1"),
+        ),
+    ]
+
+    rows: list[dict[str, Any]] = []
+    bad: dict[str, Any] | None = None
+    exact_accepted = False
+    for name, rho_req in cases:
+        accepted = _accept_commit(
+            rho=rho_req,
+            action_id=iss.action_id,
+            p0=iss.p0,
+            p1=iss.p1,
+            user_confirm=False,
+            now=0,
+            mac_ttl_s=1,
+            replay_ttl_s=2,
+            accepted=tuple(),
+            payload_sanitized=True,
+        )
+        mismatch = _binding_tuple(rho_req) != _binding_tuple(issued_rho)
+        row = {"case": name, "accepted": bool(accepted), "mismatch": bool(mismatch)}
+        rows.append(row)
+        if name == "exact" and bool(accepted):
+            exact_accepted = True
+        if bool(accepted) and bool(mismatch):
+            bad = row
+
+    if bad is not None:
+        return False, {"ok": False, "property": "DAS", "counterexample": bad, "cases": rows}
+    if not exact_accepted:
+        return False, {"ok": False, "property": "DAS", "reason": "exact_binding_not_accepted", "cases": rows}
+    return True, {"ok": True, "property": "DAS", "cases": rows}
+
+
 # --- Skill-confined safety: spec consistency checks ---
 
 
@@ -432,9 +576,11 @@ def check_model_scs_spec(*, contract_path: Path | None = None) -> tuple[bool, di
 def check_all_models() -> tuple[bool, dict[str, Any]]:
     ok1, r1 = check_model_nbe()
     ok2, r2 = check_model_sm()
-    ok3, r3 = check_model_scs_spec()
-    ok = bool(ok1 and ok2 and ok3)
-    return ok, {"ok": ok, "results": [r1, r2, r3]}
+    ok3, r3 = check_model_pei()
+    ok4, r4 = check_model_das()
+    ok5, r5 = check_model_scs_spec()
+    ok = bool(ok1 and ok2 and ok3 and ok4 and ok5)
+    return ok, {"ok": ok, "results": [r1, r2, r3, r4, r5]}
 
 
 def main() -> None:
@@ -446,4 +592,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

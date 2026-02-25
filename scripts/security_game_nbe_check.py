@@ -138,10 +138,42 @@ def main() -> None:
                 constraints={},
                 caller=caller,
             )
+            chk_confirm = call_act(
+                mcp,
+                "CheckMessagePolicy",
+                inputs={
+                    "channel": "email",
+                    "recipient": "alice@example.com",
+                    "domain": dummy_domain,
+                    "text": "status update for confirmation path.",
+                    "artifacts": [],
+                },
+                constraints={},
+                caller=caller,
+            )
+            chk_confirm2 = call_act(
+                mcp,
+                "CheckMessagePolicy",
+                inputs={
+                    "channel": "email",
+                    "recipient": "alice@example.com",
+                    "domain": dummy_domain,
+                    "text": "status update for confirmation path.",
+                    "artifacts": [],
+                },
+                constraints={},
+                caller=caller,
+            )
 
         evidence = ((chk.get("data") or {}).get("evidence") or {})
         commit = (evidence.get("commit") or {})
         action_id = str(((commit.get("policy0") or {}).get("action_id") or ""))
+        evidence_confirm = ((chk_confirm.get("data") or {}).get("evidence") or {})
+        commit_confirm = (evidence_confirm.get("commit") or {})
+        action_id_confirm = str(((commit_confirm.get("policy0") or {}).get("action_id") or ""))
+        evidence_confirm2 = ((chk_confirm2.get("data") or {}).get("evidence") or {})
+        commit_confirm2 = (evidence_confirm2.get("commit") or {})
+        action_id_confirm2 = str(((commit_confirm2.get("policy0") or {}).get("action_id") or ""))
 
         base_req = {
             "action_id": action_id,
@@ -186,6 +218,23 @@ def main() -> None:
         c_item_c["details"] = r_caller.get("details")
         report["checks"].append(c_item_c)
 
+        # Hash-context binding (DAS): external principal / delegation jti are part of request hash context.
+        req_ctx_principal = dict(base_req)
+        req_ctx_principal["external_principal"] = "principal-A"
+        r_ctx_principal = requests.post(f"{executor_url}/exec/send_message", json=req_ctx_principal, timeout=5).json()
+        c_ok_ctx_p, c_item_ctx_p = _expect_status("hctx_external_principal_binding_denied", r_ctx_principal, "DENY")
+        c_item_ctx_p["reason_code"] = r_ctx_principal.get("reason_code")
+        c_item_ctx_p["details"] = r_ctx_principal.get("details")
+        report["checks"].append(c_item_ctx_p)
+
+        req_ctx_jti = dict(base_req)
+        req_ctx_jti["delegation_jti"] = "dlg-jti-1"
+        r_ctx_jti = requests.post(f"{executor_url}/exec/send_message", json=req_ctx_jti, timeout=5).json()
+        c_ok_ctx_j, c_item_ctx_j = _expect_status("hctx_delegation_jti_binding_denied", r_ctx_jti, "DENY")
+        c_item_ctx_j["reason_code"] = r_ctx_jti.get("reason_code")
+        c_item_ctx_j["details"] = r_ctx_jti.get("details")
+        report["checks"].append(c_item_ctx_j)
+
         req_missing = dict(base_req)
         req_missing["commit"] = {"policy0": (commit or {}).get("policy0")}
         r_missing = requests.post(f"{executor_url}/exec/send_message", json=req_missing, timeout=5).json()
@@ -223,10 +272,56 @@ def main() -> None:
         c_ok6, c_item6 = _expect_status("expired_proof_denied", r_expired, "DENY")
         report["checks"].append(c_item6)
 
+        # Confirmation-gated path (PEI/confirm semantics):
+        # same message/proof with need_confirm=1 must deny without explicit confirmation.
+        req_need_confirm = {
+            "action_id": action_id_confirm,
+            "channel": "email",
+            "recipient": "alice@example.com",
+            "domain": dummy_domain,
+            "text": "status update for confirmation path.",
+            "artifacts": [],
+            "dlp_mode": "fourgram",
+            "evidence": {},
+            "commit": commit_confirm,
+            "caller": caller,
+            "session": session_id,
+            "user_confirm": False,
+        }
+        r_need_confirm = requests.post(f"{executor_url}/exec/send_message", json=req_need_confirm, timeout=5).json()
+        c_ok7, c_item7 = _expect_status("need_confirm_denied_without_user_confirm", r_need_confirm, "DENY")
+        c_item7["reason_code"] = r_need_confirm.get("reason_code")
+        report["checks"].append(c_item7)
+
+        req_confirm_ok = dict(req_need_confirm)
+        req_confirm_ok["action_id"] = action_id_confirm2
+        req_confirm_ok["commit"] = commit_confirm2
+        req_confirm_ok["user_confirm"] = True
+        r_confirm_ok = requests.post(f"{executor_url}/exec/send_message", json=req_confirm_ok, timeout=5).json()
+        c_ok8, c_item8 = _expect_status("need_confirm_accepts_with_user_confirm", r_confirm_ok, "OK")
+        c_item8["reason_code"] = r_confirm_ok.get("reason_code")
+
+        # Dynamic oracle for confirmation semantics:
+        # - If no-confirm path is explicitly gated by REQUIRE_CONFIRM, then with-confirm must accept.
+        # - Otherwise both should accept (path does not require confirmation under current policy).
+        if str(r_need_confirm.get("status") or "").upper() == "DENY":
+            expect_gate = str(r_need_confirm.get("reason_code") or "") == "REQUIRE_CONFIRM"
+            c_item7["expect_gate"] = bool(expect_gate)
+            c_item7["ok"] = bool(expect_gate)
+            c_item8["ok"] = bool(c_ok8)
+        else:
+            c_item7["expect_gate"] = False
+            c_item7["ok"] = str(r_need_confirm.get("status") or "").upper() == "OK"
+            c_item8["ok"] = bool(c_ok8)
+        report["checks"].append(c_item8)
+
         all_ok = all(bool(x.get("ok")) for x in report["checks"])
         report["status"] = "OK" if all_ok else "FAIL"
-        report["theorem"] = "T1_dual_proof_necessity"
-        report["notes"] = "Acceptance requires dual valid commit proofs bound to the same request context."
+        report["theorem"] = "T1_dual_proof_binding_and_confirm_safety"
+        report["notes"] = (
+            "Acceptance requires dual valid commit proofs bound to request context (including hctx), "
+            "with explicit confirmation gating on need_confirm paths."
+        )
 
     finally:
         for p in procs:

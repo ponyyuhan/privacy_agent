@@ -225,22 +225,24 @@ def main() -> None:
         if rs:
             sys_rows[name] = rs
 
-    # Native baselines from their summaries (path carried in fair_full_report.json).
-    for name in ("codex_native", "openclaw_native"):
-        sysd = systems.get(name) if isinstance(systems, dict) else None
-        if not isinstance(sysd, dict):
-            continue
-        sp = str(sysd.get("source_path") or "")
-        if not sp:
-            continue
-        p = Path(sp).expanduser()
-        if not p.exists():
-            continue
-        d = _load_json(p)
-        rows = d.get("rows") if isinstance(d.get("rows"), list) else []
-        rs2 = [r for r in rows if isinstance(r, dict)]
-        if rs2:
-            sys_rows[name] = rs2
+    # Native and defense baselines from their summaries (path carried in fair_full_report.json).
+    if isinstance(systems, dict):
+        for name, sysd in systems.items():
+            if name in {"mirage_full", "policy_only", "sandbox_only", "single_server_policy"}:
+                continue
+            if not isinstance(sysd, dict):
+                continue
+            sp = str(sysd.get("source_path") or "")
+            if not sp:
+                continue
+            p = Path(sp).expanduser()
+            if not p.exists():
+                continue
+            d = _load_json(p)
+            rows = d.get("rows") if isinstance(d.get("rows"), list) else []
+            rs2 = [r for r in rows if isinstance(r, dict)]
+            if rs2:
+                sys_rows[str(name)] = rs2
 
     summaries: dict[str, Any] = {}
     breakdowns: dict[str, Any] = {}
@@ -275,7 +277,7 @@ def main() -> None:
                 "benign_allow_fisher_p_two_sided": float(p_benign),
                 "counts": {
                     "mirage_full": {"attack_leaks": leak_r, "attack_n": atk_r, "benign_allows": allow_r, "benign_n": ben_r},
-                    name: {"attack_leaks": leak_t, "attack_n": atk_t, "benign_allows": allow_t, "benign_n": ben_t},
+                    "other": {"system": name, "attack_leaks": leak_t, "attack_n": atk_t, "benign_allows": allow_t, "benign_n": ben_t},
                 },
             }
 
@@ -295,4 +297,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
