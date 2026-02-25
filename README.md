@@ -54,6 +54,7 @@
 - `ALGORITHMS.md` / `ALGORITHMS_CN.md`：协议与算法描述（含稀疏 PIR 快路径等）。
 - `MOTIVATION_PAPER.md` / `MOTIVATION_PAPER_CN.md`：论文级动机与问题定义（中英文）。
 - `BENCHMARK_MOTIVATION_PROGRESS.md`：外部 benchmark（AgentDojo/ASB/WASP/VPI/IPIGuard/DRIFT）当前思路、motivation、进展与后续计划。
+- `third_party_overlays/README.md`：第三方仓库 overlay 工作流（禁 push、导出/回放 patch、只在本仓库追踪改动）。
 
 ### 1.5 外部 Benchmark 当前状态（进行中）
 以下为最近一次进度快照（时间：`2026-02-20 21:15 CET`）：

@@ -1,0 +1,59 @@
+{
+  "generated_at": "2026-02-25T13:33:29.725570+00:00",
+  "repos": [
+    {
+      "name": "ASB",
+      "path": "third_party/ASB",
+      "origin_fetch_url": "https://github.com/agiresearch/ASB.git",
+      "origin_push_url": "https://github.com/agiresearch/ASB.git"
+    },
+    {
+      "name": "DRIFT",
+      "path": "third_party/DRIFT",
+      "origin_fetch_url": "https://github.com/SaFo-Lab/DRIFT.git",
+      "origin_push_url": "https://github.com/SaFo-Lab/DRIFT.git"
+    },
+    {
+      "name": "agentdojo",
+      "path": "third_party/agentdojo",
+      "origin_fetch_url": "https://github.com/ethz-spylab/agentdojo.git",
+      "origin_push_url": "https://github.com/ethz-spylab/agentdojo.git"
+    },
+    {
+      "name": "agentleak_official",
+      "path": "third_party/agentleak_official",
+      "origin_fetch_url": "https://github.com/Privatris/AgentLeak.git",
+      "origin_push_url": "https://github.com/Privatris/AgentLeak.git"
+    },
+    {
+      "name": "agents",
+      "path": "third_party/agents",
+      "origin_fetch_url": "https://github.com/cua-framework/agents.git",
+      "origin_push_url": "https://github.com/cua-framework/agents.git"
+    },
+    {
+      "name": "ipiguard",
+      "path": "third_party/ipiguard",
+      "origin_fetch_url": "https://github.com/Greysahy/ipiguard",
+      "origin_push_url": "https://github.com/Greysahy/ipiguard"
+    },
+    {
+      "name": "nanoclaw",
+      "path": "third_party/nanoclaw",
+      "origin_fetch_url": "https://github.com/gavrielc/nanoclaw.git",
+      "origin_push_url": "https://github.com/gavrielc/nanoclaw.git"
+    },
+    {
+      "name": "wasp",
+      "path": "third_party/wasp",
+      "origin_fetch_url": "https://github.com/facebookresearch/wasp.git",
+      "origin_push_url": "https://github.com/facebookresearch/wasp.git"
+    },
+    {
+      "name": "openclaw",
+      "path": "integrations/openclaw",
+      "origin_fetch_url": "https://github.com/openclaw/openclaw.git",
+      "origin_push_url": "https://github.com/openclaw/openclaw.git"
+    }
+  ]
+}

@@ -1,0 +1,49 @@
+{
+  "repos": [
+    {
+      "name": "ASB",
+      "path": "third_party/ASB",
+      "kind": "nested_repo"
+    },
+    {
+      "name": "DRIFT",
+      "path": "third_party/DRIFT",
+      "kind": "nested_repo"
+    },
+    {
+      "name": "agentdojo",
+      "path": "third_party/agentdojo",
+      "kind": "nested_repo"
+    },
+    {
+      "name": "agentleak_official",
+      "path": "third_party/agentleak_official",
+      "kind": "nested_repo"
+    },
+    {
+      "name": "agents",
+      "path": "third_party/agents",
+      "kind": "nested_repo"
+    },
+    {
+      "name": "ipiguard",
+      "path": "third_party/ipiguard",
+      "kind": "nested_repo"
+    },
+    {
+      "name": "nanoclaw",
+      "path": "third_party/nanoclaw",
+      "kind": "nested_repo"
+    },
+    {
+      "name": "wasp",
+      "path": "third_party/wasp",
+      "kind": "nested_repo"
+    },
+    {
+      "name": "openclaw",
+      "path": "integrations/openclaw",
+      "kind": "submodule"
+    }
+  ]
+}
