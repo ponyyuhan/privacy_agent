@@ -7,6 +7,7 @@ import json
 import os
 import time
 import unittest
+from unittest.mock import patch
 
 from executor_server import server as ex
 from common.canonical import request_sha256_v1
@@ -358,6 +359,89 @@ class SecurityGameTests(unittest.TestCase):
         self.assertIsNone(outs)
         self.assertIsNone(tag)
         self.assertNotEqual(code, "OK")
+
+
+class DFAEvidenceTests(unittest.TestCase):
+    @staticmethod
+    def _mk_block(*, next_state: int, matched: bool, block_size: int = 4) -> bytes:
+        if block_size < 3:
+            raise ValueError("block_size must be >=3")
+        return int(next_state).to_bytes(2, "little", signed=False) + bytes([1 if matched else 0]) + (b"\x00" * (block_size - 3))
+
+    def test_unpadded_early_match_is_valid(self) -> None:
+        dfa_ev = {
+            "db": "dfa_transitions",
+            "alpha": 8,
+            "block_size": 4,
+            "char_to_sym": {"A": 1, "B": 2},
+            "steps": [{"idx": 1}, {"idx": 2}],
+        }
+
+        def fake_verify(step: dict, *, action_id: str, db: str, block_size: int):
+            idx = int(step.get("idx", -1))
+            matched = idx == 2
+            return self._mk_block(next_state=0, matched=matched, block_size=block_size), "OK"
+
+        with patch.dict(os.environ, {"PAD_DFA_STEPS": "0", "MAX_DFA_SCAN_CHARS": "16"}, clear=False):
+            with patch.object(ex, "_verify_block_step", side_effect=fake_verify):
+                matched, code = ex._verify_dfa_evidence(dfa_ev, text="ABCD", action_id="a1")
+        self.assertTrue(bool(matched))
+        self.assertEqual(code, "OK")
+
+    def test_unpadded_truncated_without_match_is_invalid(self) -> None:
+        dfa_ev = {
+            "db": "dfa_transitions",
+            "alpha": 8,
+            "block_size": 4,
+            "char_to_sym": {"A": 1, "B": 2},
+            "steps": [{"idx": 1}, {"idx": 2}],
+        }
+
+        def fake_verify(step: dict, *, action_id: str, db: str, block_size: int):
+            return self._mk_block(next_state=0, matched=False, block_size=block_size), "OK"
+
+        with patch.dict(os.environ, {"PAD_DFA_STEPS": "0", "MAX_DFA_SCAN_CHARS": "16"}, clear=False):
+            with patch.object(ex, "_verify_block_step", side_effect=fake_verify):
+                matched, code = ex._verify_dfa_evidence(dfa_ev, text="ABCD", action_id="a2")
+        self.assertIsNone(matched)
+        self.assertEqual(code, "dfa_unpadded_truncated_without_match")
+
+    def test_padded_mode_requires_fixed_step_count_and_accepts_post_match_padding(self) -> None:
+        dfa_ev = {
+            "db": "dfa_transitions",
+            "alpha": 8,
+            "block_size": 4,
+            "char_to_sym": {"A": 1, "B": 2, "~": 0},
+            "steps": [{"idx": 1}, {"idx": 2}, {"idx": 0}, {"idx": 0}, {"idx": 0}, {"idx": 0}, {"idx": 0}, {"idx": 0}, {"idx": 0}, {"idx": 0}, {"idx": 0}, {"idx": 0}, {"idx": 0}, {"idx": 0}, {"idx": 0}, {"idx": 0}],
+        }
+
+        def fake_verify(step: dict, *, action_id: str, db: str, block_size: int):
+            idx = int(step.get("idx", -1))
+            return self._mk_block(next_state=0, matched=(idx == 2), block_size=block_size), "OK"
+
+        with patch.dict(os.environ, {"PAD_DFA_STEPS": "1", "MAX_DFA_SCAN_CHARS": "16"}, clear=False):
+            with patch.object(ex, "_verify_block_step", side_effect=fake_verify):
+                matched, code = ex._verify_dfa_evidence(dfa_ev, text="AB", action_id="a3")
+        self.assertTrue(bool(matched))
+        self.assertEqual(code, "OK")
+
+    def test_padded_mode_step_count_mismatch_rejected(self) -> None:
+        dfa_ev = {
+            "db": "dfa_transitions",
+            "alpha": 8,
+            "block_size": 4,
+            "char_to_sym": {"A": 1, "~": 0},
+            "steps": [{"idx": 1}],
+        }
+
+        def fake_verify(step: dict, *, action_id: str, db: str, block_size: int):
+            return self._mk_block(next_state=0, matched=False, block_size=block_size), "OK"
+
+        with patch.dict(os.environ, {"PAD_DFA_STEPS": "1", "MAX_DFA_SCAN_CHARS": "16"}, clear=False):
+            with patch.object(ex, "_verify_block_step", side_effect=fake_verify):
+                matched, code = ex._verify_dfa_evidence(dfa_ev, text="A", action_id="a4")
+        self.assertIsNone(matched)
+        self.assertEqual(code, "dfa_step_count_mismatch_padded")
 
 
 if __name__ == "__main__":

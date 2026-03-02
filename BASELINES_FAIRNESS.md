@@ -24,10 +24,10 @@ We keep exactly:
 - **Native guardrails baselines (real CLIs, no compromised script)**:
   - `codex_native`: Codex CLI baseline prompt with deterministic output contract but without an extra hardcoded no-leak rule.
   - `openclaw_native`: OpenClaw CLI baseline prompt with the same contract and no extra hardcoded no-leak rule.
-- **Defense baselines (no anti-leak prompt tuning, runtime mediation wrappers)**:
-  - `codex_drift`: DRIFT-style injection isolation wrapper (`--defense drift`).
-  - `codex_ipiguard`: IPIGuard-style dependency sink guard wrapper (`--defense ipiguard`).
-  - `codex_agentarmor`: AgentArmor-style fail-closed runtime trace guard wrapper (`--defense agentarmor`).
+- **Defense baselines (real official source, default mode)**:
+  - `codex_drift`: sourced from official DRIFT pipeline outputs (`third_party/DRIFT` via external unified report).
+  - `codex_ipiguard`: sourced from official IPIGuard pipeline outputs (`third_party/ipiguard` via external unified report).
+  - `codex_agentarmor`: only accepted when an explicit official report is provided (`AGENTARMOR_OFFICIAL_REPORT`).
 
 All of the above are run on the **same official case manifest** generated from AgentLeak's official dataset.
 
@@ -64,8 +64,8 @@ Therefore, we do not present it as the Codex/OpenClaw “native” baseline in t
    - `artifact_out_compare_noprompt/fair_full_report.json`
 
 5. Produce statistics / breakdowns / significance tests:
-   - `scripts/fair_full_stats.py` (Wilson 95% CI + two-sided Fisher exact tests vs `mirage_full`)
-   - `scripts/fair_utility_breakdown.py` (benign deny / false-positive reason decomposition by mode and channel)
+   - `scripts/fair_full_stats.py` (Wilson 95% CI + Fisher tests vs `mirage_full`, plus benign outcome decomposition and availability attribution)
+   - `scripts/fair_utility_breakdown.py` (per-mode benign ALLOW/CONFIRM/HARD_DENY/ERROR decomposition + reason/channel breakdown)
    - `scripts/write_submission_convergence.py` (camera-ready convergence snapshot markdown)
 
 ---
@@ -75,7 +75,9 @@ Therefore, we do not present it as the Codex/OpenClaw “native” baseline in t
 ```bash
 OUT_DIR=artifact_out_compare_noprompt MIRAGE_SEED=7 \
   FAIR_FULL_REUSE_NATIVE=1 FAIR_FULL_REUSE_SECURECLAW=1 \
-  DEFENSE_BASELINES=drift,ipiguard,agentarmor \
+  DEFENSE_BASELINE_SOURCE=real_only \
+  EXTERNAL_RUN_TAG=20260220_fullpipeline \
+  DEFENSE_BASELINES=drift,ipiguard \
   python scripts/fair_full_compare.py
 python scripts/fair_full_stats.py --report artifact_out_compare_noprompt/fair_full_report.json
 python scripts/fair_utility_breakdown.py --report artifact_out_compare_noprompt/fair_full_report.json
@@ -90,9 +92,18 @@ Notes:
 - To reduce cost, you can cap the number of scenario groups evaluated by both native baselines:
   - `NATIVE_BASELINE_MAX_GROUPS=50` (evaluates the first 50 scenarios, still mapped to all channel-cases in aggregation).
 - OpenClaw baseline uses `OPENCLAW_NATIVE_MODEL=openai-codex/gpt-5.1-codex-mini` by default and the OpenAI OAuth provider plugin shipped under `integrations/openclaw_runner/extensions/openai-codex-auth`.
-- Defense baselines are evaluated via `scripts/native_official_baseline_eval.py --defense ...` and do not add anti-leak prompt instructions.
-- `codex_drift` can be grounded by the official DRIFT implementation cloned under `third_party/DRIFT` when external credentials/environment are available.
+- Default defense mode is `DEFENSE_BASELINE_SOURCE=real_only`.
+  - This mode disallows in-repo equivalence wrappers and only accepts real official artifacts.
+  - If real artifacts are missing/invalid and `STRICT_REAL_DEFENSE_BASELINES=1` (default), `fair_full_compare.py` exits with error.
+- Legacy mechanism-equivalent wrappers remain available only when explicitly enabled:
+  - `DEFENSE_BASELINE_SOURCE=equivalent`
+  - This mode is for ablation/debug and is not the default paper-facing setting.
 - `scripts/fair_utility_breakdown.py` fails fast when native summaries are missing. Use `--allow-missing-native 1` only for partial debug runs.
+- For strict threat-model separation in the paper, prefer citing:
+  - `benign_allow_rate` (utility),
+  - `benign_confirm_rate` (soft gate / declassification friction),
+  - `false_positive_rate` (hard deny only),
+  - `availability_fail_rate` (runtime/tooling failures).
 
 ---
 
@@ -114,3 +125,4 @@ For transparency, the native baseline summary records both:
 - A “native baseline” does not give non-bypassability: the runtime can still be compromised and leak secrets by construction.
 - A “policy_only” baseline in SecureClaw is still stronger than prompt-only: it enforces handleization and gateway mediation, but lacks the executor dual-proof boundary.
 - Codex/OpenClaw results depend on the exact model version, platform defaults, and any upstream safety changes.
+- In runs where OpenClaw benign utility collapses, inspect availability fields first (`availability_fail_rate`, per-scenario parse/runtime errors) before interpreting as policy hard-deny behavior.

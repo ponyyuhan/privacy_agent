@@ -25,11 +25,16 @@ START_STAGE="${START_STAGE:-agentdojo}" # agentdojo | asb | drift | summarize
 
 DRIFT_MODEL="${DRIFT_MODEL:-gpt-4o-mini-2024-07-18}"
 DRIFT_ATTACK_NAME="${DRIFT_ATTACK_NAME:-important_instructions}"
+IPIGUARD_BENCHMARK_VERSION="${IPIGUARD_BENCHMARK_VERSION:-v1.1.2}"
 DRIFT_WORKSPACE="${DRIFT_WORKSPACE:-${EXTERNAL_OUT_ROOT}/drift_workspace}"
 DRIFT_RUNS_DIR="${DRIFT_RUNS_DIR:-${DRIFT_WORKSPACE}/runs/${DRIFT_MODEL}}"
 DRIFT_SUITES="${DRIFT_SUITES:-banking,slack,travel,workspace}"
 DRIFT_MODES="${DRIFT_MODES:-benign,attack}"
 RUN_IPIGUARD="${RUN_IPIGUARD:-1}"
+DRIFT_OPENAI_TIMEOUT_S="${DRIFT_OPENAI_TIMEOUT_S:-300}"
+DRIFT_OPENAI_MAX_RETRIES="${DRIFT_OPENAI_MAX_RETRIES:-0}"
+DRIFT_CHAT_RETRIES="${DRIFT_CHAT_RETRIES:-0}"
+DRIFT_CHAT_RETRY_BACKOFF_S="${DRIFT_CHAT_RETRY_BACKOFF_S:-0.5}"
 
 _ASB_WORKERS_RESOLVED=""
 _ASB_INFLIGHT_RESOLVED=""
@@ -162,8 +167,13 @@ run_drift_ipiguard_full() {
   OPENAI_BASE_URL="${OPENAI_BASE_URL}" \
   OPENAI_API_KEY="${OPENAI_API_KEY}" \
   BENCHMARK_VERSION="${AGENTDOJO_BENCHMARK_VERSION}" \
+  IPIGUARD_BENCHMARK_VERSION="${IPIGUARD_BENCHMARK_VERSION}" \
   MODEL="${DRIFT_MODEL}" \
   ATTACK_NAME="${DRIFT_ATTACK_NAME}" \
+  DRIFT_OPENAI_TIMEOUT_S="${DRIFT_OPENAI_TIMEOUT_S}" \
+  DRIFT_OPENAI_MAX_RETRIES="${DRIFT_OPENAI_MAX_RETRIES}" \
+  DRIFT_CHAT_RETRIES="${DRIFT_CHAT_RETRIES}" \
+  DRIFT_CHAT_RETRY_BACKOFF_S="${DRIFT_CHAT_RETRY_BACKOFF_S}" \
   bash scripts/run_drift_ipiguard_full_lowmem.sh
 
   log "DRIFT/IPIGuard full run finished"
@@ -174,9 +184,14 @@ summarize_all() {
     --agentdojo-model-dir "${AGENTDOJO_MODEL_DIR}" \
     --agentdojo-benchmark-version "${AGENTDOJO_BENCHMARK_VERSION}" \
     --asb-dir "third_party/ASB/logs/direct_prompt_injection/gpt-4o-mini/no_memory" \
+    --asb-run-tag "${ASB_RUN_TAG}" \
+    --allow-asb-latest-fallback 0 \
     --drift-runs-dir "${DRIFT_RUNS_DIR}" \
     --drift-attack-name "${DRIFT_ATTACK_NAME}" \
     --ipiguard-root "${EXTERNAL_OUT_ROOT}/ipiguard" \
+    --external-run-tag "${EXTERNAL_RUN_TAG}" \
+    --external-out-root "${EXTERNAL_OUT_ROOT}" \
+    --enforce-run-scope 1 \
     --output-json "${EXTERNAL_OUT_ROOT}/external_benchmark_unified_report.json" \
     --output-md "${EXTERNAL_OUT_ROOT}/external_benchmark_unified_report.md"
 

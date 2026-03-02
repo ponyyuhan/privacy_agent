@@ -17,6 +17,22 @@ SecureClaw addresses this by moving trust from model compliance to a verifiable 
 
 This document formalizes motivation, problem definition, objectives, and solution design based on the current project state and artifact outputs.
 
+### 0.1 2026 Polish Addendum (Thesis-Centered Framing)
+
+To match top-tier review expectations, the paper framing is normalized to one thesis:
+
+1. A compromised-runtime setting requires a cryptographically non-bypassable effect boundary.
+2. Outsourced policy enforcement introduces a control-plane privacy paradox.
+3. SAP resolves this paradox by constraining single-auditor visibility to an explicit leakage contract.
+
+Contribution packaging follows three core claims:
+
+1. NBE (effect integrity).
+2. SAP (control-plane privacy).
+3. Confidentiality + multi-principal binding bundle (SM/PEI/SCS/DAS).
+
+This addendum changes exposition, not underlying protocol semantics.
+
 ---
 
 ## 1. Motivation
@@ -42,6 +58,18 @@ This creates a structural tension:
 - Centralized raw visibility leaks sensitive behavior and data.
 
 SecureClaw treats this as a systems-and-crypto co-design problem: externalize policy while reducing single-point observability.
+
+### 1.2.1 2025--2026 pain-point map (why this is timely)
+
+Recent agent-security evidence is consistent with one pattern: leakage and unauthorized actions increasingly occur across tool paths and control planes, not only in final text generation.
+
+1. Prompt-injection exfiltration in tool-calling tasks (AgentDojo-style banking/data-flow settings): aligns with SecureClaw SM + NBE goals and motivates E4.
+2. Visual prompt injection in computer-use agents (multimodal UI workflows): partially covered only when effectful operations are executor-mediated; motivates E5 and explicit scope limits for unmediated UI primitives.
+3. Second-order enterprise prompt-injection chains (connector/multi-agent propagation): motivates delegation-aware binding (DAS) and capability intersection under compromised runtimes.
+4. AP2/agent-payments manipulation risk: motivates making payment-like side effects PREVIEW/COMMIT-gated with explicit user confirmation where required; covered by E3 protocol.
+5. AI gateway / DLP control-plane logging as privacy sink: motivates SAP leakage-contract framing so outsourced policy checks are useful without revealing query contents to any single policy server.
+
+The evaluation plan mirrors this map: E1/E2 are completed core-security tracks; E3/E4/E5/E6 are protocolized extension tracks.
 
 ### 1.3 Why non-bypassability is the key systems requirement
 
@@ -264,8 +292,8 @@ Malicious flow observations:
 Primary source: `artifact_out_compare/leakage_sweep/leakage_model_sweep.json`.
 
 - Unshaped PIR transcript: `mi_bits = 0.4143349401222639`, `map_acc = 0.5144508670520231`, `chance_acc = 0.3333333333333333`.
-- Full-shaping PIR transcript (`shaped_pad4_cover1`): `mi_bits = 0.0`, `map_acc = 0.34545454545454546`.
-- Full-shaping MPC transcript (`shaped_pad4_cover1`): `mi_bits = 2.0776676398894596e-06`, `map_acc = 0.3175635718509758`.
+- Full-shaping PIR transcript (`shaped_pad4_cover1`): `mi_bits = 0.0`, `map_acc = 0.3313253012048193`.
+- Full-shaping MPC transcript (`shaped_pad4_cover1`): `mi_bits = 1.0614695895005673e-06`, `map_acc = 0.3033775633293124`.
 
 Interpretation: under unified + bundled + fixed-shape routing, single-server distinguishability collapses to chance-level.
 

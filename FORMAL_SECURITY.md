@@ -1,15 +1,15 @@
 # SecureClaw Formal Security Model
 
-This document defines a single, reviewable security statement and the full proof skeleton for six properties:
+This document defines one paper-level thesis and the formal proof skeleton needed to support it.
+For presentation, we package the system into three core claims plus one optional privacy mode:
 
-1. Non-Bypassable Effects (NBE)
-2. Secret Myopia (SM)
-3. Patch-Carrying Egress Integrity (PEI)
-4. Skill-Confined Safety (SCS)
-5. Delegation-Aware Binding Safety (DAS)
-6. Single-Auditor Privacy (SAP, optional deployment mode)
+1. C1 (core): Non-Bypassable Effects (NBE)
+2. C2 (core): Control-plane privacy via Single-Auditor Privacy (SAP)
+3. C3 (core): Confidentiality + multi-principal binding correctness (SM/PEI/SCS/DAS bundle)
+4. Optional mode: SAP can be disabled in single-server deployments that accept query exposure
 
-It is artifact-faithful and mapped to executable checks in this repository.
+Internally, the proofs still track six properties (NBE, SM, PEI, SCS, DAS, SAP) to keep assumptions explicit.
+The model is artifact-faithful and mapped to executable checks in this repository.
 
 ## 1. Single Reviewable Proposition
 
@@ -24,6 +24,16 @@ This claim has three orthogonal parts:
 3. Multi-principal part. Delegation/federation context bound to request hash to prevent cross-context replay.
 
 SAP is an optional deployment mode for leakage-bounded policy outsourcing against one policy server and does not change the integrity line.
+
+### 1.1 Paper-facing contribution packaging
+
+To avoid over-fragmentation in the main paper:
+
+1. NBE is presented as the primary systems guarantee.
+2. SAP is presented as the control-plane privacy resolution to outsourced policy evaluation.
+3. SM/PEI/SCS/DAS are presented as a combined confidentiality-and-binding envelope.
+
+This packaging changes exposition, not mathematical assumptions.
 
 Canonical evidence anchors (paper/report synchronization):
 
@@ -57,6 +67,15 @@ Canonical evidence anchors (paper/report synchronization):
 3. No claim against kernel-level side channels.
 4. No claim if `EXECUTOR_INSECURE_ALLOW=1`.
 5. No claim if both policy servers collude.
+
+### 2.4 Evaluation threat-model mapping (fairness boundary)
+
+The repository distinguishes two evaluation threat models:
+
+1. Threat Model A (honest runtime): native guardrail baselines (Codex/OpenClaw and mediated DRIFT/IPIGuard/AgentArmor) are interpreted as runtime-behavior defenses.
+2. Threat Model B (compromised runtime): runtime may attempt direct bypass, replay, and cross-context misuse; NBE/SCS/DAS claims are evaluated here.
+
+This separation prevents unfair baseline interpretation and matches `BASELINES_FAIRNESS.md`.
 
 ## 3. Unified Notation
 

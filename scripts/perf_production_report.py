@@ -40,7 +40,11 @@ def _run_script(repo_root: Path, script_rel: str, env: dict[str, str]) -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--out", default="artifact_out_compare/perf_production_report.json", help="Output report path")
+    ap.add_argument(
+        "--out",
+        default="artifact_out_compare_noprompt/perf_production_report.json",
+        help="Output report path",
+    )
     ap.add_argument("--run-missing", type=int, default=0, help="Run benches when input files are missing")
     ap.add_argument("--target-ops", type=float, default=25.0, help="Production throughput target (ops/s)")
     args = ap.parse_args()
@@ -167,4 +171,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

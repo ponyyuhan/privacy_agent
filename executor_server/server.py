@@ -413,13 +413,25 @@ def _verify_dfa_evidence(dfa_ev: dict, *, text: str, action_id: str) -> tuple[Op
         max_chars = 4096
     if len(s) > max_chars:
         s = s[:max_chars]
+    pad_steps = bool(int(os.getenv("PAD_DFA_STEPS", "0")))
+    if pad_steps and len(s) < max_chars:
+        s = s + ("~" * (max_chars - len(s)))
 
-    if len(steps) != len(s):
-        # Gateway is expected to include a step per char scanned (and it only scans in confirm-path).
-        return None, "dfa_step_count_mismatch"
+    n_chars = len(s)
+    n_steps = len(steps)
+    if pad_steps:
+        # Padded mode emits exactly MAX_DFA_SCAN_CHARS steps.
+        if n_steps != n_chars:
+            return None, "dfa_step_count_mismatch_padded"
+    else:
+        # Unpadded mode may early-stop exactly at first matched step.
+        if n_steps > n_chars:
+            return None, "dfa_step_count_oversized"
 
     state = 0
-    for i, ch in enumerate(s):
+    matched_any = False
+    for i in range(n_steps):
+        ch = s[i]
         sym = int(char_to_sym.get(ch, 0))
         expected_idx = (state * alpha) + sym
         step = steps[i]
@@ -431,8 +443,17 @@ def _verify_dfa_evidence(dfa_ev: dict, *, text: str, action_id: str) -> tuple[Op
         # next_state u16 + match flag byte
         state = int.from_bytes(blk[0:2], "little", signed=False)
         if (blk[2] & 1) == 1:
-            return True, "OK"
-    return False, "OK"
+            matched_any = True
+            if not pad_steps:
+                # Gateway returns immediately at first match when unpadded.
+                if i + 1 != n_steps:
+                    return None, "dfa_unpadded_trailing_steps_after_match"
+                return True, "OK"
+
+    if not pad_steps and n_steps < n_chars:
+        # In unpadded mode, truncation is only valid if a match occurred.
+        return None, "dfa_unpadded_truncated_without_match"
+    return matched_any, "OK"
 
 
 class ExecSendMessageReq(BaseModel):

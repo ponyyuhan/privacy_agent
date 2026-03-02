@@ -465,16 +465,37 @@ The challenger then reveals the full transcript view $\mathsf{View}(\mathcal{P}_
 policy server $\mathcal{P}_\sigma$.
 The adversary outputs a guess $b'$.
 
+\paragraph{Lemma 1 (PIR-view simulation).}
+For fixed $\sigma \in \{0,1\}$, under single-server security of the DPF/FSS PIR scheme, there exists
+a PPT simulator $\mathsf{Sim}^{\mathsf{PIR}}_\sigma$ such that the PIR transcript fragment visible to
+$\mathcal{P}_\sigma$ is computationally indistinguishable from
+$\mathsf{Sim}^{\mathsf{PIR}}_\sigma(L_{\mathsf{PIR}})$.
+
+\paragraph{Lemma 2 (MPC-view simulation).}
+Under honest-but-curious security of the two-party MPC protocol, there exists a PPT simulator
+$\mathsf{Sim}^{\mathsf{MPC}}_\sigma$ such that the MPC transcript fragment visible to
+$\mathcal{P}_\sigma$ is computationally indistinguishable from
+$\mathsf{Sim}^{\mathsf{MPC}}_\sigma(L_{\mathsf{MPC}})$.
+
+\paragraph{Lemma 3 (Deterministic fixed-shape composition).}
+Assume the gateway scheduler is fixed-shape for covered intents: endpoint class, program id, batch
+geometry, and timing bucket policy are deterministic functions of
+$L_{\mathsf{CONFIRM}}$ and $L_{\mathsf{TIME}}$.
+Then non-cryptographic transcript components are exactly computable from
+$(L_{\mathsf{CONFIRM}},L_{\mathsf{TIME}})$.
+
 \paragraph{Theorem.}
-\begin{theorem}[Single auditor privacy under DPF and two party computation]\label{thm:sap}
-Assume the DPF and FSS based two server PIR scheme is secure against a single server that sees only
-one key share per query.
-Assume the two party computation protocol for the fixed policy program is secure in the honest but
-curious model.
-Assume the gateway uses fixed shape routing and fixed schedule parameters so that the transcript
-shape matches the leakage function $L_{\mathsf{policy}}$.
-Then for each $\sigma \in \{0,1\}$ there exists a probabilistic polynomial time simulator
-$\mathsf{Sim}_\sigma$ such that for all probabilistic polynomial time distinguishers $D$,
+\begin{theorem}[Single-auditor transcript privacy under PIR+MPC]\label{thm:sap}
+Assume:
+\begin{enumerate}
+\item DPF/FSS two-server PIR is secure against one server (single key-share view),
+\item the fixed policy MPC is secure in the honest-but-curious model,
+\item policy servers do not collude, and
+\item deployment enforces fixed-shape routing/scheduling consistent with
+$L_{\mathsf{policy}}=(L_{\mathsf{PIR}},L_{\mathsf{MPC}},L_{\mathsf{CONFIRM}},L_{\mathsf{TIME}})$.
+\end{enumerate}
+Then for each $\sigma \in \{0,1\}$ there exists a PPT simulator $\mathsf{Sim}_\sigma$ such that for
+all PPT distinguishers $D$,
 \[
 \bigl|\Pr[D(\mathsf{View}(\mathcal{P}_\sigma))=1] - \Pr[D(\mathsf{Sim}_\sigma(L_{\mathsf{policy}}))=1]\bigr|
 \]
@@ -482,22 +503,18 @@ is negligible in $\lambda$.
 \end{theorem}
 
 \paragraph{Proof.}
-We use a hybrid argument.
-Fix $\sigma$ and consider the real transcript view of $\mathcal{P}_\sigma$.
-
-First replace each PIR key share in the transcript with the output of the single server PIR
-simulator for that scheme given the corresponding PIR leakage terms in $L_{\mathsf{policy}}$.
-By PIR security the transcript remains computationally indistinguishable.
-
-Next replace each two party computation message transcript with the output of the two party
-computation simulator for the honest but curious model given the circuit shape, the program
-identifier, the schedule parameters, and the output bits that are included in $L_{\mathsf{policy}}$.
-By two party computation security the transcript remains computationally indistinguishable.
-
-All remaining transcript components are fully determined by the fixed routing and fixed schedule
-parameters and are therefore computable from $L_{\mathsf{policy}}$.
-Combining the simulators yields $\mathsf{Sim}_\sigma$.
-Applying a union bound over the negligible distinguishing advantages yields the theorem.
+Fix $\sigma$ and define hybrids.
+$H_0$ is the real single-server transcript.
+$H_1$ replaces PIR-visible fragments using $\mathsf{Sim}^{\mathsf{PIR}}_\sigma$; by Lemma 1,
+$H_0 \approx_c H_1$.
+$H_2$ additionally replaces MPC-visible fragments using $\mathsf{Sim}^{\mathsf{MPC}}_\sigma$; by
+Lemma 2, $H_1 \approx_c H_2$.
+By Lemma 3, all remaining scheduler/confirmation/timing metadata in $H_2$ is computable from
+$(L_{\mathsf{CONFIRM}},L_{\mathsf{TIME}})$, hence from $L_{\mathsf{policy}}$.
+Therefore $H_2$ is exactly (or efficiently) sampleable by a simulator
+$\mathsf{Sim}_\sigma(L_{\mathsf{policy}})$.
+Triangle inequality over hybrid distances gives negligible distinguishing advantage, proving the
+theorem.
 \qed
 
 \paragraph{Executable evidence.}

@@ -92,14 +92,13 @@
 
 
 \begin{abstract}
-Agent runtimes that can invoke tools or install skills are exposed to prompt injection and supply-chain compromise.
-The core security requirement is not advisory policy, but an execution boundary that cryptographically binds authorization to committed side effects.
-We present SecureClaw, a gateway-executor architecture with a non-bypassable \textsf{PREVIEW}\,$\rightarrow$\,\textsf{COMMIT} protocol.
-Commit succeeds only when the executor verifies dual policy proofs bound to the exact request context, freshness window, and replay state.
-SecureClaw composes this effect integrity boundary with handle-first plaintext confinement, commit-time patch integrity, capsule-conditional skill confinement, and delegation-aware context binding.
-For deployments that outsource policy evaluation, we add optional single-auditor privacy (SAP): fixed-shape policy routing with an explicit leakage contract under which each single policy server transcript is simulatable.
-On official C1--C5 benchmark coverage, SecureClaw achieves $0.00\%$ observed attack leakage and $100.00\%$ attack blocking with $80.00\%$ benign allow in our deterministic run.
-In transcript distinguishability sweeps, shaping reduces single-server intent signal from separable (PIR MI $0.414$ bits) to near-zero MI under unified fixed-shape mode.
+Agent tool-use security faces two coupled problems: compromised runtimes can bypass in-process guardrails at effect time, and centralized policy enforcement can itself become a privacy sink.
+We present SecureClaw, an execution control plane with a cryptographically non-bypassable PREVIEW$\rightarrow$COMMIT boundary and an optional single-auditor privacy (SAP) mode for outsourced policy checks.
+Commit succeeds only when an independent executor verifies dual commit-proof shares bound to a canonical request hash, delegation context, freshness, and replay state.
+SAP uses fixed-shape PIR+MPC routing with an explicit leakage contract and a simulation-based single-server transcript privacy claim.
+On official C1--C5 coverage, SecureClaw achieves $0.00\%$ observed attack leakage and $100.00\%$ attack blocking with $80.00\%$ benign allow in our deterministic run.
+In single-policy-server distinguishability sweeps, shaping reduces separable signal (PIR MI $0.414$ bits unshaped) to near-zero MI under unified fixed-shape mode.
+The artifact additionally provides a compromised-runtime bypass suite and protocolized extension designs for AP2 case-study and multimodal stress benchmarks.
 \end{abstract}
 
 \input{paper_full_body}

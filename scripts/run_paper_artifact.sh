@@ -43,7 +43,7 @@ fi
 
 echo "[paper] 3c) official AgentLeak C1..C5 fair comparison (MIRAGE + native Codex/OpenClaw baselines)"
 if [[ "${RUN_FAIR_FULL:-0}" == "1" ]]; then
-  OUT_DIR_COMPARE="${OUT_DIR_COMPARE:-$ROOT/artifact_out_compare}"
+  OUT_DIR_COMPARE="${OUT_DIR_COMPARE:-$ROOT/artifact_out_compare_noprompt}"
   mkdir -p "$OUT_DIR_COMPARE"
   # Codex/OpenClaw baselines can be slow and may require external credentials; keep optional.
   CODEX_BASELINE_CONCURRENCY="${CODEX_BASELINE_CONCURRENCY:-4}" \
@@ -58,6 +58,10 @@ if [[ "${RUN_FAIR_FULL:-0}" == "1" ]]; then
   PYTHONPATH=. python scripts/fair_utility_breakdown.py --report "$OUT_DIR_COMPARE/fair_full_report.json" --out "$OUT_DIR_COMPARE/stats/fair_utility_breakdown.json" \
     | tee "$OUT_DIR_COMPARE/fair_utility_breakdown_path.txt"
   PYTHONPATH=. python scripts/multi_track_eval.py --out-dir "$OUT_DIR_COMPARE" --force-refresh-fair 0 --run-protocol-tests 1 \
+    --external-report "${EXTERNAL_UNIFIED_REPORT_PATH:-$ROOT/artifact_out_external_runtime/external_runs/${EXTERNAL_RUN_TAG:-20260220_fullpipeline}/external_benchmark_unified_report.json}" \
+    --external-run-tag "${EXTERNAL_RUN_TAG:-}" \
+    --asb-run-tag "${ASB_RUN_TAG:-}" \
+    --require-external-real-run "${REQUIRE_EXTERNAL_REAL_RUN:-1}" \
     | tee "$OUT_DIR_COMPARE/multi_track_eval_path.txt"
 else
   echo "[paper] skip fair_full_compare (set RUN_FAIR_FULL=1)" | tee "$OUT_DIR/fair_full_compare_skipped.txt"
@@ -89,10 +93,12 @@ else
 fi
 
 echo "[paper] 7b) production performance report (target ops + scaling summary)"
-PYTHONPATH=. python scripts/perf_production_report.py --run-missing 0 | tee "$OUT_DIR/perf_production_report_path.txt"
+PYTHONPATH=. python scripts/perf_production_report.py --run-missing 0 --out "${OUT_DIR_COMPARE:-$ROOT/artifact_out_compare_noprompt}/perf_production_report.json" \
+  | tee "$OUT_DIR/perf_production_report_path.txt"
 
 echo "[paper] 7c) leakage channel report (C1..C7 + distinguishability summary)"
-PYTHONPATH=. python scripts/leakage_channel_report.py | tee "$OUT_DIR/leakage_channel_report_path.txt"
+PYTHONPATH=. python scripts/leakage_channel_report.py --out "${OUT_DIR_COMPARE:-$ROOT/artifact_out_compare_noprompt}/leakage_channel_report.json" \
+  | tee "$OUT_DIR/leakage_channel_report_path.txt"
 
 echo "[paper] 8) native runtime baselines (codex/openclaw)"
 PYTHONPATH=. python scripts/native_guardrail_eval.py | tee "$OUT_DIR/native_guardrail_eval_path.txt"
@@ -116,6 +122,30 @@ echo "[paper] 12) repro manifest"
 PYTHONPATH=. python scripts/write_repro_manifest.py | tee "$OUT_DIR/repro_manifest_path.txt"
 
 echo "[paper] 12b) submission convergence snapshot"
-PYTHONPATH=. python scripts/write_submission_convergence.py | tee "$OUT_DIR/submission_convergence_path.txt" || true
+PYTHONPATH=. python scripts/write_submission_convergence.py \
+  --fair-report "${OUT_DIR_COMPARE:-$ROOT/artifact_out_compare_noprompt}/fair_full_report.json" \
+  --fair-stats "${OUT_DIR_COMPARE:-$ROOT/artifact_out_compare_noprompt}/stats/fair_full_stats.json" \
+  --utility "${OUT_DIR_COMPARE:-$ROOT/artifact_out_compare_noprompt}/stats/fair_utility_breakdown.json" \
+  --perf "${OUT_DIR_COMPARE:-$ROOT/artifact_out_compare_noprompt}/perf_production_report.json" \
+  --leakage "${OUT_DIR_COMPARE:-$ROOT/artifact_out_compare_noprompt}/leakage_channel_report.json" \
+  --out "${OUT_DIR_COMPARE:-$ROOT/artifact_out_compare_noprompt}/SUBMISSION_CONVERGENCE.md" \
+  | tee "$OUT_DIR/submission_convergence_path.txt" || true
+
+echo "[paper] 12c) compromised-runtime / bypass suite table"
+PYTHONPATH=. python scripts/compromised_bypass_report.py \
+  --artifact-report "$OUT_DIR/report.json" \
+  --security-game "$OUT_DIR/security_game_nbe.json" \
+  --capsule-verdict "$OUT_DIR/capsule_contract_verdict.json" \
+  --out-json "$OUT_DIR/compromised_bypass_report.json" \
+  --out-md "$OUT_DIR/compromised_bypass_report.md" \
+  | tee "$OUT_DIR/compromised_bypass_report_path.txt" || true
+
+echo "[paper] 12d) paper_eval property matrix (Property x AttackClass)"
+PYTHONPATH=. python scripts/paper_eval_property_matrix.py \
+  --paper-eval "$OUT_DIR/paper_eval/paper_eval_summary.json" \
+  --mode "${PROPERTY_MATRIX_MODE:-mirage_full}" \
+  --out-json "$OUT_DIR/paper_eval/property_matrix.json" \
+  --out-md "$OUT_DIR/paper_eval/property_matrix.md" \
+  | tee "$OUT_DIR/paper_eval_property_matrix_path.txt" || true
 
 echo "[paper] done; outputs in $OUT_DIR"

@@ -17,6 +17,22 @@ SecureClaw 的核心思想是把信任从“模型是否听话”迁移到“系
 
 本文档基于当前仓库实现和已产出的 artifact 结果，给出可直接用于论文写作的中文版本。
 
+### 0.1 2026 打磨补充（单主命题叙事）
+
+为对齐顶会审稿口径，主文叙事统一为一个中心命题：
+
+1. 在 `compromised runtime` 威胁下，必须有密码学不可绕过的执行边界（NBE）。
+2. 策略外包会引入控制平面隐私悖论（control-plane privacy paradox）。
+3. SAP 通过显式泄露函数约束单审计方可见性，解决该悖论。
+
+贡献包装统一为三条核心：
+
+1. NBE（副作用完整性）。
+2. SAP（控制平面隐私）。
+3. 机密性与多主体绑定正确性（SM/PEI/SCS/DAS 组合）。
+
+该补充只调整论文呈现，不改变底层协议语义。
+
 ---
 
 ## 1. 研究动机（Motivation）
@@ -44,6 +60,18 @@ SecureClaw 的核心思想是把信任从“模型是否听话”迁移到“系
 
 SecureClaw 的动机是把该矛盾转化为“系统与密码学”的可落地问题：  
 在不暴露单点明文查询的前提下，仍保持策略判断与执行约束能力。
+
+### 1.2.1 2025--2026 现实痛点映射（为何该问题现在必须解决）
+
+最近一年多的 Agent 安全证据指向同一趋势：泄露与未授权动作主要发生在 tool path 与控制平面，而不只是最终文本输出。
+
+1. 工具调用场景下的提示词注入外泄（AgentDojo/banking/data-flow 类）：对应 SecureClaw 的 SM + NBE 目标，并直接对应 E4 设计。
+2. 计算机使用 Agent 的视觉注入（multimodal UI 流程）：仅在副作用经过 executor 时可被 NBE 覆盖；未中介的 UI 原语属于显式范围外，需 E5 压力测试与架构包裹。
+3. 企业连接器/多 Agent 的二阶注入链：对应 DAS（委托绑定）与能力交集约束，防跨主体复用。
+4. AP2/Agent 支付协议中的操纵风险：要求将支付类副作用放入 PREVIEW->COMMIT，并在必要时执行显式确认；对应 E3。
+5. AI Gateway / DLP 日志成为隐私汇聚点：对应 SAP 的泄露契约口径，使“策略外包”与“单审计方隐私”可以同时成立。
+
+评估计划与该映射一致：E1/E2 为已完成核心验证，E3/E4/E5/E6 为协议化扩展实验轨道。
 
 ### 1.3 为什么“不可绕过执行线”是关键要求
 
@@ -269,8 +297,8 @@ Gateway 在 `gateway/router.py` 中完成路由、能力校验与审计。
 主证据路径：`artifact_out_compare/leakage_sweep/leakage_model_sweep.json`。
 
 - 未整形 PIR transcript：`mi_bits = 0.4143349401222639`，`map_acc = 0.5144508670520231`，`chance_acc = 0.3333333333333333`。
-- 全整形 PIR transcript（`shaped_pad4_cover1`）：`mi_bits = 0.0`，`map_acc = 0.34545454545454546`。
-- 全整形 MPC transcript（`shaped_pad4_cover1`）：`mi_bits = 2.0776676398894596e-06`，`map_acc = 0.3175635718509758`。
+- 全整形 PIR transcript（`shaped_pad4_cover1`）：`mi_bits = 0.0`，`map_acc = 0.3313253012048193`。
+- 全整形 MPC transcript（`shaped_pad4_cover1`）：`mi_bits = 1.0614695895005673e-06`，`map_acc = 0.3033775633293124`。
 
 解释：在 unified + bundled + fixed-shape 条件下，单策略服务可见 transcript 的可分离信号塌缩到 chance 附近。
 

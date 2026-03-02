@@ -16,6 +16,17 @@ def _load_json(path: Path) -> dict[str, Any]:
     return obj if isinstance(obj, dict) else {}
 
 
+def _load_json_with_legacy_fallback(path_s: str, legacy_s: str = "") -> dict[str, Any]:
+    p = Path(path_s)
+    if p.exists():
+        return _load_json(p)
+    if legacy_s:
+        lp = Path(legacy_s)
+        if lp.exists():
+            return _load_json(lp)
+    return {}
+
+
 def _f(x: Any, digits: int = 4) -> str:
     try:
         return f"{float(x):.{digits}f}"
@@ -85,12 +96,12 @@ def _render_fp_breakdown(utility: dict[str, Any]) -> str:
         d = by_mode.get(k)
         if not isinstance(d, dict):
             continue
-        denies = int(d.get("benign_denies", 0))
-        reasons = d.get("benign_deny_by_reason")
+        non_allows = int(d.get("benign_non_allows", d.get("benign_denies", 0)))
+        reasons = d.get("benign_non_allow_by_reason", d.get("benign_deny_by_reason"))
         top_reason = "NA"
         if isinstance(reasons, dict) and reasons:
             top_reason = sorted(reasons.items(), key=lambda kv: (-int(kv[1]), str(kv[0])))[0][0]
-        out.append(f"- `{k}`: benign_denies={denies}, top_reason={top_reason}")
+        out.append(f"- `{k}`: benign_non_allows={non_allows}, top_reason={top_reason}")
     if not out:
         return "- No mode breakdown found."
     return "\n".join(out)
@@ -116,19 +127,21 @@ def _render_channel_table(leakage: dict[str, Any]) -> str:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--fair-report", default="artifact_out_compare/fair_full_report.json")
-    ap.add_argument("--fair-stats", default="artifact_out_compare/stats/fair_full_stats.json")
-    ap.add_argument("--utility", default="artifact_out_compare/stats/fair_utility_breakdown.json")
-    ap.add_argument("--perf", default="artifact_out_compare/perf_production_report.json")
-    ap.add_argument("--leakage", default="artifact_out_compare/leakage_channel_report.json")
-    ap.add_argument("--out", default="artifact_out_compare/SUBMISSION_CONVERGENCE.md")
+    ap.add_argument("--fair-report", default="artifact_out_compare_noprompt/fair_full_report.json")
+    ap.add_argument("--fair-stats", default="artifact_out_compare_noprompt/stats/fair_full_stats.json")
+    ap.add_argument("--utility", default="artifact_out_compare_noprompt/stats/fair_utility_breakdown.json")
+    ap.add_argument("--perf", default="artifact_out_compare_noprompt/perf_production_report.json")
+    ap.add_argument("--leakage", default="artifact_out_compare_noprompt/leakage_channel_report.json")
+    ap.add_argument("--out", default="artifact_out_compare_noprompt/SUBMISSION_CONVERGENCE.md")
     args = ap.parse_args()
 
-    fair = _load_json(Path(args.fair_report))
-    stats = _load_json(Path(args.fair_stats))
-    utility = _load_json(Path(args.utility))
-    perf = _load_json(Path(args.perf))
-    leakage = _load_json(Path(args.leakage))
+    fair = _load_json_with_legacy_fallback(args.fair_report, "artifact_out_compare/fair_full_report.json")
+    stats = _load_json_with_legacy_fallback(args.fair_stats, "artifact_out_compare/stats/fair_full_stats.json")
+    utility = _load_json_with_legacy_fallback(
+        args.utility, "artifact_out_compare/stats/fair_utility_breakdown.json"
+    )
+    perf = _load_json_with_legacy_fallback(args.perf, "artifact_out_compare/perf_production_report.json")
+    leakage = _load_json_with_legacy_fallback(args.leakage, "artifact_out_compare/leakage_channel_report.json")
 
     systems = fair.get("systems") if isinstance(fair.get("systems"), dict) else {}
     case_meta = fair.get("case_meta") if isinstance(fair.get("case_meta"), dict) else {}

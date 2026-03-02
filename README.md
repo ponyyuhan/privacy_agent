@@ -49,6 +49,8 @@
 - `spec/SECURECLAW_PROTOCOL_RFC_v1.md`：`act`/PREVIEW/COMMIT/evidence/accept predicate 的 RFC 风格接口规范（字段、错误码、不变量、版本兼容）。
 - `capsule/MC_CONTRACT_SPEC.md`：capsule mediation contract 的可验证系统假设、断言集合与降级语义。
 - `LEAKAGE_EVIDENCE.md`：逐通道 `L_Ci` 的官方/合成实证索引（含复现实验路径）。
+- `EXPERIMENT_DESIGN.md`：`polish.md` 对齐后的完整实验协议（E1~E6，含 threat-model A/B、公平性约束、验收标准）。
+- `POLISH_CLOSURE.md`：`polish.md` 条目到代码/文档/产物/验证命令的逐项闭环对照表（2026-02-26）。
 - `BASELINES_FAIRNESS.md`：强基线同口径对比的语义、威胁模型与公平性说明。
 - `PERFORMANCE.md`：固定形状（pad+cover+mixer）下的吞吐/延迟曲线与多核 scaling 叙事。
 - `ALGORITHMS.md` / `ALGORITHMS_CN.md`：协议与算法描述（含稀疏 PIR 快路径等）。
@@ -74,6 +76,17 @@
   - `scripts/run_full_external_eval_pipeline.sh`
   - `artifact_out_external_runtime/full_pipeline_20260220.log`
 - 状态快照文件（实时更新）：`artifact_out_external_runtime/runtime_status.json`。
+
+### 1.7 评测威胁模型拆分（避免不公平比较）
+
+为避免“基线不公平”争议，仓库统一按两类威胁模型报告：
+
+1. Threat Model A（honest runtime）：
+   - 适用 native/mediation baselines（Codex/OpenClaw/DRIFT/IPIGuard/AgentArmor）。
+2. Threat Model B（compromised runtime）：
+   - 适用 SecureClaw 的 NBE/SCS/DAS 与 bypass 套件。
+
+详见：`EXPERIMENT_DESIGN.md`、`BASELINES_FAIRNESS.md`、`LEAKAGE_EVIDENCE.md`。
 
 ### 1.6 README 旧内容校准说明
 - 第 24 节展示的是 SecureClaw 主流水线与本地样例，不等价于“外部 benchmark（AgentDojo/ASB/DRIFT/IPIGuard/WASP/VPI）已全量完成”。
@@ -711,6 +724,8 @@ Router 已实现的 intent（是否可用取决于 capability 配置）：
 14. 审计日志 hash-chain 校验（`scripts/verify_audit_log.py`）
 15. 自动产图（`artifact_out/figures/*.svg`）
 16. 可复现 manifest（`artifact_out/repro_manifest.json`）
+17. 投稿收敛快照（`scripts/write_submission_convergence.py`）
+18. compromised runtime / bypass 主表（`scripts/compromised_bypass_report.py`）
 
 ---
 
@@ -804,7 +819,7 @@ Router 已实现的 intent（是否可用取决于 capability 配置）：
   - `n=100`, `accuracy=1.0`
 - Leakage:
   - `unshaped.pir.mi_bits=0.4143349401222639`, `map_acc=0.5144508670520231`
-  - `shaped_pad4_cover1.pir.mi_bits=0.0`, `map_acc=0.34545454545454546`
+  - `shaped_pad4_cover1.pir.mi_bits=0.0`, `map_acc=0.3313253012048193`
 
 ### 16.1 AgentLeak 风格 C1..C7 复现评测
 运行：
@@ -1175,19 +1190,48 @@ native runtime baselines（无 SecureClaw 执行线）：
 official AgentLeak `C1..C5` 同口径 fair compare（保留主对比：SecureClaw + Codex + OpenClaw）：
 - `scripts/fair_full_compare.py`
 - 输出：`artifact_out_compare_noprompt/fair_full_report.json`
-- 可选新增防护基线：`DEFENSE_BASELINES=drift,ipiguard,agentarmor`（脚本支持已完成；外部 benchmark 全量结果见第 1.5 节进度）
-  - 对应系统键：`codex_drift`, `codex_ipiguard`, `codex_agentarmor`
+- 可选新增防护基线（默认真实官方口径）：
+  - `DEFENSE_BASELINE_SOURCE=real_only`（默认）
+  - `DEFENSE_BASELINES=drift,ipiguard`（默认）
+  - 对应系统键：`codex_drift`, `codex_ipiguard`
+  - 数据来源：`EXTERNAL_BENCHMARK_REPORT` 或 `EXTERNAL_RUN_TAG` 指向的 `external_benchmark_unified_report.json`
+  - 若启用 `STRICT_REAL_DEFENSE_BASELINES=1`（默认）且真实结果缺失，会直接失败并拒绝回退到模拟口径
+  - `codex_agentarmor` 仅在提供 `AGENTARMOR_OFFICIAL_REPORT` 时纳入真实比较
+  - 仅在显式设置 `DEFENSE_BASELINE_SOURCE=equivalent` 时，才会启用 legacy 机制等价 wrapper（非默认，非主口径）
 - 统计分解与显著性：`scripts/fair_full_stats.py` -> `artifact_out_compare_noprompt/stats/fair_full_stats.json`
+  - 新增口径：`benign_outcome_counts(ALLOW/CONFIRM/HARD_DENY/ERROR)`、`availability_fail_rate`、`benign_non_allow_rate`
 - 效用/误报分解：`scripts/fair_utility_breakdown.py` -> `artifact_out_compare_noprompt/stats/fair_utility_breakdown.json`
+  - 新增按系统 `native_by_system` 与 `attack_error_blocks` 分解
+- `paper_eval` 性质矩阵（Property × AttackClass）：
+  - `scripts/paper_eval_property_matrix.py`
+  - 输出：`artifact_out/paper_eval/property_matrix.json`, `artifact_out/paper_eval/property_matrix.md`
 - 三轨统一评测（隐私泄漏/注入鲁棒性/协议实现）：`scripts/multi_track_eval.py` ->
-  - `artifact_out_compare/multi_track_eval.json`（历史口径）
   - `artifact_out_compare_noprompt/multi_track_eval.json`（当前主用口径）
+  - 注入鲁棒性轨道默认要求外部 benchmark 真跑报告（`external_real_run`）：
+    - 示例输入：`artifact_out_external_runtime/external_runs/20260220_fullpipeline/external_benchmark_unified_report.json`
+    - 建议同时传入 `--asb-run-tag 20260220_official` 以强制 ASB run-tag 隔离
+  - 历史口径（legacy）：`artifact_out_compare/multi_track_eval.json`
 - 语义与威胁模型解释：`BASELINES_FAIRNESS.md`
+- 论文口径复刻 lane（官方多-agent拓扑 + 三层检测 + scenario-level OR，并含 SecureClaw 同口径版本）：
+  - `scripts/paper_parity_agentleak_eval.py`
+  - 输出目录：`artifact_out_compare_noprompt/paper_parity_full_gpt4omini/paper_parity_agentleak_eval/`
+  - 关键产物：
+    - `rows_plain.jsonl`
+    - `rows_secureclaw.jsonl`
+    - `summary_plain.json`
+    - `summary_secureclaw.json`
+    - `paper_parity_report.json`
+  - 口径定义：`scenario_or_leaked = c1_leaked OR c2_leaked OR c5_leaked`
+  - 运行示例：
+    - `python scripts/paper_parity_agentleak_eval.py --out artifact_out_compare_noprompt/paper_parity_full_gpt4omini --model gpt-4o-mini-2024-07-18 --judge-model gpt-4o-mini --n 1000 --seed 42 --modes plain,secureclaw --resume`
+- compromised runtime / bypass 主表（Table B）：
+  - `scripts/compromised_bypass_report.py`
+  - 输出：`artifact_out/compromised_bypass_report.json`, `artifact_out/compromised_bypass_report.md`
 
 生产性能与泄露统一汇总：
-- `scripts/perf_production_report.py` -> `artifact_out_compare/perf_production_report.json`
-- `scripts/leakage_channel_report.py` -> `artifact_out_compare/leakage_channel_report.json`
-- 投稿收敛快照：`scripts/write_submission_convergence.py` -> `artifact_out_compare/SUBMISSION_CONVERGENCE.md`
+- `scripts/perf_production_report.py` -> `artifact_out_compare_noprompt/perf_production_report.json`
+- `scripts/leakage_channel_report.py` -> `artifact_out_compare_noprompt/leakage_channel_report.json`
+- 投稿收敛快照：`scripts/write_submission_convergence.py` -> `artifact_out_compare_noprompt/SUBMISSION_CONVERGENCE.md`
 
 ### 24.7 自动产图与复现清单（必须）
 
@@ -1262,22 +1306,31 @@ official AgentLeak `C1..C5` 同口径 fair compare（保留主对比：SecureCla
 - 复现清单：
   - `artifact_out/repro_manifest.json`
   - `artifact_out/security_game_nbe.json`（`status=OK`）
+  - `artifact_out_compare_noprompt/docs_consistency_report.json`（`status=OK`，由 `scripts/check_docs_consistency.py` 生成）
 - `L_policy` 区分性（`artifact_out_compare/leakage_sweep/leakage_model_sweep.json`）：
-  - `unshaped` PIR：`mi_bits=0.4143349401222639`, `map_acc=0.5144508670520231`, `chance=0.3333333333333333`
-  - `shaped_pad4_cover1` PIR：`mi_bits=0.0`, `map_acc=0.34545454545454546`, `chance=0.3333333333333333`
-  - `shaped_pad4_cover1` MPC：`mi_bits=2.0776676398894596e-06`, `map_acc=0.3175635718509758`, `chance=0.3333333333333333`
-- 统一泄露汇总（`artifact_out_compare/leakage_channel_report.json`）：
+  - `unshaped` PIR：`mi_bits=0.4143349401222639`, `accuracy(map_acc)=0.5144508670520231`, `chance=0.3333333333333333`
+  - `shaped_pad4_cover1` PIR：`mi_bits=0.0`, `accuracy(map_acc)=0.3313253012048193`, `chance=0.3333333333333333`
+  - `shaped_pad4_cover1` MPC：`mi_bits=1.0614695895005673e-06`, `accuracy(map_acc)=0.3033775633293124`, `chance=0.3333333333333333`
+- `L_policy` 查询值隐藏（k-way recipient）：
+  - `artifact_out_compare/leakage_sweep_kway_recipient/leakage_model_sweep.json`
+  - `n_labels=16`, `unshaped.pir.mi_bits=0.0`, `shaped_pad4_cover1.pir.mi_bits=0.0`
+- 统一泄露汇总（`artifact_out_compare_noprompt/leakage_channel_report.json`）：
   - `status=OK`
   - 官方覆盖 `C1..C5`（`artifact_out_compare_noprompt/fair_full_report.json`）：`attack_leak_rate=0.0`，`benign_allow_rate=0.8`
+  - 官方 fair 细分（`artifact_out_compare_noprompt/stats/fair_full_stats.json`）：`mirage_full.benign_outcome_counts={ALLOW:2016,HARD_DENY:504}`；`openclaw_native.availability_fail_rate=1.0`
   - 合成覆盖 `C1..C7`（`artifact_out_compare/leakage_sys_synth_v2/agentleak_eval/agentleak_channel_summary.json`）：`attack_leak_rate=0.0`，`benign_allow_rate=0.8571428571428571`
   - 其中 `C6/C7` 通道均为 `attack_leak_rate=0.0`，`benign_allow_rate=1.0`
 - `PAD_DFA_STEPS` 对照产物：
   - `artifact_out_compare/leakage_sweep_pad_dfa0/leakage_model_sweep.json`
   - `artifact_out_compare/leakage_sweep_pad_dfa1/leakage_model_sweep.json`
 - 预算门控显式证据（`artifact_out_compare/leakage_budget_exhaust/agentleak_eval/agentleak_channel_summary.json`）：
-  - 出现 `LEAKAGE_BUDGET_EXCEEDED`（本次产物中命中 `4` 次）
-- 联邦协议评测（`artifact_out_compare/multi_agent_federated_eval.json`）：
+  - 出现 `LEAKAGE_BUDGET_EXCEEDED`（`mirage_full` 命中 `2` 次；四模式合计 `8` 次）
+- 联邦协议评测（`artifact_out_compare_noprompt/multi_agent_federated_eval.json`）：
   - `n_cases=7`, `n_pass=7`, `pass_rate=1.0`
-  - `latency_p50_ms=0.4094169707968831`, `latency_p95_ms=6.280291941948235`
+  - `latency_p50_ms=0.3799579571932554`, `latency_p95_ms=5.55745791643858`
 - Capsule 合同验证（`artifact_out/capsule_contract_verdict.json`）：
   - `status=OK`, `n_ok=7`, `n_fail=0`
+- compromised runtime / bypass 主表（`artifact_out/compromised_bypass_report.json`）：
+  - `n_rows=16`, `n_pass=16`, `pass_rate=1.0`
+- `paper_eval` 性质矩阵（`artifact_out/paper_eval/property_matrix.json`）：
+  - `mode=mirage_full` 下输出每个攻击类对应的 `properties` 与 `blocked_rate/confirm_rate`

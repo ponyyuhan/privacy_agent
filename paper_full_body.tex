@@ -4,212 +4,222 @@
 \section{Introduction}
 \label{sec:intro}
 
-Agentic systems increasingly execute real effects: sending messages, calling APIs, and installing third-party skills.
-In this setting, runtime logic is exposed to prompt injection, malicious tool outputs, and supply-chain compromise.
-The central systems question is no longer whether a policy exists, but whether effect execution is cryptographically bound to that policy decision.
+LLM agents now trigger irreversible effects: sending messages, invoking external APIs, and handling payment-like workflows.
+In this setting, prompt injection and tool-chain compromise are no longer only ``reasoning errors''; they become execution-time security failures.
+Recent evidence shows that simple prompt injection can make tool-calling agents leak personal data observed during task execution \citep{alizadeh2025simple}.
+At the protocol layer, AP2-style agent payments further raise the stakes because manipulated agent actions can directly affect financial outcomes \citep{ap2spec2025,whisperswealth2026}.
 
-A second tension appears in modern deployments.
-To reduce leakage risk, operators insert centralized control planes (AI gateways, DLP filters, LLM firewalls), but these systems often inspect and retain sensitive request contents for auditing and operations \citep{azureapimllmlogs2026,cloudflarefirewallai2026,cloudflareaidlp2026,dynatracemasklogs2026}.
-This creates a control-plane privacy paradox: the defense layer itself can become a privileged leakage sink.
+A natural reaction is to add centralized policy control (AI gateway, DLP, LLM firewall).
+However, this introduces a second failure mode: the same control plane that enforces policy may observe and log sensitive query values.
+We call this the \emph{control-plane privacy paradox}.
 
-SecureClaw addresses both problems with a single architecture: a non-bypassable execution boundary at commit time, plus an optional privacy-preserving outsourcing mode for policy checks.
-
-\paragraph{Primary claim.}
-For any external side effect, SecureClaw enforces that commit succeeds \emph{iff} the executor verifies dual policy proofs bound to the exact request tuple (including delegation context), freshness, and replay constraints.
-In addition, plaintext confidentiality to the untrusted runtime is preserved by default handleization and explicit declassification.
-In SAP mode, each single policy server view is simulatable from an explicit leakage function.
+\paragraph{Thesis.}
+In agentic tool-use systems, robust security under compromised runtimes requires a \emph{cryptographically non-bypassable effect boundary}, and deploying this boundary at scale requires \emph{single-auditor privacy (SAP)} so outsourced policy checks do not disclose sensitive query values to any single policy server.
 
 \paragraph{Contributions.}
 \begin{itemize}
-  \item \textbf{Non-bypassable effect boundary (NBE).} We provide a PREVIEW$\rightarrow$COMMIT protocol where an executor-side accept predicate is the sole effect gate, with dual-proof verification, request binding, and replay resistance.
-  \item \textbf{End-to-end confidentiality and integrity composition.} We combine secret myopia (SM), patch-carrying egress integrity (PEI), skill-confined safety (SCS), and delegation-aware safety (DAS) into one compositional security statement with explicit assumptions.
-  \item \textbf{Single-auditor privacy (SAP) for outsourced policy checks.} We compile policy evaluation into constant-shape PIR/MPC schedules and define an explicit leakage contract $L_{\mathsf{policy}}$ under which each single-server transcript is simulatable.
-  \item \textbf{Claim-driven evidence.} We report official benchmark outcomes, transcript-distinguishability sweeps for SAP, and delegated multi-agent campaigns, aligned directly with theorem assumptions and residual risks.
+  \item \textbf{C1: Non-bypassable effects (core).}
+  We define and implement a PREVIEW$\rightarrow$COMMIT protocol in which no external side effect commits unless the executor verifies dual commit-proof shares bound to a canonical request hash (including delegation context), freshness window, and replay state.
+
+  \item \textbf{C2: Control-plane privacy paradox and SAP (core).}
+  We formalize outsourced policy privacy with an explicit leakage contract $L_{\mathsf{policy}}=(L_{\mathsf{PIR}},L_{\mathsf{MPC}},L_{\mathsf{CONFIRM}},L_{\mathsf{TIME}})$ and state a simulation-based single-auditor theorem: each single policy-server transcript is simulatable from $L_{\mathsf{policy}}$ under non-collusion and fixed-shape routing.
+
+  \item \textbf{C3: Confidentiality and multi-principal correctness under compromised runtimes (core).}
+  We compose handle-first plaintext confinement, sanitize-at-commit integrity, capsule-conditional skill confinement, and delegation-aware hash-context binding into one system-level theorem with explicit assumption partitioning.
+
+  \item \textbf{C4: Claim-aligned evidence and machine-checkable claim gates.}
+  On official C1--C5 coverage, SecureClaw reaches $0.00\%$ observed attack leakage and $100.00\%$ attack blocking with $80.00\%$ benign allow.
+  In SAP distinguishability sweeps, shaping collapses single-server intent signal from separable (PIR MI $0.414$ bits) to near-zero.
+  We additionally expose versioned, machine-checkable accept-predicate and capsule-contract verifiers that enforce claim-gating and reduced-claim downgrade semantics.
 \end{itemize}
 
-\section{Problem Statement and Scope}
-\label{sec:problem}
+\section{Background and Motivation}
+\label{sec:background}
 
-\subsection{Setting}
+\subsection{Agent leakage surfaces}
 
-We consider agentic tool-use systems with five roles:
-(1) an untrusted runtime $\mathcal{A}$,
-(2) a trusted gateway $\mathcal{G}$,
-(3) two policy servers $\mathcal{P}_0,\mathcal{P}_1$,
-(4) a trusted executor $\mathcal{X}$,
-and (5) a user $\mathcal{U}$ for explicit confirmations.
-The adversary controls $\mathcal{A}$ and all skill code, and may submit arbitrary requests.
+Agent pipelines expose multiple leakage channels: final responses, inter-agent messages, tool arguments/results, and memory interfaces.
+Prompt injection and indirect context contamination exploit these channels across a wide class of benchmarks and real tool-use settings \citep{greshake2023indirect,injecagent2024,agentdojo2024,agentleak2026}.
 
-\subsection{Security objectives}
+\subsection{The control-plane privacy paradox}
 
-SecureClaw targets six objectives (five mandatory, one optional):
+Operationally, enterprises often centralize policy checks for safety, auditing, and compliance.
+Yet centralized control planes may inspect and retain prompt and tool payloads \citep{azureapimllmlogs2026,cloudflarefirewallai2026,cloudflareaidlp2026,dynatracemasklogs2026}.
+Thus, a defense layer can become a high-value privacy sink.
+SecureClaw addresses this paradox directly: policy outsourcing remains centralized in function, but single-server transcript visibility is leakage-contracted and simulatable.
+
+\section{Threat Model and Security Goals}
+\label{sec:threat}
+
+\subsection{Parties and trust assumptions}
+
+We model five roles:
+(1) adversarial runtime $\mathcal{A}$ (controls prompts, tool invocations, and skill code),
+(2) trusted gateway $\mathcal{G}$,
+(3) policy servers $\mathcal{P}_0,\mathcal{P}_1$,
+(4) trusted executor $\mathcal{X}$ (sole side-effect sink), and
+(5) user confirmation source $\mathcal{U}$.
+
+For SAP, we assume non-collusion between $\mathcal{P}_0$ and $\mathcal{P}_1$ (single-auditor threat).
+If both collude, single-auditor query privacy is impossible in this model.
+
+\subsection{Goals and non-goals}
+
+\textbf{Goals.}
 \begin{itemize}
-  \item \textbf{NBE:} no side effect without valid dual commit proofs bound to the exact request.
-  \item \textbf{SM:} sensitive plaintext is not exposed to $\mathcal{A}$ except explicit declassification.
-  \item \textbf{PEI:} required sanitize patches are enforced before effect execution.
-  \item \textbf{SCS:} skill bypasses are blocked under a verifiable capsule mediation contract.
-  \item \textbf{DAS:} commit evidence is not replayable across caller/session/principal/delegation contexts.
-  \item \textbf{SAP (optional):} each single policy server transcript is simulatable from $L_{\mathsf{policy}}$.
+  \item \textbf{Effect integrity (NBE):} no commit without valid dual, request-bound proof shares.
+  \item \textbf{Control-plane privacy (SAP, optional mode):} single policy-server transcript leaks only $L_{\mathsf{policy}}$.
+  \item \textbf{Confidentiality and context correctness:} plaintext is not exposed to $\mathcal{A}$ by default; commits remain bound to caller/session/principal/delegation context.
 \end{itemize}
 
-\subsection{Assumptions and non-goals}
+\textbf{Non-goals.}
+\begin{itemize}
+  \item No claim if gateway or executor is compromised.
+  \item No claim against kernel/hardware side channels.
+  \item No SAP claim under full policy-server collusion.
+\end{itemize}
 
-\paragraph{Trusted base.}
-Gateway and executor are trusted.
-Compromise of either is out of scope.
-
-\paragraph{Policy privacy assumption.}
-SAP requires two policy servers and at least one non-colluding server.
-If both collude, single-auditor privacy is impossible in this model.
-
-\paragraph{System-level side channels.}
-We do not claim protection against kernel microarchitectural channels.
-Leakage claims are explicitly scoped to application-level channels and metadata captured by $L_{\mathsf{policy}}$ and $L_{\mathsf{sys}}$.
-
-\paragraph{Design scope.}
-We do not claim a universal MPC engine for arbitrary programs.
-The artifact targets policy membership and fixed-circuit evaluation used by this threat model.
-
-\section{Protocol and System Design}
-\label{sec:protocol}
-
-\subsection{Architecture}
+\section{Design Overview}
+\label{sec:overview}
 
 SecureClaw separates planning from effects.
-The runtime may propose actions, but only the executor can commit external side effects.
-The gateway mediates policy preview and confidentiality controls; the executor enforces effect-time acceptance.
+Runtime logic may propose actions through a single high-level interface, but external side effects are committed only by the executor.
+The gateway mediates policy preview, handleization/declassification, delegation checks, and (in SAP mode) fixed-shape policy outsourcing.
 
-\subsection{Request binding and commit evidence}
-
-For an effectful request, the gateway computes
-\[
-\mathsf{ReqHash}(\mathsf{intent\_id},\mathsf{caller},\mathsf{session},\mathsf{inputs},\mathsf{hctx})
-:= \mathrm{SHA256}(\mathsf{Canon}(\cdot)),
-\]
-where
-\[
-\mathsf{hctx}:=(\mathsf{external\_principal},\mathsf{delegation\_jti}).
-\]
-$\mathsf{Canon}(\cdot)$ is deterministic canonical JSON serialization shared by gateway and executor.
-
-PREVIEW returns a fresh action id and two commit-proof shares from distinct policy servers.
-COMMIT succeeds only if the executor verifies both shares, recomputes the same request hash, checks freshness, enforces replay protection, and validates policy output semantics.
-
-\subsection{Executor acceptance predicate}
-
-Let $\mathsf{Accept}(\mathsf{req},\pi_0,\pi_1)$ denote executor acceptance.
-Acceptance requires:
+At a high level:
 \begin{enumerate}
-  \item dual proof parsing and MAC verification under distinct server identities;
-  \item freshness inside configured TTL;
-  \item context agreement on $(\mathsf{action\_id},\mathsf{program\_id},\mathsf{request\_sha256})$;
-  \item recomputed request-hash equality including $\mathsf{hctx}$;
-  \item replay-guard non-membership for action id;
-  \item semantic bits satisfy allow/confirm/patch constraints.
+  \item Runtime calls \texttt{act(intent\_id, inputs, constraints, caller)}.
+  \item Gateway canonicalizes and computes request binding hash.
+  \item Policy path returns dual commit-proof shares plus semantic bits.
+  \item Executor verifies accept predicate and either fail-closes or commits effect.
+\end{enumerate}
+
+\section{Non-Bypassable Effects Protocol}
+\label{sec:nbe}
+
+\subsection{Canonical request binding}
+
+For effectful tuple
+$\rho=(\mathsf{intent\_id},\mathsf{caller},\mathsf{session},\mathsf{inputs},\mathsf{hctx})$
+with
+$\mathsf{hctx}=(\mathsf{external\_principal},\mathsf{delegation\_jti})$,
+we define
+\[
+\mathsf{ReqHash}(\rho)=\mathrm{SHA256}(\mathsf{CanonJSON}(\rho)).
+\]
+Both gateway and executor use the same canonical serializer.
+
+\subsection{PREVIEW$\rightarrow$COMMIT and accept predicate}
+
+PREVIEW obtains dual proof shares from independent policy servers.
+COMMIT succeeds iff executor verifies all of:
+\begin{enumerate}
+  \item two valid, distinct-server MAC-authenticated commit proofs,
+  \item freshness within TTL,
+  \item agreement on $(\mathsf{action\_id},\mathsf{program\_id},\mathsf{request\_sha256})$,
+  \item recomputed request-hash equality (including $\mathsf{hctx}$),
+  \item replay non-membership,
+  \item semantic constraints (allow/confirm/sanitize).
 \end{enumerate}
 Any failure is fail-closed.
 
-\subsection{Secret myopia and declassification}
+\subsection{Security statement}
 
-Sensitive inputs are handleized at the gateway.
-The untrusted runtime receives opaque handles and non-sensitive metadata, not plaintext.
-Plaintext release requires explicit declassification, confirmation, and audit logging.
-This realizes default confidentiality even when runtime logic is adversarial.
+Theorem \ref{thm:nbe} (Appendix \ref{app:proofs}) reduces commit bypass to MAC forgery, hash collision/serialization inconsistency, or explicit operational assumption failures (freshness/replay-state assumptions).
 
-\subsection{Patch-carrying egress integrity}
+\section{Control-Plane Privacy Paradox and SAP}
+\label{sec:sap}
 
-If policy requires sanitization, patch constraints are cryptographically carried from preview outputs to commit semantics.
-The executor applies the required sanitize transformation before side effects.
-Thus, commit-time bypass by payload substitution is rejected by acceptance semantics.
+\subsection{Leakage contract}
 
-\subsection{Skill ingress and capsule-mediated confinement}
-
-Skill installation is treated as an effectful transaction under the same PREVIEW$\rightarrow$COMMIT boundary.
-Runtime confinement assumptions are expressed by a capsule mediation contract (filesystem, network, process, transport constraints) with explicit downgrade semantics when assertions fail.
-
-\subsection{Multi-agent federation and delegated authority}
-\label{sec:multiagent}
-
-Cross-agent delegation uses signed tuple
+We model single-server observable leakage as
 \[
-\delta=(\mathsf{iss},\mathsf{sub},\mathsf{scope},\mathsf{session},\mathsf{exp},\mathsf{jti}).
+L_{\mathsf{policy}}=(L_{\mathsf{PIR}},L_{\mathsf{MPC}},L_{\mathsf{CONFIRM}},L_{\mathsf{TIME}}).
 \]
-Gateway checks signature/session/caller/scope/revocation.
-Effective authorization is capability intersection between internal caller and external principal.
-Because $(\mathsf{external\_principal},\mathsf{delegation\_jti})$ is bound into $\mathsf{ReqHash}$, preview evidence cannot be replayed across principals or delegation contexts.
+Allowed terms include fixed endpoint class, public program id/circuit shape, padded batch occupancy, and coarse timing buckets.
+Forbidden terms include true PIR indices and plaintext predicate inputs.
+Intent hiding is claimed only when public observables (program id, endpoint class, batch geometry) are constant across covered intents.
 
-\subsection{Optional SAP mode: leakage-aware constant-shape outsourcing}
+\subsection{Single-auditor privacy game}
 
-In SAP mode, policy checks are routed through fixed-shape PIR/MPC schedules.
-Routing and schedule metadata are intentionally modeled by
-$L_{\mathsf{policy}}=(L_{\mathsf{PIR}},L_{\mathsf{MPC}},L_{\mathsf{CONFIRM}},L_{\mathsf{TIME}})$.
-Intent hiding is claimed only when public observables (e.g., program id, endpoint class, batch shape) are held constant across covered intents.
+Adversary chooses workloads $(W_0,W_1)$ with identical leakage:
+$L_{\mathsf{policy}}(W_0)=L_{\mathsf{policy}}(W_1)$.
+Challenger samples $b\leftarrow\{0,1\}$, executes $W_b$, and reveals one policy-server view $\mathsf{View}(\mathcal{P}_\sigma)$.
+Adversary outputs $b'$.
+SAP requires negligible distinguishing bias over $1/2$.
 
-\section{Formal Security Claims and Proof Chain}
-\label{sec:security}
+\subsection{Theorem and interpretation}
 
-Theorems and proofs are in Appendix \ref{app:proofs}; leakage formalization is in Appendix \ref{app:leakage}.
+Theorem \ref{thm:sap} states that under single-server PIR privacy, HBC 2PC privacy, non-collusion, and fixed-shape scheduling, each single-server transcript is simulatable from $L_{\mathsf{policy}}$.
+Interpretation: one policy server cannot recover sensitive query values beyond explicit allowed leakage.
 
-\paragraph{NBE theorem.}
-No side effect is committed without dual valid request-bound commit proofs, up to MAC/hash/replay/time assumption failures.
+SAP does \emph{not} protect against:
+(i) full policy-server collusion,
+(ii) intentionally unshaped deployment where intent-correlated metadata is left observable,
+and (iii) leakage channels outside the policy transcript model.
 
-\paragraph{SM theorem.}
-Runtime plaintext advantage beyond explicit declassification is bounded by handle-guessing probability plus declared leakage.
+\section{Formal Security}
+\label{sec:formal}
 
-\paragraph{PEI theorem.}
-Accepted commits cannot bypass required sanitize semantics unless implementation diverges from the specified accept predicate.
+We state one system-level proposition and prove it via component theorems (Appendix \ref{app:proofs}).
 
-\paragraph{SCS theorem.}
-Under capsule contract assumptions and NBE+SM, forbidden direct bypass actions are blocked.
+\paragraph{System proposition.}
+For deployed SecureClaw interfaces, no external side effect commits without dual request-bound commit evidence; plaintext release and cross-principal replay remain constrained to explicit interfaces and assumptions; and in SAP mode, single-server transcript leakage is bounded by $L_{\mathsf{policy}}$.
 
-\paragraph{DAS theorem.}
-Cross-context reuse of preview evidence is rejected unless cryptographic binding or delegation-validation assumptions fail.
-
-\paragraph{SAP theorem (optional).}
-Under PIR single-server security, HBC 2PC privacy, non-collusion, and fixed-shape deployment, each single policy server view is simulatable from $L_{\mathsf{policy}}$.
-
-\paragraph{Compositional statement.}
-The overall system bound is a union bound over NBE/SM/PEI/SCS/DAS/(optional SAP) bad events with assumption-partitioned dependencies.
-
-\section{Evaluation Methodology}
-\label{sec:eval}
-
-\subsection{Research questions}
-
+\paragraph{Component theorems.}
 \begin{itemize}
-  \item \textbf{RQ1 (Effect integrity):} Does SecureClaw eliminate attack-side leakage while preserving benign utility on official benchmarks?
-  \item \textbf{RQ2 (Policy privacy):} Does transcript distinguishability collapse under full SAP shaping?
-  \item \textbf{RQ3 (Federation safety):} Are delegated multi-agent workflows enforced without cross-context replay?
-  \item \textbf{RQ4 (Systems cost):} What latency overhead is introduced by enforcement and shaping?
+  \item \textbf{NBE} (Theorem \ref{thm:nbe}): commit integrity under dual-proof, hash binding, freshness, replay assumptions.
+  \item \textbf{SM/PEI/SCS/DAS} (Theorems \ref{thm:sm}, \ref{thm:pei}, \ref{thm:scs}, \ref{thm:das}): confidentiality, sanitize-at-commit integrity, capsule-conditional confinement, and delegation-aware binding.
+  \item \textbf{SAP} (Theorem \ref{thm:sap}, optional mode): single-auditor transcript privacy.
 \end{itemize}
 
-\subsection{Benchmarks and baselines}
-
-Official benchmark coverage is C1--C5.
-Channels C6--C7 are evaluated separately via synthetic suites and are not mixed into official-rate tables.
-
-We report:
-(1) SecureClaw variants (full, policy-only, sandbox-only, single-server-policy),
-(2) native runtimes (Codex native, OpenClaw native), and
-(3) mediation defenses on native outputs (DRIFT, IPIGuard, AgentArmor) \citep{drift2025,ipiguard2025,agentarmor2025}.
-
-Native baselines use a neutral task prompt (no explicit anti-leak instructions) to isolate platform behavior rather than prompt-tuning effects.
-
-\subsection{Metrics}
-
-For attack set $\mathcal{D}_{\mathsf{atk}}$:
+\paragraph{Composition bound.}
+Let $\mathsf{Bad}_{\mathsf{NBE}},\mathsf{Bad}_{\mathsf{SM}},\mathsf{Bad}_{\mathsf{PEI}},\mathsf{Bad}_{\mathsf{SCS}},\mathsf{Bad}_{\mathsf{DAS}},\mathsf{Bad}_{\mathsf{SAP}}$ denote property-specific bad events.
+Then (Theorem \ref{thm:composition}):
 \[
-\mathsf{attack\_leak\_rate}(S)=\frac{|\{d\in\mathcal{D}_{\mathsf{atk}}: \mathsf{leaked}(d,S)=1\}|}{|\mathcal{D}_{\mathsf{atk}}|}.
+\Pr[\mathsf{Exp}^{\mathsf{SC}}=1]
+\le
+\sum_{E \in \{\mathsf{NBE},\mathsf{SM},\mathsf{PEI},\mathsf{SCS},\mathsf{DAS},\mathsf{SAP}\}}
+\Pr[\mathsf{Bad}_E].
 \]
-We report attack block rate, benign allow rate, Wilson intervals, and two-sided Fisher exact tests versus SecureClaw full.
+No mutual exclusivity assumption is needed; overlap only affects tightness.
 
-For SAP, we run transcript distinguishability sweeps using mutual information (MI) and classifier MAP accuracy over single-server metadata views.
+\section{Implementation}
+\label{sec:impl}
 
-\section{Results}
-\label{sec:results}
+SecureClaw is implemented as a gateway-executor architecture with machine-checkable protocol specs.
+Core implementation anchors include:
+\begin{itemize}
+  \item canonical binding and hash computation,
+  \item machine-checkable protocol contracts (versioned schema + semantic accept-predicate spec),
+  \item dual-proof verification and replay guard in executor,
+  \item fixed-shape PIR/MPC routing for SAP mode,
+  \item capsule contract verifier with mandatory-assertion claim gating and downgrade semantics,
+  \item formal harnesses for security games and model checks.
+\end{itemize}
 
-\subsection{RQ1: Main official comparison (C1--C5)}
-\label{sec:main-noprompt}
+Artifact-level validators include:
+\texttt{scripts/security\_game\_nbe\_check.py},
+\texttt{formal/secureclaw\_model\_check.py},
+and
+\texttt{scripts/validate\_specs.py}.
+
+\section{Evaluation}
+\label{sec:eval}
+
+\subsection{RQs and threat-model split}
+
+We evaluate four measured questions and three extension protocols.
+
+\textbf{Threat Model A (honest runtime).}
+Native guardrail baselines (Codex/OpenClaw and mediated DRIFT/IPIGuard/AgentArmor) are interpreted as runtime-behavior defenses where direct executor bypass is out of scope.
+
+\textbf{Threat Model B (compromised runtime).}
+Runtime can attempt direct effect bypass, replay/context swapping, and exfil paths outside intended tool mediation.
+SecureClaw's NBE/SCS claims are evaluated here.
+
+\subsection{RQ1: official C1--C5 comparison}
+\label{sec:rq1}
 
 \begin{table}[t]
 \centering
@@ -227,17 +237,16 @@ OpenClaw native & $1.48\%$ & $98.52\%$ & $0.00\%$ & $60209.12 / 81120.64$ ms \\
 \label{tab:main-noprompt}
 \end{table}
 
-SecureClaw full reaches zero observed attack leakage with full attack blocking on the official set.
-Compared with SecureClaw full, attack-leak differences are statistically significant for Codex native ($p=4.67\times10^{-4}$) and OpenClaw native ($p=9.41\times10^{-4}$).
+SecureClaw achieves zero observed leakage on the official attack set.
+Compared with SecureClaw, attack-leak differences are significant for Codex native ($p=4.67\times10^{-4}$) and OpenClaw native ($p=9.41\times10^{-4}$).
+This run evaluates $n_{\mathsf{attack}}=744$ and $n_{\mathsf{benign}}=2520$ official rows under a fixed manifest.
+To keep baseline fairness auditable, defense decisions exclude dataset-truth labels and payload oracle fields (for example, attack/benign tags and secret-token ground truth), and all systems share the same manifest and aggregation rules.
 
-For mediation baselines on the same official manifest:
-DRIFT achieves $0.94\%$ attack leakage,
-IPIGuard $0.00\%$,
-and AgentArmor $0.00\%$,
-with all three at $100\%$ benign allow in this run.
-These methods improve mediated runtime behavior but do not provide an executor-side non-bypassable commit boundary.
+Official AgentLeak coverage is limited to channels C1--C5.
+For channels C6/C7 (logs/audit and skill ingress), we report a separate synthetic full-channel suite: current SecureClaw snapshot records $0.00\%$ attack leakage on C6/C7 with $100.00\%$ benign allow for those channels.
 
-\subsection{RQ2: SAP distinguishability under shaping}
+\subsection{RQ2: SAP transcript distinguishability}
+\label{sec:rq2}
 
 \begin{table}[t]
 \centering
@@ -249,61 +258,87 @@ Mode & PIR MI (bits) & PIR MAP acc & MPC MI (bits) & MPC MAP acc \\
 Unshaped & 0.4143 & 0.514 & -- & -- \\
 Shaped (pad1, no cover) & 0.0000 & 0.207 & 0.0000 & 0.278 \\
 Shaped (pad4, no cover) & 0.0000 & 0.207 & 0.0000 & 0.288 \\
-Shaped (pad4, cover) & 0.0000 & 0.345 & 0.000002 & 0.318 \\
+Shaped (pad4, cover) & 0.0000 & 0.331 & 0.0000 & 0.303 \\
 \bottomrule
 \end{tabular}
-\caption{Single-policy-server transcript distinguishability sweep (intent classes: chance level $=1/3$).}
+\caption{Single-policy-server distinguishability sweep (3-way intent classes, chance $=1/3$).}
 \label{tab:sap-sweep}
 \end{table}
 
-The unshaped condition leaks separable intent signal (PIR MI $0.414$ bits, MAP $51.4\%$).
-Under full shaping (unified routing, bundling, fixed-shape mixing/padding), MI collapses to near-zero and classifier performance moves to near-chance behavior.
-This empirically aligns with the SAP transcript-simulation objective.
+Unshaped routing exposes separable signal.
+Under unified fixed-shape routing, MI collapses to near zero and classifier accuracy approaches chance-level behavior.
 
-\subsection{RQ3: Delegated multi-agent safety}
-\label{sec:multiagent-eval}
+\paragraph{Query-value privacy sanity check.}
+To separate \emph{intent-shape} leakage from \emph{query-value} leakage, we run a 16-way recipient-index task on single-server transcript features.
+Observed single-server recipient prediction remains at or below chance (chance $=6.25\%$; unshaped $2.89\%$, shaped-pad4-cover $4.50\%$) with near-zero MI.
+This is consistent with PIR single-server index privacy: shaping is primarily needed to suppress intent-correlated metadata rather than to hide PIR query indices.
 
-A deterministic delegated workflow campaign (7 cases) reports 7/7 expected outcomes, including missing-delegation denial, explicit revocation, revoked-token denial, dual-principal denial, and delegated memory mediation.
-Gateway-level check latency is low (median $0.41$ ms, p95 $6.28$ ms).
+\subsection{RQ3: delegated multi-agent safety}
+\label{sec:rq3}
 
-\section{Performance and Deployability}
-\label{sec:perf}
+In a deterministic delegated campaign (7 cases), all outcomes match expected policy semantics (7/7 pass), including missing-delegation denial, revocation denial, dual-principal denial, and mediated memory access.
+Gateway check latency remains low (median $0.38$ ms, p95 $5.56$ ms).
 
-\subsection{Cost decomposition}
+\subsection{RQ4: systems cost and fairness}
+\label{sec:rq4}
 
-Constant-shape privacy introduces three overhead sources:
-(1) dummy compute from padding/cover traffic,
-(2) mixing queueing delay,
-and (3) transport framing overhead.
-The executor-side enforcement path remains constant-sized and is dominated by dual MAC verification and replay-guard lookup.
+We separate enforcement overhead from model-inference latency.
+Shaping overhead is decomposed into (i) padding/cover compute, (ii) mixer queueing, and (iii) transport framing.
+Executor verification remains constant-sized (dual MAC verify + replay lookup).
 
-\subsection{Deployment requirements}
+\subsection{E1 (completed): compromised-runtime bypass suite}
+\label{sec:e1}
 
-Production deployment requires:
-(1) persistent replay state for restart-safe replay protection,
-(2) key rotation with explicit key identifiers,
-(3) tamper-evident audit chaining,
-and (4) consistent canonical binding shared by gateway and executor.
+We evaluate direct bypass attempts: missing proof share, one-server proof only, request/session/caller/hctx mismatches, replay, and downgraded baselines.
+The current artifact report (\texttt{compromised\_bypass\_report.json}) records 16/16 expected outcomes, including fail-closed denial for bypass attempts and explicit bypass observability in intentionally insecure baselines.
 
-\section{Limitations and Failure Modes}
+\subsection{E2 (completed): single-auditor compromise simulation}
+\label{sec:e2}
+
+The SAP sweep operationalizes a single-policy-server adversary using transcript-only features, MI, and classifier attacks.
+This directly instantiates the SAP game with empirical distinguishers under controlled shaping ablations.
+
+\subsection{E3--E6 (protocolized extension design)}
+\label{sec:e3e6}
+
+We provide complete experiment protocols to close remaining external-validity gaps:
+\begin{itemize}
+  \item \textbf{E3 AP2 case study} (agent payments): compare vanilla AP2, AP2 + prompt/DLP shields, and AP2 + SecureClaw (with/without SAP), measuring unauthorized mandate rate, sensitive-data leakage, utility, and latency \citep{ap2spec2025,whisperswealth2026}.
+  \item \textbf{E4 AgentDojo exfiltration extension}: reproduce data-flow exfiltration tasks and compare vanilla, shielded, and SecureClaw variants under the same task manifest \citep{alizadeh2025simple,agentdojo2024}.
+  \item \textbf{E5 VPI-Bench subset}: stress-test computer-use scenarios where effects can be mediated by executor; unmediated UI side effects are reported explicitly as scope limits \citep{vpibench2025}.
+  \item \textbf{E6 enterprise DLP-proxy baseline}: compare centralized plaintext policy inspection versus SAP-shaped outsourcing, measuring single-auditor distinguishability and direct sensitive-value visibility in policy-plane logs.
+\end{itemize}
+
+These protocols are specified with baseline mapping and fairness constraints (threat-model alignment, no label-oracle defenses), and are included to avoid over-claiming beyond measured evidence.
+
+\section{Limitations and Discussion}
 \label{sec:limits}
 
-SecureClaw does not claim security if the trusted gateway or executor is compromised.
-SAP does not hold under full policy-server collusion.
-SCS is conditional on capsule-contract validity.
-Kernel-level side channels and broad availability failures are outside the formal security claim and are treated as operational risks.
+SecureClaw still depends on trusted gateway and executor.
+SAP requires non-collusion between policy servers.
+SCS is conditional on a valid capsule mediation contract.
+If an agent can trigger unmediated OS/UI effects outside the executor path, NBE does not apply; such paths must be wrapped by a mediated executor to inherit the guarantee.
+In addition, unkeyed request-hash observability can permit offline guessing on low-entropy fields; our claims therefore assume sufficient conditional min-entropy (or explicit residual-risk accounting) for bound request inputs.
+
+Threat-model mismatch is a practical review risk: native guardrails are meaningful in Threat Model A but are not designed to satisfy Threat Model B's non-bypassable requirements.
+We therefore separate these evaluations explicitly.
 
 \section{Related Work and Positioning}
 \label{sec:related}
 
-Prompt-injection and tool-chain attacks in LLM agents are now well documented \citep{greshake2023indirect,injecagent2024,toolselect2025,stac2025}.
-Benchmark suites quantify leakage and robustness across channels and environments \citep{agentdojo2024,asb2024,agentleak2026,magpie2025,topbench2025,wasp2025,vpibench2025,agentharm2024}.
-Defense lines such as DRIFT, IPIGuard, and AgentArmor focus on runtime mediation and detection \citep{drift2025,ipiguard2025,agentarmor2025}.
+Prompt-injection attacks and tool-chain leakage in LLM agents are well established \citep{greshake2023indirect,injecagent2024,toolselect2025,stac2025,agentdojo2024,agentleak2026}.
+Runtime defenses such as DRIFT, IPIGuard, and AgentArmor improve mediated behavior but do not by themselves instantiate an executor-side non-bypassable commit boundary \citep{drift2025,ipiguard2025,agentarmor2025}.
 
-Faramesh formalizes an Action Authorization Boundary (AAB) as a non-bypassable execution concept \citep{faramesh2026}.
-SecureClaw is complementary but distinct in two ways:
-(1) it explicitly composes AAB-style effect integrity with runtime plaintext confinement and delegation-context hash binding (SM/PEI/DAS), and
-(2) it adds optional single-auditor privacy for outsourced policy evaluation via an explicit leakage contract and transcript-simulation claim (SAP), rather than exposing policy queries to a single control plane.
+\paragraph{Positioning versus Faramesh.}
+Faramesh's AAB and SecureClaw share the execution-boundary philosophy \citep{faramesh2026}.
+Our claim is orthogonal in two dimensions:
+(1) \emph{control-plane privacy}: SAP formalizes and proves single-auditor transcript privacy for outsourced policy checks;
+(2) \emph{confidentiality under compromised runtime}: handleized plaintext confinement and delegation-aware hash-context binding are integrated into the same commit-security line.
+Hence the key difference is not ``decision-before-execution'' alone, but also ``who can learn decision inputs'' and ``how cross-principal reuse is prevented.''
 
-At the protocol layer, MCP/A2A/AP2 and OAuth hardening define interoperability and delegated authorization interfaces \citep{mcpauth2025,mcpsecbp2025,a2aspec2025,a2aproto2025,ap2spec2025,rfc6819,rfc9700,rfc9449,rfc8705}.
-SecureClaw focuses on a different guarantee: execution-time cryptographic binding between authorization and committed effects under adversarial runtime control.
+\section{Conclusion}
+\label{sec:conclusion}
+
+SecureClaw is centered on one proposition: robust agentic execution security requires a non-bypassable commit boundary, and practical outsourced policy enforcement requires a leakage-contracted privacy model.
+Our measured results support both parts on official benchmark coverage and single-auditor distinguishability tests.
+The provided E3--E6 protocols extend this line toward AP2, AgentDojo exfiltration workflows, computer-use stress settings, and enterprise control-plane privacy-sink baselines while preserving threat-model fairness.

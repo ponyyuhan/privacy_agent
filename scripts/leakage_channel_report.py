@@ -47,7 +47,11 @@ def _pick_existing(repo_root: Path, rels: list[str]) -> Path | None:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--out", default="artifact_out_compare/leakage_channel_report.json", help="Output report path")
+    ap.add_argument(
+        "--out",
+        default="artifact_out_compare_noprompt/leakage_channel_report.json",
+        help="Output report path",
+    )
     ap.add_argument("--mode", default="mirage_full", help="Mode to report")
     args = ap.parse_args()
 
@@ -59,6 +63,7 @@ def main() -> None:
     official_path = _pick_existing(
         repo_root,
         [
+            "artifact_out_compare_noprompt/fair_mirage/agentleak_eval/agentleak_channel_summary.json",
             "artifact_out_compare/fair_mirage/agentleak_eval/agentleak_channel_summary.json",
             "artifact_out/agentleak_eval/agentleak_channel_summary.json",
         ],
@@ -66,6 +71,8 @@ def main() -> None:
     synth_path = _pick_existing(
         repo_root,
         [
+            "artifact_out_compare_noprompt/leakage_sys_synth_v2/agentleak_eval/agentleak_channel_summary.json",
+            "artifact_out_compare_noprompt/leakage_sys_synth/agentleak_eval/agentleak_channel_summary.json",
             "artifact_out_compare/leakage_sys_synth_v2/agentleak_eval/agentleak_channel_summary.json",
             "artifact_out_compare/leakage_sys_synth/agentleak_eval/agentleak_channel_summary.json",
         ],
@@ -73,6 +80,7 @@ def main() -> None:
     sweep_path = _pick_existing(
         repo_root,
         [
+            "artifact_out_compare_noprompt/leakage_sweep/leakage_model_sweep.json",
             "artifact_out_compare/leakage_sweep/leakage_model_sweep.json",
             "artifact_out/leakage_sweep/leakage_model_sweep.json",
         ],
@@ -118,9 +126,15 @@ def main() -> None:
         distinguishability[name] = {
             "pir_mi_bits": float(pir.get("mi_bits") or 0.0),
             "pir_map_acc": float(pir.get("map_acc") or 0.0),
+            "pir_accuracy": float(pir.get("accuracy") or pir.get("map_acc") or 0.0),
+            "pir_accuracy_ci95": list(pir.get("accuracy_ci95") or [0.0, 0.0]),
+            "pir_accuracy_pvalue_vs_chance": float(pir.get("accuracy_pvalue_vs_chance") or 1.0),
             "pir_chance_acc": float(pir.get("chance_acc") or 0.0),
             "mpc_mi_bits": float(mpc.get("mi_bits") or 0.0),
             "mpc_map_acc": float(mpc.get("map_acc") or 0.0),
+            "mpc_accuracy": float(mpc.get("accuracy") or mpc.get("map_acc") or 0.0),
+            "mpc_accuracy_ci95": list(mpc.get("accuracy_ci95") or [0.0, 0.0]),
+            "mpc_accuracy_pvalue_vs_chance": float(mpc.get("accuracy_pvalue_vs_chance") or 1.0),
             "mpc_chance_acc": float(mpc.get("chance_acc") or 0.0),
         }
 
@@ -156,4 +170,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

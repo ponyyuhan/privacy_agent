@@ -22,13 +22,13 @@
 你们论文自己已经点到了这个核心矛盾：
 
 > 系统既要集中式 policy，又要对任意单个 policy server 保持 query privacy；但 naive 的 centralized policy evaluation 会把敏感 query 内容泄露给 policy service。
-> 【85:9†paper_full_body_副本.txt†L24-L32】
+> 【85:9†paper_full_body.tex†L24-L32】
 
 把它写成 reviewer 一眼懂的“真实攻击/隐私事件”是这样的（这段建议你写进 motivation box/attack vignette）：
 
 ### 攻击/泄露 vignette：**Policy-as-an-exfil channel**
 
-1. 公司有一个 agent，能读内部资料（CRM、工单、文档、代码仓库）并能发邮件/Slack/Webhook。你们的威胁模型是 runtime/skills 可被 prompt injection 或供应链控制（adversarial runtime）。【85:9†paper_full_body_副本.txt†L24-L31】【85:3†paper_full_body_副本.txt†L5-L8】
+1. 公司有一个 agent，能读内部资料（CRM、工单、文档、代码仓库）并能发邮件/Slack/Webhook。你们的威胁模型是 runtime/skills 可被 prompt injection 或供应链控制（adversarial runtime）。【85:9†paper_full_body.tex†L24-L31】【85:3†paper_full_body.tex†L5-L8】
 2. 安全团队加了一个 “DLP guardrail / egress policy service” 来阻止泄露：每次 agemain / message tokens** 发给 policy service 做 allowlist/DLP 检查（这是绝大多数现有 AI gateway/LLM firewall 的基本工作方式）。
 3. 攻击者通过 prompt injection 让 agent 构造一个“将内部秘密拼进消息正文/参数”的请求。
 4. **即使最终 executor 拒绝 commit（NBE 成功），敏感内容已经在 policy service 侧被看见/记录/缓存**：
@@ -43,19 +43,19 @@
 ## 为什么这个动机“必须 SAP”：没有 SAP 你只能在两个坏选项里二选一
 
 在你们论文的目标陈述里，“集中式 policy + query privacy”是硬约束：
-【85:9†paper_full_body_副本.txt†L24-L27】
+【85:9†paper_full_body.tex†L24-L27】
 
 如果没有 SAP，常见选择只有两个：
 
 ### 选项 1：单 policy server / 单 AI gateway（最常见）
 
 * 优点：工程简单。
-* 缺点：policy server 看到明文 recipient/domain/token/message（或可逆特征），**泄露面巨大**；而且你们也已经明确指出“naive centralized policy evaluation 会泄露敏感 query”。【85:9†paper_full_body_副本.txt†L31-L32】
+* 缺点：policy server 看到明文 recipient/domain/token/message（或可逆特征），**泄露面巨大**；而且你们也已经明确指出“naive centralized policy evaluation 会泄露敏感 query”。【85:9†paper_full_body.tex†L31-L32】
 
 ### 选项 2：把 policy DB 和检测逻辑都塞进 gateway（不 outsource）
 
 * 优点：不把明文发出去。
-* 缺点：**TCB 被迫膨胀**、更新/运营成本高（IOC、allowlist、规则经常更新），并且难以做到“跨团队/跨产品线统一策略”。这也会削弱你们“最）”的叙事。【85:9†paper_full_body_副本.txt†L12-L15】
+* 缺点：**TCB 被迫膨胀**、更新/运营成本高（IOC、allowlist、规则经常更新），并且难以做到“跨团队/跨产品线统一策略”。这也会削弱你们“最）”的叙事。【85:9†paper_full_body.tex†L12-L15】
 
 ---
 
@@ -65,17 +65,17 @@
 
 * 你们用 **2‑server PIR（DPF/FSS）**把 recipient/do每台 server 只见 key share”，单点计算上无法恢复 idx。
   你们在 EFFECTIVENESS.md 里已经把“单个 policy server 不泄露 recipient/domain/token”写得很明确。【85:8†EFFECTIVENESS.md†L35-L42】
-* 你们还把 SAP 做成“可证明的 transcript privacy”or theorem：只要 PIR 单点安全 + 2PC HBC 安全 + fixed-shape routing，就能模拟单台 policy server 视图。【49:4†appendix_security_副本.txt†L19-L45】
-* 为了让“单台 policy server 视图”真的只剩下你允许的元信息，你们强调了 **constant‑shape 编译 + mixer/padding + unified program id**，使得 transcript 可以被显式 leakage function 所刻画并可模拟。【85:0†paper_full_body_副本.txt†L19-L23】
+* 你们还把 SAP 做成“可证明的 transcript privacy”or theorem：只要 PIR 单点安全 + 2PC HBC 安全 + fixed-shape routing，就能模拟单台 policy server 视图。【49:4†appendix_security.tex†L19-L45】
+* 为了让“单台 policy server 视图”真的只剩下你允许的元信息，你们强调了 **constant‑shape 编译 + mixer/padding + unified program id**，使得 transcript 可以被显式 leakage function 所刻画并可模拟。【85:0†paper_full_body.tex†L19-L23】
 
-同时你们也把适用条件说得很清；如果部署能容忍 query exposure 才可以退化成单 server baseline。【85:0†paper_full_body_副本.txt†L38-L40】
+同时你们也把适用条件说得很清；如果部署能容忍 query exposure 才可以退化成单 server baseline。【85:0†paper_full_body.tex†L38-L40】
 
 ---
 
 ## 你可以把这个动机写成论文里“一段话就够强”的版本（可直接用）
 
 > **Motivation (Control-plane preasingly front tool use with centralized AI gateways / LLM firewalls that inspect and often log prompts, tool parameters, and flagged content for aud([Microsoft Learn][1])
-> This creates a new privacy paradox: to prevent data exfiltration, the system r into an even more privileged control plane. In agent settings where the runtime and skills are adversarial, an attacker can trigger “denied” actions whose payloads still reach the policy service, turning policy evaluation itself into an exfiltration channel. Therefore, we require **single-auditor privacy**: centralized policy checks must be outsourced such that **any single policy server’s transcript is simulatable from an explicit leakage function and reveals no query contents**.【85:9†paper_full_body_副本.txt†L24-L32】【49:4†appendix_security_副本.txt†L19-L45】
+> This creates a new privacy paradox: to prevent data exfiltration, the system r into an even more privileged control plane. In agent settings where the runtime and skills are adversarial, an attacker can trigger “denied” actions whose payloads still reach the policy service, turning policy evaluation itself into an exfiltration channel. Therefore, we require **single-auditor privacy**: centralized policy checks must be outsourced such that **any single policy server’s transcript is simulatable from an explicit leakage function and reveals no query contents**.【85:9†paper_full_body.tex†L24-L32】【49:4†appendix_security.tex†L19-L45】
 
 ---
 
@@ -90,7 +90,7 @@
 
 ---
 
-如果你愿意，我也可以按“顶会 reviewer 喜好”把上面的动机进一步并给出你们 paper 的**最小改动点**：把这段动机和 `L_policy` 的攻击评估、以及你们主 claim（NBE + SAP）【85:9†paper_full_body_副本.txt†L16-L18】写成一个闭环叙事。
+如果你愿意，我也可以按“顶会 reviewer 喜好”把上面的动机进一步并给出你们 paper 的**最小改动点**：把这段动机和 `L_policy` 的攻击评估、以及你们主 claim（NBE + SAP）【85:9†paper_full_body.tex†L16-L18】写成一个闭环叙事。
 
 
 

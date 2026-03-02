@@ -65,9 +65,49 @@ def mutual_info_bits(labels: list[str], feats: list[tuple]) -> float:
     return float(mi)
 
 
-def map_accuracy(labels: list[str], feats: list[tuple], *, seed: int = 7, train_frac: float = 0.7) -> float:
+def _log_comb(n: int, k: int) -> float:
+    if k < 0 or k > n:
+        return float("-inf")
+    return math.lgamma(n + 1) - math.lgamma(k + 1) - math.lgamma(n - k + 1)
+
+
+def wilson_ci(successes: int, n: int, z: float = 1.96) -> tuple[float, float]:
+    if n <= 0:
+        return 0.0, 0.0
+    phat = successes / n
+    denom = 1.0 + (z * z / n)
+    center = (phat + (z * z) / (2 * n)) / denom
+    margin = (z / denom) * math.sqrt((phat * (1.0 - phat) / n) + ((z * z) / (4.0 * n * n)))
+    lo = max(0.0, center - margin)
+    hi = min(1.0, center + margin)
+    return lo, hi
+
+
+def binom_upper_tail_pvalue(k: int, n: int, p0: float) -> float:
+    if n <= 0:
+        return 1.0
+    p0 = min(1.0, max(0.0, float(p0)))
+
+    def log_p(x: int) -> float:
+        if p0 <= 0.0:
+            return 0.0 if x == 0 else float("-inf")
+        if p0 >= 1.0:
+            return 0.0 if x == n else float("-inf")
+        return _log_comb(n, x) + (x * math.log(p0)) + ((n - x) * math.log(1.0 - p0))
+
+    kk = int(k)
+    total = 0.0
+    for x in range(max(0, kk), n + 1):
+        lp = log_p(x)
+        if lp == float("-inf"):
+            continue
+        total += math.exp(lp)
+    return float(min(1.0, max(0.0, total)))
+
+
+def majority_accuracy_stats(labels: list[str], feats: list[tuple], *, seed: int = 7, train_frac: float = 0.7) -> tuple[float, int, int]:
     if not labels or not feats or len(labels) != len(feats):
-        return 0.0
+        return 0.0, 0, 0
     n = len(labels)
     idxs = list(range(n))
     rng = random.Random(int(seed))
@@ -95,7 +135,16 @@ def map_accuracy(labels: list[str], feats: list[tuple], *, seed: int = 7, train_
         pred = feat_to_best.get(feats[i], maj)
         if pred == labels[i]:
             ok += 1
-    return float(ok) / float(len(test) or 1)
+    n_test = int(len(test))
+    acc = float(ok) / float(n_test or 1)
+    return acc, n_test, int(ok)
+
+
+def map_accuracy(labels: list[str], feats: list[tuple], *, seed: int = 7, train_frac: float = 0.7) -> float:
+    # Backward-compatible alias. This is accuracy of a majority-vote classifier,
+    # not mean-average-precision.
+    acc, _, _ = majority_accuracy_stats(labels, feats, seed=seed, train_frac=train_frac)
+    return float(acc)
 
 
 def _parse_transcript(path: Path, *, kind_prefix: str) -> list[dict[str, Any]]:
@@ -214,39 +263,67 @@ class TempEnv:
                 os.environ[k] = old
 
 
-def _run_label_workload(*, label: str, n: int, eng: EgressPolicyEngine, session_id: str) -> None:
+def _run_label_workload(*, label_mode: str, label: str, n: int, eng: EgressPolicyEngine, session_id: str) -> None:
     caller = "leakage-sweep"
     for i in range(int(n)):
-        if label == "send":
-            txt = ("hello " * (1 + (i % 7))).strip()
+        if label_mode == "intent":
+            if label == "send":
+                txt = ("hello " * (1 + (i % 7))).strip()
+                _ = eng.preview(
+                    intent_id="CheckMessagePolicy",
+                    inputs={"channel": "email", "recipient": "alice@example.com", "text": txt, "domain": "", "artifacts": []},
+                    constraints={},
+                    session=session_id,
+                    caller=caller,
+                )
+                continue
+            if label == "fetch":
+                _ = eng.preview(
+                    intent_id="CheckFetchPolicy",
+                    inputs={"resource_id": f"r{i}", "domain": "api.github.com", "recipient": "", "text": ""},
+                    constraints={},
+                    session=session_id,
+                    caller=caller,
+                )
+                continue
+            if label == "webhook":
+                body = "{\"k\":\"" + ("x" * (10 + (i % 13))) + "\"}"
+                _ = eng.preview(
+                    intent_id="CheckWebhookPolicy",
+                    inputs={"domain": "example.com", "path": "/hook", "text": body, "recipient": "", "artifacts": []},
+                    constraints={},
+                    session=session_id,
+                    caller=caller,
+                )
+                continue
+            raise ValueError(f"unknown label for intent mode: {label}")
+
+        if label_mode == "recipient_kway":
+            # Label carries the target recipient class id.
+            idx = int(label.split("_")[-1])
+            recipient = f"user{idx:03d}@example.com"
             _ = eng.preview(
                 intent_id="CheckMessagePolicy",
-                inputs={"channel": "email", "recipient": "alice@example.com", "text": txt, "domain": "", "artifacts": []},
+                inputs={"channel": "email", "recipient": recipient, "text": "status ping", "domain": "", "artifacts": []},
                 constraints={},
                 session=session_id,
                 caller=caller,
             )
             continue
-        if label == "fetch":
+
+        if label_mode == "domain_kway":
+            idx = int(label.split("_")[-1])
+            domain = f"d{idx:03d}.example.com"
             _ = eng.preview(
                 intent_id="CheckFetchPolicy",
-                inputs={"resource_id": f"r{i}", "domain": "api.github.com", "recipient": "", "text": ""},
+                inputs={"resource_id": f"doc-{i:05d}", "domain": domain, "recipient": "", "text": ""},
                 constraints={},
                 session=session_id,
                 caller=caller,
             )
             continue
-        if label == "webhook":
-            body = "{\"k\":\"" + ("x" * (10 + (i % 13))) + "\"}"
-            _ = eng.preview(
-                intent_id="CheckWebhookPolicy",
-                inputs={"domain": "example.com", "path": "/hook", "text": body, "recipient": "", "artifacts": []},
-                constraints={},
-                session=session_id,
-                caller=caller,
-            )
-            continue
-        raise ValueError(f"unknown label: {label}")
+
+        raise ValueError(f"unknown label_mode: {label_mode}")
 
 
 def main() -> None:
@@ -260,6 +337,12 @@ def main() -> None:
         n_per_label = 16
     if n_per_label > 512:
         n_per_label = 512
+    label_mode = str(os.getenv("LEAKAGE_SWEEP_LABEL_MODE", "intent")).strip().lower()
+    k_way = int(os.getenv("LEAKAGE_SWEEP_KWAY", "16"))
+    if k_way < 2:
+        k_way = 2
+    if k_way > 128:
+        k_way = 128
 
     # Policy servers
     p0 = int(os.getenv("P0_PORT", str(pick_port())))
@@ -397,8 +480,26 @@ def main() -> None:
             ),
         ]
 
-        results: dict[str, Any] = {"status": "OK", "seed": seed, "n_per_label": n_per_label, "configs": []}
-        labels = ["send", "fetch", "webhook"]
+        if label_mode == "intent":
+            labels = ["send", "fetch", "webhook"]
+        elif label_mode == "recipient_kway":
+            labels = [f"recipient_{i:03d}" for i in range(k_way)]
+        elif label_mode == "domain_kway":
+            labels = [f"domain_{i:03d}" for i in range(k_way)]
+        else:
+            raise SystemExit(f"unsupported LEAKAGE_SWEEP_LABEL_MODE: {label_mode}")
+
+        results: dict[str, Any] = {
+            "status": "OK",
+            "seed": seed,
+            "label_mode": label_mode,
+            "n_labels": len(labels),
+            "labels": labels,
+            "n_per_label": n_per_label,
+            "classifier_metric": "majority_vote_accuracy",
+            "legacy_map_acc_note": "map_acc is a backward-compatible alias of majority-vote accuracy",
+            "configs": [],
+        }
         for cfg in sweep:
             pir_labels: list[str] = []
             pir_feats: list[tuple] = []
@@ -419,7 +520,7 @@ def main() -> None:
                     hs = HandleStore()
                     txs = TxStore()
                     eng = EgressPolicyEngine(pir=pir, handles=hs, tx_store=txs, domain_size=int(os.getenv("FSS_DOMAIN_SIZE", "4096")), max_tokens=int(os.getenv("MAX_TOKENS_PER_MESSAGE", "32")))
-                    _run_label_workload(label=lab, n=n_per_label, eng=eng, session_id=session_id)
+                    _run_label_workload(label_mode=label_mode, label=lab, n=n_per_label, eng=eng, session_id=session_id)
                     # Stop background mixers so cover traffic does not bleed into the next label.
                     try:
                         if isinstance(pir, MixedPirClient):
@@ -445,8 +546,9 @@ def main() -> None:
             # Compute distinguishability.
             pir_mi = mutual_info_bits(pir_labels, pir_feats)
             mpc_mi = mutual_info_bits(mpc_labels, mpc_feats)
-            pir_acc = map_accuracy(pir_labels, pir_feats, seed=seed)
-            mpc_acc = map_accuracy(mpc_labels, mpc_feats, seed=seed)
+            chance_acc = 1.0 / float(len(labels))
+            pir_acc, pir_n_test, pir_ok = majority_accuracy_stats(pir_labels, pir_feats, seed=seed)
+            mpc_acc, mpc_n_test, mpc_ok = majority_accuracy_stats(mpc_labels, mpc_feats, seed=seed)
             cfg_row = {
                 "name": cfg.name,
                 "env": cfg.env,
@@ -455,15 +557,27 @@ def main() -> None:
                     "n_obs": len(pir_labels),
                     "n_unique_features": len(set(pir_feats)),
                     "mi_bits": float(pir_mi),
+                    "accuracy": float(pir_acc),
+                    "accuracy_ci95": list(wilson_ci(pir_ok, pir_n_test)),
+                    "accuracy_n_test": int(pir_n_test),
+                    "accuracy_n_correct": int(pir_ok),
+                    "accuracy_pvalue_gt_chance": float(binom_upper_tail_pvalue(pir_ok, pir_n_test, chance_acc)),
+                    "accuracy_pvalue_vs_chance": float(binom_upper_tail_pvalue(pir_ok, pir_n_test, chance_acc)),
                     "map_acc": float(pir_acc),
-                    "chance_acc": 1.0 / float(len(labels)),
+                    "chance_acc": float(chance_acc),
                 },
                 "mpc": {
                     "n_obs": len(mpc_labels),
                     "n_unique_features": len(set(mpc_feats)),
                     "mi_bits": float(mpc_mi),
+                    "accuracy": float(mpc_acc),
+                    "accuracy_ci95": list(wilson_ci(mpc_ok, mpc_n_test)),
+                    "accuracy_n_test": int(mpc_n_test),
+                    "accuracy_n_correct": int(mpc_ok),
+                    "accuracy_pvalue_gt_chance": float(binom_upper_tail_pvalue(mpc_ok, mpc_n_test, chance_acc)),
+                    "accuracy_pvalue_vs_chance": float(binom_upper_tail_pvalue(mpc_ok, mpc_n_test, chance_acc)),
                     "map_acc": float(mpc_acc),
-                    "chance_acc": 1.0 / float(len(labels)),
+                    "chance_acc": float(chance_acc),
                 },
             }
             results["configs"].append(cfg_row)

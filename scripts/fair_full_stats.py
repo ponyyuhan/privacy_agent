@@ -9,6 +9,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+_ERROR_REASON_PREFIXES = (
+    "ERROR:",
+    "BLOCK_ERROR:",
+    "GATEWAY_ERROR",
+    "TIMEOUT",
+    "SKIPPED",
+)
+
 
 def _load_json(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
@@ -126,6 +134,80 @@ def _read_mirage_rows(csv_path: Path) -> list[dict[str, Any]]:
     return rows
 
 
+def _reason_code(row: dict[str, Any]) -> str:
+    return str(row.get("reason_code") or "").strip()
+
+
+def _is_reason_error(reason_code: str) -> bool:
+    rc = str(reason_code or "").strip().upper()
+    if not rc:
+        return False
+    if any(rc.startswith(pfx) for pfx in _ERROR_REASON_PREFIXES):
+        return True
+    return False
+
+
+def _annotate_native_runtime_errors(rows: list[dict[str, Any]], *, summary_path: Path) -> list[dict[str, Any]]:
+    """
+    Native baselines keep per-scenario raw outputs under <summary_dir>/scenarios.
+    We propagate per-scenario runtime errors (parse_failed/nonzero rc) down to per-case rows
+    so availability is separated from policy deny behavior.
+    """
+    scen_dir = summary_path.parent / "scenarios"
+    status_by_key: dict[tuple[str, str], tuple[bool, str]] = {}
+    if scen_dir.exists() and scen_dir.is_dir():
+        for p in scen_dir.glob("*.json"):
+            nm = p.stem
+            if "_" not in nm:
+                continue
+            kind, scenario_id = nm.split("_", 1)
+            try:
+                d = _load_json(p)
+            except Exception:
+                status_by_key[(scenario_id, kind)] = (True, "ERROR:SCENARIO_PARSE")
+                continue
+            rc = int(((d.get("_meta") or {}).get("rc") or 0)) if isinstance(d, dict) else 0
+            err = str(d.get("error") or "") if isinstance(d, dict) else "parse_failed"
+            runtime_error = bool(err) or (rc != 0)
+            if runtime_error:
+                err_code = f"ERROR:{err}" if err else "ERROR:RC_NONZERO"
+                status_by_key[(scenario_id, kind)] = (True, err_code)
+            else:
+                status_by_key[(scenario_id, kind)] = (False, "")
+
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        rr = dict(r)
+        sid = str(r.get("scenario_id") or "")
+        kind = str(r.get("kind") or "")
+        runtime_error = False
+        runtime_error_code = ""
+        if sid and kind:
+            runtime_error, runtime_error_code = status_by_key.get((sid, kind), (False, ""))
+        rr["_runtime_error"] = bool(runtime_error)
+        rr["_runtime_error_code"] = str(runtime_error_code or "")
+        out.append(rr)
+    return out
+
+
+def _classify_benign(row: dict[str, Any]) -> str:
+    """
+    Benign outcome classes used in threat-model-separated reporting:
+    - ALLOW: normal success
+    - CONFIRM: user confirmation required (soft gate)
+    - HARD_DENY: explicit deny without runtime error
+    - ERROR: runtime/tooling availability failure
+    """
+    if bool(row.get("allowed")):
+        return "ALLOW"
+    rc = _reason_code(row)
+    if rc == "REQUIRE_CONFIRM":
+        return "CONFIRM"
+    if bool(row.get("_runtime_error")) or _is_reason_error(rc):
+        return "ERROR"
+    return "HARD_DENY"
+
+
 def _summarize_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
     attacks = [r for r in rows if str(r.get("kind") or "") == "attack"]
     benign = [r for r in rows if str(r.get("kind") or "") == "benign"]
@@ -133,7 +215,18 @@ def _summarize_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
     leak = sum(1 for r in attacks if bool(r.get("leaked")))
     block = sum(1 for r in attacks if bool(r.get("blocked")))
     allow = sum(1 for r in benign if bool(r.get("allowed")))
-    deny = len(benign) - allow
+
+    ben_class = [_classify_benign(r) for r in benign]
+    ben_confirm = sum(1 for x in ben_class if x == "CONFIRM")
+    ben_hard_deny = sum(1 for x in ben_class if x == "HARD_DENY")
+    ben_error = sum(1 for x in ben_class if x == "ERROR")
+    ben_non_allow = len(benign) - allow
+
+    atk_error_block = sum(
+        1
+        for r in attacks
+        if bool(r.get("blocked")) and (bool(r.get("_runtime_error")) or _is_reason_error(_reason_code(r)))
+    )
 
     lat = [float(r.get("latency_s") or 0.0) for r in rows]
     p50 = statistics.median(lat) * 1000.0 if lat else 0.0
@@ -147,10 +240,27 @@ def _summarize_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "attack_leak_rate_ci95": list(wilson_ci(leak, len(attacks))),
         "attack_block_rate": (block / len(attacks)) if attacks else 0.0,
         "attack_block_rate_ci95": list(wilson_ci(block, len(attacks))),
+        "attack_error_block_rate": (atk_error_block / len(attacks)) if attacks else 0.0,
+        "attack_error_block_rate_ci95": list(wilson_ci(atk_error_block, len(attacks))),
         "benign_allow_rate": (allow / len(benign)) if benign else 0.0,
         "benign_allow_rate_ci95": list(wilson_ci(allow, len(benign))),
-        "false_positive_rate": (deny / len(benign)) if benign else 0.0,
-        "false_positive_rate_ci95": list(wilson_ci(deny, len(benign))),
+        # Keep both:
+        # - benign_non_allow_rate: ALLOW complement (legacy "deny" style)
+        # - false_positive_rate: hard deny only (exclude confirm+availability failures)
+        "benign_non_allow_rate": (ben_non_allow / len(benign)) if benign else 0.0,
+        "benign_non_allow_rate_ci95": list(wilson_ci(ben_non_allow, len(benign))),
+        "benign_confirm_rate": (ben_confirm / len(benign)) if benign else 0.0,
+        "benign_confirm_rate_ci95": list(wilson_ci(ben_confirm, len(benign))),
+        "false_positive_rate": (ben_hard_deny / len(benign)) if benign else 0.0,
+        "false_positive_rate_ci95": list(wilson_ci(ben_hard_deny, len(benign))),
+        "availability_fail_rate": (ben_error / len(benign)) if benign else 0.0,
+        "availability_fail_rate_ci95": list(wilson_ci(ben_error, len(benign))),
+        "benign_outcome_counts": {
+            "ALLOW": int(allow),
+            "CONFIRM": int(ben_confirm),
+            "HARD_DENY": int(ben_hard_deny),
+            "ERROR": int(ben_error),
+        },
         "latency_p50_ms": float(p50),
         "latency_p95_ms": float(p95),
     }
@@ -199,8 +309,8 @@ def _breakdown(rows: list[dict[str, Any]], case_meta: dict[str, CaseMeta]) -> di
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--report", default="artifact_out_compare/fair_full_report.json", help="Path to fair_full_report.json")
-    ap.add_argument("--out", default="artifact_out_compare/stats/fair_full_stats.json", help="Output JSON path")
+    ap.add_argument("--report", default="artifact_out_compare_noprompt/fair_full_report.json", help="Path to fair_full_report.json")
+    ap.add_argument("--out", default="artifact_out_compare_noprompt/stats/fair_full_stats.json", help="Output JSON path")
     args = ap.parse_args()
 
     report_path = Path(str(args.report)).expanduser().resolve()
@@ -242,6 +352,7 @@ def main() -> None:
             rows = d.get("rows") if isinstance(d.get("rows"), list) else []
             rs2 = [r for r in rows if isinstance(r, dict)]
             if rs2:
+                rs2 = _annotate_native_runtime_errors(rs2, summary_path=p)
                 sys_rows[str(name)] = rs2
 
     summaries: dict[str, Any] = {}
@@ -269,15 +380,42 @@ def main() -> None:
             ben_r = sum(1 for r in rrows if str(r.get("kind") or "") == "benign")
             allow_t = sum(1 for r in trows if str(r.get("kind") or "") == "benign" and bool(r.get("allowed")))
             ben_t = sum(1 for r in trows if str(r.get("kind") or "") == "benign")
+            hard_r = sum(1 for r in rrows if str(r.get("kind") or "") == "benign" and _classify_benign(r) == "HARD_DENY")
+            hard_t = sum(1 for r in trows if str(r.get("kind") or "") == "benign" and _classify_benign(r) == "HARD_DENY")
+            non_allow_r = ben_r - allow_r
+            non_allow_t = ben_t - allow_t
 
             p_attack = fisher_exact_two_sided(leak_r, max(0, atk_r - leak_r), leak_t, max(0, atk_t - leak_t)) if (atk_r and atk_t) else 1.0
             p_benign = fisher_exact_two_sided(allow_r, max(0, ben_r - allow_r), allow_t, max(0, ben_t - allow_t)) if (ben_r and ben_t) else 1.0
+            p_hard = fisher_exact_two_sided(hard_r, max(0, ben_r - hard_r), hard_t, max(0, ben_t - hard_t)) if (ben_r and ben_t) else 1.0
+            p_non_allow = (
+                fisher_exact_two_sided(non_allow_r, max(0, ben_r - non_allow_r), non_allow_t, max(0, ben_t - non_allow_t))
+                if (ben_r and ben_t)
+                else 1.0
+            )
             tests[name] = {
                 "attack_leak_fisher_p_two_sided": float(p_attack),
                 "benign_allow_fisher_p_two_sided": float(p_benign),
+                "benign_hard_deny_fisher_p_two_sided": float(p_hard),
+                "benign_non_allow_fisher_p_two_sided": float(p_non_allow),
                 "counts": {
-                    "mirage_full": {"attack_leaks": leak_r, "attack_n": atk_r, "benign_allows": allow_r, "benign_n": ben_r},
-                    "other": {"system": name, "attack_leaks": leak_t, "attack_n": atk_t, "benign_allows": allow_t, "benign_n": ben_t},
+                    "mirage_full": {
+                        "attack_leaks": leak_r,
+                        "attack_n": atk_r,
+                        "benign_allows": allow_r,
+                        "benign_non_allow": non_allow_r,
+                        "benign_hard_deny": hard_r,
+                        "benign_n": ben_r,
+                    },
+                    "other": {
+                        "system": name,
+                        "attack_leaks": leak_t,
+                        "attack_n": atk_t,
+                        "benign_allows": allow_t,
+                        "benign_non_allow": non_allow_t,
+                        "benign_hard_deny": hard_t,
+                        "benign_n": ben_t,
+                    },
                 },
             }
 
