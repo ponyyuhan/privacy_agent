@@ -205,7 +205,7 @@ Allowed only via explicit policy path:
 
 | Leakage term | Meaning | Code path | Config and spec anchor |
 |---|---|---|---|
-| `request_sha256` visibility | hash commitment in MPC init | `gateway/policy_unified.py`, `policy_server/server.py` | request hash canonicalization in `common/canonical.py` |
+| `request_sha256` visibility | request-binding digest in MPC init (wire name) | `gateway/policy_unified.py`, `policy_server/server.py` | keyed/legacy request binding in `common/canonical.py` |
 | `program_id` | fixed policy circuit id | `gateway/policy_unified.py`, `executor_server/server.py` | `MIRAGE_POLICY_PROGRAM_ID`, `spec/secureclaw_accept_predicate_v1.json` |
 | `commit outputs bits` | allow and confirm semantics | `policy_server/server.py`, `executor_server/server.py` | `required_output_keys` in accept spec |
 | `batch shape` | padded per-tick request counts | `gateway/fss_pir.py`, `gateway/policy_unified.py` | `PIR_*`, `MPC_*` mixer switches |
@@ -236,8 +236,8 @@ Residual terms explicitly allowed in current artifact:
 
 1. Coarse scheduler timing buckets.
 2. Confirm-path invocation bit when confirm path is conditional.
-3. Unkeyed hash commitment observability in MPC initialization.
-4. Offline dictionary advantage against low-entropy request fields, bounded by `min(1, q_d / 2^k)` where `k` is conditional min-entropy and `q_d` is attacker trial count.
+3. Request-binding digest observability in MPC initialization.
+4. Legacy-mode residual only: if keyed request binding is disabled, offline dictionary advantage against low-entropy request fields is bounded by `min(1, q_d / 2^k)` where `k` is conditional min-entropy and `q_d` is attacker trial count.
 
 Residual terms not allowed but out of model:
 

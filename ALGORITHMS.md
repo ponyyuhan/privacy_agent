@@ -52,7 +52,9 @@ We bind every authorization to an immutable context:
 
 - action_id: opaque identifier minted by G (unique per action).
 - program_id: policy program identifier (e.g., "policy_unified_v1").
-- request_sha256: hash of a canonicalized request payload `(v, intent_id, caller, session, inputs, context)`, where `context` contains request-hash auth context fields (`external_principal`, `delegation_jti`) when present, else `{}`.
+- request_sha256: protocol v1 wire field carrying the request-binding digest over canonicalized payload `(v, intent_id, caller, session, inputs, context)`, where `context` contains auth context fields (`external_principal`, `delegation_jti`) when present, else `{}`.
+  - keyed mode (recommended): `HMAC-SHA256(k_bind, CanonJSON(payload))` when `SECURECLAW_REQUEST_BINDING_KEY_HEX` is set.
+  - legacy mode: `SHA256(CanonJSON(payload))` when no binding key is configured.
 
 In code, request_sha256 is computed by `common/canonical.py:request_sha256_v1`.
 
@@ -100,7 +102,7 @@ Output:
 
 Algorithm A1.GatewayPreviewCommit (high level):
 
-1. G computes `hctx` from trusted auth context fields (`external_principal`, `delegation_jti`) and computes `request_sha256 := H(canonical(v=1, intent_id, caller, session, inputs, context=hctx))`.
+1. G computes `hctx` from trusted auth context fields (`external_principal`, `delegation_jti`) and computes `request_sha256` as request-binding digest on canonical payload.
 2. G runs privacy-preserving policy evaluation (PIR for features; MPC for boolean program outputs).
 3. Each Pi returns a commit proof share commit_proof_i (MAC-signed) bound to (action_id, program_id, request_sha256).
 4. G forwards (req, action_id, commit={policy0:commit_proof_0, policy1:commit_proof_1}) to E.
@@ -128,7 +130,7 @@ the reconstructed outputs satisfy the local decision predicate (e.g., allow_pre=
 Any adversary that causes E to accept without obtaining both valid commit proofs for the executed context must either:
 
 - Forge a MAC under an unknown policy server key, or
-- Break the request binding (e.g., find a collision so that two different `(intent_id, caller, session, inputs, hctx)` tuples share the same request_sha256).
+- Break the request binding (e.g., keyed-mode HMAC break or legacy-mode collision so that two different `(intent_id, caller, session, inputs, hctx)` tuples share the same digest).
 
 Formal games and the code-linked theorem are in `FORMAL_SECURITY.md`.
 

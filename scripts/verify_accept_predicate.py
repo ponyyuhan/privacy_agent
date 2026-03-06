@@ -147,6 +147,7 @@ def verify_accept_predicate(
     request_path: Path,
     policy0_keys: str | None = None,
     policy1_keys: str | None = None,
+    request_binding_key_hex: str | None = None,
     now: int | None = None,
     user_confirm: bool = False,
     replay_seen: bool = False,
@@ -187,7 +188,17 @@ def verify_accept_predicate(
     caller = str(req.get("caller") or "")
     session = str(req.get("session") or "")
     inputs = req.get("inputs") if isinstance(req.get("inputs"), dict) else {}
-    request_sha256 = request_sha256_v1(intent_id=intent_id, caller=caller, session=session, inputs=inputs)
+    old_binding_key = os.getenv("SECURECLAW_REQUEST_BINDING_KEY_HEX")
+    try:
+        if request_binding_key_hex is not None:
+            os.environ["SECURECLAW_REQUEST_BINDING_KEY_HEX"] = str(request_binding_key_hex)
+        request_sha256 = request_sha256_v1(intent_id=intent_id, caller=caller, session=session, inputs=inputs)
+    finally:
+        if request_binding_key_hex is not None:
+            if old_binding_key is None:
+                os.environ.pop("SECURECLAW_REQUEST_BINDING_KEY_HEX", None)
+            else:
+                os.environ["SECURECLAW_REQUEST_BINDING_KEY_HEX"] = old_binding_key
 
     # Evidence shares.
     p0 = commit.get("policy0") if isinstance(commit.get("policy0"), dict) else {}
@@ -312,6 +323,11 @@ def main() -> None:
     ap.add_argument("--replay-seen", action="store_true", help="treat action_id as already used for replay check")
     ap.add_argument("--policy0-mac-keys", default="", help="override POLICY0_MAC_KEYS format kid:hex,kid2:hex")
     ap.add_argument("--policy1-mac-keys", default="", help="override POLICY1_MAC_KEYS format kid:hex,kid2:hex")
+    ap.add_argument(
+        "--request-binding-key-hex",
+        default="",
+        help="optional keyed request-binding secret (hex) for verifier recomputation",
+    )
     args = ap.parse_args()
 
     repo_root = _repo_root()
@@ -325,6 +341,7 @@ def main() -> None:
     now = int(str(args.now)) if str(args.now or "").strip() else None
     p0 = str(args.policy0_mac_keys or "").strip() or None
     p1 = str(args.policy1_mac_keys or "").strip() or None
+    rbk = str(args.request_binding_key_hex or "").strip() or None
 
     report = verify_accept_predicate(
         spec_path=spec_path,
@@ -332,6 +349,7 @@ def main() -> None:
         request_path=request_path,
         policy0_keys=p0,
         policy1_keys=p1,
+        request_binding_key_hex=rbk,
         now=now,
         user_confirm=bool(args.user_confirm),
         replay_seen=bool(args.replay_seen),
@@ -349,4 +367,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

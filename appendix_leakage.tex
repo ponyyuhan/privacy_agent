@@ -13,7 +13,7 @@ Let $\lambda$ be the security parameter.
 Let $\mathcal{G}$ be the gateway, let $\mathcal{P}_0$ and $\mathcal{P}_1$ be the policy servers, and let $\mathcal{X}$ be the executor.
 Let an action be identified by an action identifier $a$.
 Let the policy program identifier be $p$.
-Let the request binding hash be $h := \mathsf{ReqHash}$ as defined in Appendix \ref{app:proofs:primitives}.
+Let the request binding digest be $h := \mathsf{ReqBind}$ as defined in Appendix \ref{app:proofs:primitives}.
 
 We write $\mathsf{View}(\mathcal{P}_\sigma)$ for the full transcript observed by policy server $\mathcal{P}_\sigma$, including request paths, message sizes, coarse timing buckets, and application layer fields.
 
@@ -183,8 +183,8 @@ We treat the following as residual risks that are not eliminated by default conf
 
 \begin{itemize}
 \item Conditional confirm path invocation may leak a branch bit.
-\item Low-entropy guessing attacks against unkeyed request hashes are possible in principle when an attacker can enumerate candidates.
-With conditional min-entropy $k$ over candidate inputs and $q_d$ offline hash trials, residual dictionary advantage is upper-bounded by
+\item Legacy-mode residual only: if keyed request binding is disabled, low-entropy guessing attacks against observable request digests are possible in principle when an attacker can enumerate candidates.
+With conditional min-entropy $k$ over candidate inputs and $q_d$ offline trials, residual dictionary advantage is upper-bounded by
 \[
 \varepsilon_{\mathsf{dict}} \le \min(1,q_d/2^k).
 \]

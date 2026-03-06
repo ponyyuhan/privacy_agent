@@ -628,7 +628,8 @@ class _MpcBatchMixer:
         # Keep the same action_id *shape* as real requests (e.g., "a_<urlsafe>") so
         # the policy servers cannot trivially distinguish cover vs real by prefix.
         aid = f"a_{secrets.token_urlsafe(12)}"
-        # request_sha256 is a hash in the protocol; random-looking is fine for cover.
+        # request_sha256 is the request-binding digest field in protocol v1.
+        # For cover traffic, any random-looking digest-shaped value is fine.
         req_sha = os.urandom(32).hex()
 
         # Provide shares for all fixed input wires to keep sessions evaluatable.

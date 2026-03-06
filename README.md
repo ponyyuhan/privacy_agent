@@ -504,11 +504,15 @@ Router 行为：
 安全语义：
 - `tx_id` 事务 token 绑定 caller+session+request hash。
 
-### 8.3 request hash 绑定（`common/canonical.py`）
+### 8.3 request 绑定摘要（`common/canonical.py`）
 `request_sha256_v1(intent_id, caller, session, inputs, context)`
 - gateway 与 executor 必须一致计算。
 - `context` 在存在时包含 `external_principal`、`delegation_jti`（否则为 `{}`），用于 PREVIEW/COMMIT 的授权上下文绑定。
 - commit-phase 的 `user_confirm` 不参与 hash（允许同一 preview token 被 confirm）。
+- 线协议字段名仍为 `request_sha256`（兼容性原因），但计算模式支持：
+  - 推荐：设置 `SECURECLAW_REQUEST_BINDING_KEY_HEX` 后使用 `HMAC-SHA256` keyed commitment；
+  - 兼容：未设置密钥时回退为 legacy `SHA256`。
+- 部署建议：`SECURECLAW_REQUEST_BINDING_KEY_HEX` 仅下发给 gateway+executor，不下发给 policy server。
 
 ### 8.4 sanitize patch（`common/sanitize.py`）
 - `PATCH_NOOP = 0`

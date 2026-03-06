@@ -93,12 +93,12 @@
 
 \begin{abstract}
 Agent tool-use security faces two coupled problems: compromised runtimes can bypass in-process guardrails at effect time, and centralized policy enforcement can itself become a privacy sink.
-We present SecureClaw, an execution control plane with a cryptographically non-bypassable PREVIEW$\rightarrow$COMMIT boundary and an optional single-auditor privacy (SAP) mode for outsourced policy checks.
-Commit succeeds only when an independent executor verifies dual commit-proof shares bound to a canonical request hash, delegation context, freshness, and replay state.
+We present SecureClaw, an execution control plane organized around three invariants: a cryptographically non-bypassable PREVIEW$\rightarrow$COMMIT boundary, privacy-preserving outsourced policy checks via optional single-auditor privacy (SAP), and runtime plaintext blindness via handle-first secrets plus explicit declassification gates.
+Commit succeeds only when an independent executor verifies dual commit-proof shares bound to a canonical request commitment, delegation context, freshness, and replay state.
 SAP uses fixed-shape PIR+MPC routing with an explicit leakage contract and a simulation-based single-server transcript privacy claim.
 On official C1--C5 coverage, SecureClaw achieves $0.00\%$ observed attack leakage and $100.00\%$ attack blocking with $80.00\%$ benign allow in our deterministic run.
 In single-policy-server distinguishability sweeps, shaping reduces separable signal (PIR MI $0.414$ bits unshaped) to near-zero MI under unified fixed-shape mode.
-The artifact additionally provides a compromised-runtime bypass suite and protocolized extension designs for AP2 case-study and multimodal stress benchmarks.
+The artifact additionally provides a compromised-runtime bypass suite, delegated multi-principal tests, and protocolized extension designs for AP2 case-study, enterprise plaintext-proxy baselines, and multimodal stress benchmarks.
 \end{abstract}
 
 \input{paper_full_body}

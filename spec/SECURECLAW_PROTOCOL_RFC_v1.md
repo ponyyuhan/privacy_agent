@@ -63,7 +63,13 @@ Define the commit context tuple:
 
 `ctx = (action_id, program_id, request_sha256, hctx)`
 
-`request_sha256` MUST be computed by the canonical hash function in `common/canonical.py:request_sha256_v1`.
+`request_sha256` is the wire field name for request binding digest compatibility.
+It MUST be computed by `common/canonical.py:request_sha256_v1`, which supports:
+
+1. keyed mode (recommended): `HMAC-SHA256(k_bind, CanonJSON(rho_payload))` when `SECURECLAW_REQUEST_BINDING_KEY_HEX` is set;
+2. legacy mode: `SHA256(CanonJSON(rho_payload))` when no binding key is configured.
+
+Deployments SHOULD keep `k_bind` only in gateway+executor and MUST NOT expose it to policy servers.
 
 ### 3.2 `act` Request
 
@@ -127,7 +133,7 @@ A COMMIT request to executor endpoints MUST include:
 4. Optional user confirmation flag for confirm-required actions.
 5. Optional `external_principal` and `delegation_jti` fields when delegation is in use.
 
-Executor MUST recompute `request_sha256` from received request payload and compare with both proof shares.
+Executor MUST recompute request binding digest from received request payload and compare with both proof shares.
 
 ## 5. Commit Evidence
 
@@ -161,7 +167,7 @@ Executor MUST return `status="OK"` with allow semantics only if all checks pass:
 
 1. Structural schema valid.
 2. Dual MAC valid and server identities consistent.
-3. `request_sha256` equals recomputed request hash.
+3. `request_sha256` equals recomputed request binding digest.
 4. Replay guard has not seen this `action_id`.
 5. `allow_pre == 1`.
 6. If `need_confirm == 1`, user confirmation is true.
@@ -208,7 +214,7 @@ If `EXECUTOR_INSECURE_ALLOW=1`, responses MAY return `ALLOW_INSECURE`; this mode
 
 The following invariants are normative:
 
-1. No side effect commit without dual valid proofs and request hash match.
+1. No side effect commit without dual valid proofs and request binding match.
 2. No side effect commit on replayed `action_id` within replay window.
 3. No bypass from PREVIEW binding through caller or session mismatch.
 4. No bypass from PREVIEW binding through `external_principal` or `delegation_jti` mismatch.

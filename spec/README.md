@@ -30,7 +30,8 @@ The repository also provides semantic and contract verifiers.
 python scripts/verify_accept_predicate.py \
   --spec spec/secureclaw_accept_predicate_v1.json \
   --commit <commit.json> \
-  --request <request.json>
+  --request <request.json> \
+  --request-binding-key-hex <hex_key_if_keyed_mode>
 ```
 
 ```

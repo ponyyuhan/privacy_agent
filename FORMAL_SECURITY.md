@@ -21,7 +21,7 @@ This claim has three orthogonal parts:
 
 1. Integrity part. Non-bypassable effect commit line at the executor.
 2. Confidentiality part. Secret myopia plus explicit declassification and executor-enforced sanitization.
-3. Multi-principal part. Delegation/federation context bound to request hash to prevent cross-context replay.
+3. Multi-principal part. Delegation/federation context bound to request binding digest to prevent cross-context replay.
 
 SAP is an optional deployment mode for leakage-bounded policy outsourcing against one policy server and does not change the integrity line.
 
@@ -91,9 +91,12 @@ Commit context tuple:
 
 `ctx = (action_id, program_id, request_sha256, hctx)`
 
-Request binding hash:
+Request binding digest:
 
-`ReqHash(rho) = SHA256(CanonJSON({"v":1,"intent_id":intent_id,"caller":caller,"session":session,"inputs":inputs_eff,"context":hctx}))`
+`ReqBind(rho) = HMAC(k_bind, CanonJSON(payload(rho)))` if keyed mode is enabled, otherwise
+`ReqBind(rho) = SHA256(CanonJSON(payload(rho)))` in legacy mode.
+
+Wire compatibility note: the protocol field name remains `request_sha256` in v1 evidence.
 
 Artifact implementation:
 
@@ -120,7 +123,8 @@ Executor accepts iff all hold:
 3. MAC verification succeeds under keyring `kid`.
 4. Freshness `abs(now - ts) <= POLICY_MAC_TTL_S`.
 5. Shared `(action_id, program_id, request_sha256)` match.
-6. Recomputed `ReqHash(rho(req))` equals proof hash.
+6. Recomputed `ReqBind(rho(req))` equals proof digest.
+   (in implementation this is `ReqBind`, emitted as `request_sha256` in v1 wire format)
 7. Replay guard rejects duplicates in replay window.
 8. Reconstructed policy bits satisfy `allow_pre=1`.
 9. `need_confirm=1` implies explicit confirmation.
@@ -178,20 +182,21 @@ Win condition `Bad_NBE` is true if executor accepts and one of the following hol
 
 If acceptance succeeds for a request whose bound tuple differs from the tuple used to create the accepted proof context, then either:
 
-1. SHA256 collision is found on canonicalized messages, or
-2. Canonicalization consistency is violated.
+1. keyed mode: HMAC binding is forged/broken for distinct canonicalized messages, or
+2. legacy mode: SHA256 collision is found on canonicalized messages, or
+3. Canonicalization consistency is violated.
 
 Reason:
 
-Accepted proof hash equals recomputed `ReqHash(rho(req))`.
-Different tuples with equal hash imply collision or serialization inconsistency.
+Accepted proof digest equals recomputed `ReqBind(rho(req))`.
+Different tuples with equal digest imply binding break/collision or serialization inconsistency.
 
 ### 5.3 Theorem `T_NBE`
 
 Assume:
 
 1. HMAC is EUF-CMA secure.
-2. `ReqHash` is collision resistant and canonicalization is consistent.
+2. Request binding primitive for the configured mode is secure (`HMAC` PRF-style in keyed mode, `SHA256` collision resistance in legacy mode), and canonicalization is consistent.
 3. Executor implements acceptance predicate exactly.
 4. Time drift and transport delay satisfy `Delta_clk + Delta_net < POLICY_MAC_TTL_S`.
 5. Replay check-and-mark is atomic and replay durability assumptions hold for the configured replay window.
@@ -350,13 +355,13 @@ Theorem `T_DAS`:
 Assume:
 
 1. Delegation token signatures are EUF-CMA secure.
-2. `ReqHash` is collision-resistant and canonicalization is consistent.
-3. Executor recomputes request hash including `hctx=(external_principal, delegation_jti)`.
+2. `ReqBind` is secure for configured mode and canonicalization is consistent.
+3. Executor recomputes request binding digest including `hctx=(external_principal, delegation_jti)`.
 4. Replay and freshness assumptions from `T_NBE` hold.
 
 Then:
 
-`Pr[Bad_DAS] <= Pr[Bad_NBE] + Adv_euf_cma(Sig) + Adv_coll(SHA256) + eps_canon + negl(lambda)`
+`Pr[Bad_DAS] <= Pr[Bad_NBE] + Adv_euf_cma(Sig) + Adv_bind + eps_canon + negl(lambda)`
 
 ## 9. Composition Theorem
 
@@ -463,5 +468,5 @@ python scripts/validate_specs.py
 2. SAP does not hold under full collusion of both policy servers.
 3. Capsule claims are conditional and environment-specific.
 4. Kernel microarchitectural channels are not covered.
-5. Unkeyed `request_sha256` can permit offline guessing on low-entropy fields; claims therefore assume sufficient conditional min-entropy of hashed inputs or explicitly account for dictionary-attack residual risk in leakage analysis.
+5. If keyed request binding is disabled (legacy mode), `request_sha256` observability can permit offline guessing on low-entropy fields; keyed mode mitigates this by using HMAC commitment with a gateway+executor-only secret.
 6. DAS claims rely on delegation key management and revocation-store correctness in deployment.

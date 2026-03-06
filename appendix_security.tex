@@ -64,23 +64,33 @@ message attack, abbreviated EUF CMA. The artifact uses HMAC-SHA256:
 \mathsf{Tag}_K(m) := \mathrm{HMAC\text{-}SHA256}(K, m), \quad \mathsf{Vrfy}_K(m,t) := [t = \mathsf{Tag}_K(m)].
 \]
 
-\paragraph{Canonical serialization and request binding hash.}
+\paragraph{Canonical serialization and request binding digest.}
 Let $\mathsf{Canon}(\cdot)$ be a deterministic canonical JSON serialization implemented in
 \texttt{common/canonical.py}. Let
 \[
 \mathsf{hctx} := (\mathsf{external\_principal},\mathsf{delegation\_jti})
 \]
 denote the hash context, serialized as a JSON object containing only present fields (empty object if
-both are absent). Define the request binding hash:
+both are absent). Define the request binding digest:
 \[
-\mathsf{ReqHash}(\mathsf{intent\_id},\mathsf{caller},\mathsf{session},\mathsf{inputs},\mathsf{hctx}) :=
-\mathrm{SHA256}\!\left(\mathsf{Canon}\!\left(
+\mathsf{ReqBind}(\mathsf{intent\_id},\mathsf{caller},\mathsf{session},\mathsf{inputs},\mathsf{hctx}) :=
+\left\{
+\begin{array}{ll}
+\mathrm{HMAC\text{-}SHA256}(k_{\mathsf{bind}},\mathsf{Canon}(\cdot)) & \text{if keyed mode enabled},\\
+\mathrm{SHA256}(\mathsf{Canon}(\cdot)) & \text{legacy compatibility mode},
+\end{array}
+\right.
+\]
+where $\mathsf{Canon}(\cdot)$ expands to
+\[
+\mathsf{Canon}\!\left(
 \begin{array}{l}
 \{\texttt{"v"}:1,\ \texttt{"intent\_id"}:\mathsf{intent\_id},\ \texttt{"caller"}:\mathsf{caller},\ \texttt{"session"}:\mathsf{session},\\
 \ \texttt{"inputs"}:\mathsf{inputs},\ \texttt{"context"}:\mathsf{hctx}\}
-\end{array}\right)\right).
+\end{array}\right).
 \]
-We assume SHA-256 collision resistance and \emph{binding hash consistency}: both gateway and executor
+We assume request-binding security for the configured mode (HMAC PRF-style in keyed mode, SHA-256
+collision resistance in legacy mode) and \emph{binding consistency}: both gateway and executor
 compute identical byte strings under $\mathsf{Canon}(\cdot)$ for semantically equal JSON objects.
 This is an engineering assumption enforced by using the same library routine in both places.
 
@@ -116,7 +126,7 @@ where $\mathrm{TTL}_{\mathsf{mac}}$ is configured by the environment variable \t
 \item Context agreement: both shares bind the same $(a,p,h)$ tuple.
 \item Request binding: letting $(\mathsf{intent\_id},\mathsf{caller},\mathsf{session},\mathsf{inputs},\mathsf{hctx})$
 be the effectful fields of $\mathsf{req}$, we require $h =
-\mathsf{ReqHash}(\mathsf{intent\_id},\mathsf{caller},\mathsf{session},\mathsf{inputs},\mathsf{hctx})$.
+\mathsf{ReqBind}(\mathsf{intent\_id},\mathsf{caller},\mathsf{session},\mathsf{inputs},\mathsf{hctx})$.
 \item Replay protection: the action identifier $a$ has not been accepted before within the replay
 window. The artifact uses \texttt{\_ReplayGuard.check\_and\_mark}.
 \item Policy bits reconstructed from $(y_0,y_1)$ indicate allow; if a confirmation bit is set then
@@ -567,14 +577,14 @@ The adversary wins if executor acceptance succeeds under the mismatched binding.
 \paragraph{Theorem.}
 \begin{theorem}[Delegation-aware hash-context binding safety]\label{thm:das}
 Assume delegation signatures are unforgeable, revocation checks are sound, canonicalization is
-consistent, and executor recomputes request hash including $\mathsf{hctx}$.
+consistent, and executor recomputes request binding digest including $\mathsf{hctx}$.
 Then successful cross-context replay implies either MAC/hash break events already covered by
 Theorem \ref{thm:nbe} or signature/revocation assumption failure, hence
 $\Pr[\mathsf{Bad}_{\mathsf{DAS}}]$ is negligible under these assumptions.
 \end{theorem}
 
 \paragraph{Proof sketch.}
-Changing caller, session, or hash-context changes the bound request hash.
+Changing caller, session, or hash-context changes the bound request digest.
 Executor acceptance requires equality between recomputed hash and proof hash, so mismatched-context
 reuse fails unless cryptographic binding assumptions are violated.
 \qed

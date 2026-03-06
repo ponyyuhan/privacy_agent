@@ -4,19 +4,28 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DRIFT_DIR="${REPO_ROOT}/third_party/DRIFT"
 IPIGUARD_DIR="${REPO_ROOT}/third_party/ipiguard"
+AGENTDOJO_OFFICIAL_SRC="${REPO_ROOT}/third_party/agentdojo/src"
 
 RUN_TAG="${RUN_TAG:-$(date +%Y%m%d_%H%M%S)}"
-BENCHMARK_VERSION="${BENCHMARK_VERSION:-v1.2.2}"
-IPIGUARD_BENCHMARK_VERSION="${IPIGUARD_BENCHMARK_VERSION:-v1.1.2}"
+BENCHMARK_VERSION="${BENCHMARK_VERSION:-v1.1.2}"
+IPIGUARD_BENCHMARK_VERSION="${IPIGUARD_BENCHMARK_VERSION:-${BENCHMARK_VERSION}}"
+ALLOW_BENCHMARK_VERSION_MISMATCH="${ALLOW_BENCHMARK_VERSION_MISMATCH:-0}"
 MODEL="${MODEL:-gpt-4o-mini-2024-07-18}"
 ATTACK_NAME="${ATTACK_NAME:-important_instructions}"
 IPIGUARD_DEFENSE="${IPIGUARD_DEFENSE:-ipiguard}"
-OPENAI_BASE_URL="${OPENAI_BASE_URL:-http://127.0.0.1:18000/v1}"
-OPENAI_API_KEY="${OPENAI_API_KEY:-dummy}"
+OPENAI_BASE_URL="${OPENAI_BASE_URL:-https://api.openai.com/v1}"
+OPENAI_API_KEY="${OPENAI_API_KEY:-}"
 DRIFT_OPENAI_TIMEOUT_S="${DRIFT_OPENAI_TIMEOUT_S:-300}"
-DRIFT_OPENAI_MAX_RETRIES="${DRIFT_OPENAI_MAX_RETRIES:-0}"
-DRIFT_CHAT_RETRIES="${DRIFT_CHAT_RETRIES:-0}"
-DRIFT_CHAT_RETRY_BACKOFF_S="${DRIFT_CHAT_RETRY_BACKOFF_S:-0.5}"
+DRIFT_OPENAI_MAX_RETRIES="${DRIFT_OPENAI_MAX_RETRIES:-8}"
+DRIFT_CHAT_RETRIES="${DRIFT_CHAT_RETRIES:-6}"
+DRIFT_CHAT_RETRY_BACKOFF_S="${DRIFT_CHAT_RETRY_BACKOFF_S:-1.5}"
+IPIGUARD_OPENAI_TIMEOUT_S="${IPIGUARD_OPENAI_TIMEOUT_S:-120}"
+IPIGUARD_OPENAI_MAX_RETRIES="${IPIGUARD_OPENAI_MAX_RETRIES:-0}"
+IPIGUARD_LLM_RETRY_ATTEMPTS="${IPIGUARD_LLM_RETRY_ATTEMPTS:-3}"
+IPIGUARD_LLM_RETRY_MAX_WAIT_S="${IPIGUARD_LLM_RETRY_MAX_WAIT_S:-40}"
+IPIGUARD_LLM_RETRY_BACKOFF_S="${IPIGUARD_LLM_RETRY_BACKOFF_S:-2}"
+IPIGUARD_LLM_RETRY_HINT_SCALE="${IPIGUARD_LLM_RETRY_HINT_SCALE:-${IPIGUARD_LLM_RETRY_MULTIPLIER:-1.0}}"
+IPIGUARD_LLM_RETRY_HINT_JITTER_S="${IPIGUARD_LLM_RETRY_HINT_JITTER_S:-0.5}"
 
 OUT_ROOT="${OUT_ROOT:-${REPO_ROOT}/artifact_out_external_runtime/external_runs/${RUN_TAG}}"
 OUT_ROOT="$(python - "${OUT_ROOT}" <<'PY'
@@ -39,6 +48,46 @@ RUN_DRIFT="${RUN_DRIFT:-1}"
 RUN_IPIGUARD="${RUN_IPIGUARD:-1}"
 mkdir -p "${LOG_DIR}"
 mkdir -p "${DRIFT_WORKSPACE}"
+
+if [[ "${BENCHMARK_VERSION}" != "${IPIGUARD_BENCHMARK_VERSION}" && "${ALLOW_BENCHMARK_VERSION_MISMATCH}" != "1" ]]; then
+  echo "[error] benchmark version mismatch: DRIFT=${BENCHMARK_VERSION} IPIGuard=${IPIGUARD_BENCHMARK_VERSION}. Set ALLOW_BENCHMARK_VERSION_MISMATCH=1 to override."
+  exit 1
+fi
+if [[ ("${RUN_DRIFT}" == "1" || "${RUN_IPIGUARD}" == "1") && -z "${OPENAI_API_KEY}" ]]; then
+  echo "[error] OPENAI_API_KEY is required when running DRIFT/IPIGuard external baselines."
+  exit 1
+fi
+
+_expected_rows() {
+  local src_root="$1"
+  local benchmark_version="$2"
+  local mode="$3"
+  local suite="$4"
+  python - "${src_root}" "${benchmark_version}" "${mode}" "${suite}" <<'PY'
+import sys
+from pathlib import Path
+
+src_root = Path(sys.argv[1])
+benchmark_version = str(sys.argv[2])
+mode = str(sys.argv[3])
+suite_name = str(sys.argv[4])
+
+if str(src_root) not in sys.path:
+    sys.path.insert(0, str(src_root))
+
+from agentdojo.task_suite.load_suites import get_suite  # type: ignore
+
+suite = get_suite(benchmark_version, suite_name)
+benign = int(len(suite.user_tasks))
+under_attack = 0
+if hasattr(suite, "get_injections_for_user_task"):
+    for ut in suite.user_tasks.values():
+        under_attack += int(len(suite.get_injections_for_user_task(ut)))
+else:
+    under_attack = benign * int(len(getattr(suite, "injection_tasks", {}) or {}))
+print(under_attack if mode == "under_attack" else benign)
+PY
+}
 
 run_drift_one() {
   local mode="$1"
@@ -87,29 +136,23 @@ run_drift_one() {
         --dynamic_validation
     ) >"${log_path}" 2>&1
   fi
-  echo "[done][DRIFT] mode=${mode} suite=${suite} log=${log_path}"
-}
-
-_ipiguard_expected_rows() {
-  local mode="$1"
-  local suite="$2"
-  local users=0
-  local injections=0
-  case "${suite}" in
-    banking) users=16; injections=9 ;;
-    slack) users=21; injections=5 ;;
-    travel) users=20; injections=7 ;;
-    workspace) users=40; injections=6 ;;
-    *)
-      echo "0"
-      return 0
-      ;;
-  esac
-  if [[ "${mode}" == "under_attack" ]]; then
-    echo $((users * injections))
-  else
-    echo "${users}"
+  local expected_mode="benign"
+  if [[ "${mode}" == "attack" ]]; then
+    expected_mode="under_attack"
   fi
+  local expected_rows="$(_expected_rows "${AGENTDOJO_OFFICIAL_SRC}" "${BENCHMARK_VERSION}" "${expected_mode}" "${suite}")"
+  local drift_suite_root="${DRIFT_WORKSPACE}/runs/${MODEL}/${suite}"
+  local got_rows=0
+  if [[ "${mode}" == "attack" ]]; then
+    got_rows="$(find "${drift_suite_root}" -type f -path "*/${ATTACK_NAME}/injection_task_*.json" 2>/dev/null | wc -l | tr -d ' ')"
+  else
+    got_rows="$(find "${drift_suite_root}" -type f -path "*/none/none.json" 2>/dev/null | wc -l | tr -d ' ')"
+  fi
+  if [[ "${expected_rows}" -gt 0 && "${got_rows}" -ne "${expected_rows}" ]]; then
+    echo "[error][DRIFT] mode=${mode} suite=${suite} rows=${got_rows}/${expected_rows} (benchmark_version=${BENCHMARK_VERSION}) log=${log_path}"
+    return 2
+  fi
+  echo "[done][DRIFT] mode=${mode} suite=${suite} rows=${got_rows}/${expected_rows} log=${log_path}"
 }
 
 _ipiguard_resume_info() {
@@ -206,7 +249,7 @@ run_ipiguard_one() {
   local expected_rows=0
 
   mkdir -p "${out_dir}"
-  expected_rows="$(_ipiguard_expected_rows "${mode}" "${suite}")"
+  expected_rows="$(_expected_rows "${IPIGUARD_DIR}/agentdojo/src" "${IPIGUARD_BENCHMARK_VERSION}" "${mode}" "${suite}")"
   read -r has_summary existing_rows resume_uid resume_iid resume_max_user resume_max_iid <<< "$(_ipiguard_resume_info "${mode}" "${results_path}")"
   if [[ "${has_summary}" == "1" && "${existing_rows}" -ge "${expected_rows}" && "${expected_rows}" -gt 0 ]]; then
     echo "[skip][IPIGuard] mode=${mode} suite=${suite} existing complete summary detected rows=${existing_rows}/${expected_rows}: ${results_path}"
@@ -224,8 +267,15 @@ run_ipiguard_one() {
     PYTHONPATH="${IPIGUARD_DIR}:${IPIGUARD_DIR}/agentdojo/src:${PYTHONPATH:-}" \
     OPENAI_BASE_URL="${OPENAI_BASE_URL}" \
     OPENAI_API_KEY="${OPENAI_API_KEY}" \
-    PYTHONUNBUFFERED=1 \
-    python run/eval.py \
+      IPIGUARD_OPENAI_TIMEOUT_S="${IPIGUARD_OPENAI_TIMEOUT_S}" \
+      IPIGUARD_OPENAI_MAX_RETRIES="${IPIGUARD_OPENAI_MAX_RETRIES}" \
+      IPIGUARD_LLM_RETRY_ATTEMPTS="${IPIGUARD_LLM_RETRY_ATTEMPTS}" \
+      IPIGUARD_LLM_RETRY_MAX_WAIT_S="${IPIGUARD_LLM_RETRY_MAX_WAIT_S}" \
+      IPIGUARD_LLM_RETRY_BACKOFF_S="${IPIGUARD_LLM_RETRY_BACKOFF_S}" \
+      IPIGUARD_LLM_RETRY_HINT_SCALE="${IPIGUARD_LLM_RETRY_HINT_SCALE}" \
+      IPIGUARD_LLM_RETRY_HINT_JITTER_S="${IPIGUARD_LLM_RETRY_HINT_JITTER_S}" \
+      PYTHONUNBUFFERED=1 \
+      python run/eval.py \
       --benchmark_version "${IPIGUARD_BENCHMARK_VERSION}" \
       --suite_name "${suite}" \
       --agent_model "${MODEL}" \
