@@ -70,3 +70,17 @@
 
 1. 删除了跟当前主文重复的旧副本：`paper_full_body copy.txt`
 2. 旧的单用途 watcher 流程已被新的 supervisor 替代；后续以 `scripts/supervise_drift_ipiguard_seq_resume.sh` 为准。
+
+## 6) Faramesh 基线接入（03-06）
+
+1. 已添加上游仓库：`third_party/faramesh-core`（Git submodule，来源：`https://github.com/faramesh/faramesh-core`）。
+2. 已新增 AgentDojo Faramesh baseline runner：`scripts/run_agentdojo_faramesh.py`。
+3. 已新增五基线公平报告脚本：`scripts/agentdojo_five_baseline_fair_report.py`。
+4. 已新增 follow-up watcher：`scripts/continue_after_ipiguard_with_faramesh.sh`。
+   - 它不会打断当前 DRIFT/IPIGuard supervisor；
+   - 会等待 `drift_complete && ipiguard_complete`；
+   - 然后自动启动 Faramesh baseline；
+   - Faramesh 完成后自动产出五基线报告（若 SecureClaw 仍不完整，报告会显式标记 fairness invalid）。
+5. 当前 follow-up 状态文件：
+   - `artifact_out_external_runtime/external_runs/20260304_agentdojo_four_parallel_rerun_v1/drift_ipiguard_faramesh_followup_status.md`
+

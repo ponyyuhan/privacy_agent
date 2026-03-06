@@ -1,3 +1,6 @@
 [submodule "integrations/openclaw"]
 	path = integrations/openclaw
 	url = https://github.com/openclaw/openclaw.git
+[submodule "third_party/faramesh-core"]
+	path = third_party/faramesh-core
+	url = https://github.com/faramesh/faramesh-core.git
