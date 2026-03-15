@@ -18,12 +18,18 @@ OPENAI_BASE_URL="${OPENAI_BASE_URL:-https://api.openai.com/v1}"
 STATUS_INTERVAL_S="${STATUS_INTERVAL_S:-60}"
 RETRY_SLEEP_S="${RETRY_SLEEP_S:-30}"
 TMUX_SESSION_NAME="${TMUX_SESSION_NAME:-drift_ipiguard_seq_resume}"
+QUOTA_FLAG="${QUOTA_FLAG:-${RUN_ROOT}/fatal_insufficient_quota.flag}"
 
 mkdir -p "$(dirname "${STATUS_MD}")" "$(dirname "${SUPERVISOR_LOG}")"
 
 if [[ -z "${OPENAI_API_KEY:-}" ]]; then
   echo "[fatal] OPENAI_API_KEY is missing." | tee -a "${SUPERVISOR_LOG}"
   exit 1
+fi
+
+if [[ -f "${QUOTA_FLAG}" ]]; then
+  echo "[fatal] Quota flag present at ${QUOTA_FLAG}; refusing to start supervisor." | tee -a "${SUPERVISOR_LOG}"
+  exit 86
 fi
 
 snapshot_status() {
@@ -251,14 +257,15 @@ run_phase() {
         ATTACK_NAME="${ATTACK_NAME}" \
         DRIFT_SUITES="${DRIFT_SUITES}" \
         OUT_ROOT="${IPIGUARD_OUT}" \
+        QUOTA_FLAG="${QUOTA_FLAG}" \
         RUN_DRIFT=0 \
         RUN_IPIGUARD=1 \
         IPIGUARD_OPENAI_TIMEOUT_S="${IPIGUARD_OPENAI_TIMEOUT_S:-120}" \
         IPIGUARD_OPENAI_MAX_RETRIES="${IPIGUARD_OPENAI_MAX_RETRIES:-8}" \
-        IPIGUARD_LLM_RETRY_ATTEMPTS="${IPIGUARD_LLM_RETRY_ATTEMPTS:-240}" \
-        IPIGUARD_LLM_RETRY_MAX_WAIT_S="${IPIGUARD_LLM_RETRY_MAX_WAIT_S:-60}" \
+        IPIGUARD_LLM_RETRY_ATTEMPTS="${IPIGUARD_LLM_RETRY_ATTEMPTS:-3}" \
+        IPIGUARD_LLM_RETRY_MAX_WAIT_S="${IPIGUARD_LLM_RETRY_MAX_WAIT_S:-40}" \
         IPIGUARD_LLM_RETRY_BACKOFF_S="${IPIGUARD_LLM_RETRY_BACKOFF_S:-2}" \
-        IPIGUARD_LLM_RETRY_HINT_SCALE="${IPIGUARD_LLM_RETRY_HINT_SCALE:-1.5}" \
+        IPIGUARD_LLM_RETRY_HINT_SCALE="${IPIGUARD_LLM_RETRY_HINT_SCALE:-1.0}" \
         IPIGUARD_LLM_RETRY_HINT_JITTER_S="${IPIGUARD_LLM_RETRY_HINT_JITTER_S:-0.5}" \
         bash scripts/run_drift_ipiguard_full_lowmem.sh
     ) >> "${current_log}" 2>&1 &

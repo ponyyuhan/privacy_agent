@@ -26,6 +26,11 @@ IPIGUARD_LLM_RETRY_MAX_WAIT_S="${IPIGUARD_LLM_RETRY_MAX_WAIT_S:-40}"
 IPIGUARD_LLM_RETRY_BACKOFF_S="${IPIGUARD_LLM_RETRY_BACKOFF_S:-2}"
 IPIGUARD_LLM_RETRY_HINT_SCALE="${IPIGUARD_LLM_RETRY_HINT_SCALE:-${IPIGUARD_LLM_RETRY_MULTIPLIER:-1.0}}"
 IPIGUARD_LLM_RETRY_HINT_JITTER_S="${IPIGUARD_LLM_RETRY_HINT_JITTER_S:-0.5}"
+IPIGUARD_MAX_RETRIES="${IPIGUARD_MAX_RETRIES:-${IPIGUARD_LLM_RETRY_ATTEMPTS}}"
+IPIGUARD_RETRY_BACKOFF_S="${IPIGUARD_RETRY_BACKOFF_S:-${IPIGUARD_LLM_RETRY_BACKOFF_S}}"
+IPIGUARD_RETRY_BACKOFF_MAX_S="${IPIGUARD_RETRY_BACKOFF_MAX_S:-${IPIGUARD_LLM_RETRY_MAX_WAIT_S}}"
+IPIGUARD_RETRY_HINT_SCALE="${IPIGUARD_RETRY_HINT_SCALE:-${IPIGUARD_LLM_RETRY_HINT_SCALE}}"
+IPIGUARD_RETRY_HINT_JITTER_S="${IPIGUARD_RETRY_HINT_JITTER_S:-${IPIGUARD_LLM_RETRY_HINT_JITTER_S}}"
 
 OUT_ROOT="${OUT_ROOT:-${REPO_ROOT}/artifact_out_external_runtime/external_runs/${RUN_TAG}}"
 OUT_ROOT="$(python - "${OUT_ROOT}" <<'PY'
@@ -46,6 +51,7 @@ DRIFT_SUITES="${DRIFT_SUITES:-banking,slack,travel,workspace}"
 DRIFT_MODES="${DRIFT_MODES:-benign,attack}"
 RUN_DRIFT="${RUN_DRIFT:-1}"
 RUN_IPIGUARD="${RUN_IPIGUARD:-1}"
+QUOTA_FLAG="${QUOTA_FLAG:-${OUT_ROOT}/fatal_insufficient_quota.flag}"
 mkdir -p "${LOG_DIR}"
 mkdir -p "${DRIFT_WORKSPACE}"
 
@@ -267,13 +273,19 @@ run_ipiguard_one() {
     PYTHONPATH="${IPIGUARD_DIR}:${IPIGUARD_DIR}/agentdojo/src:${PYTHONPATH:-}" \
     OPENAI_BASE_URL="${OPENAI_BASE_URL}" \
     OPENAI_API_KEY="${OPENAI_API_KEY}" \
+      OPENAI_TIMEOUT_S="${IPIGUARD_OPENAI_TIMEOUT_S}" \
       IPIGUARD_OPENAI_TIMEOUT_S="${IPIGUARD_OPENAI_TIMEOUT_S}" \
       IPIGUARD_OPENAI_MAX_RETRIES="${IPIGUARD_OPENAI_MAX_RETRIES}" \
+      IPIGUARD_MAX_RETRIES="${IPIGUARD_MAX_RETRIES}" \
       IPIGUARD_LLM_RETRY_ATTEMPTS="${IPIGUARD_LLM_RETRY_ATTEMPTS}" \
       IPIGUARD_LLM_RETRY_MAX_WAIT_S="${IPIGUARD_LLM_RETRY_MAX_WAIT_S}" \
       IPIGUARD_LLM_RETRY_BACKOFF_S="${IPIGUARD_LLM_RETRY_BACKOFF_S}" \
       IPIGUARD_LLM_RETRY_HINT_SCALE="${IPIGUARD_LLM_RETRY_HINT_SCALE}" \
       IPIGUARD_LLM_RETRY_HINT_JITTER_S="${IPIGUARD_LLM_RETRY_HINT_JITTER_S}" \
+      IPIGUARD_RETRY_BACKOFF_S="${IPIGUARD_RETRY_BACKOFF_S}" \
+      IPIGUARD_RETRY_BACKOFF_MAX_S="${IPIGUARD_RETRY_BACKOFF_MAX_S}" \
+      IPIGUARD_RETRY_HINT_SCALE="${IPIGUARD_RETRY_HINT_SCALE}" \
+      IPIGUARD_RETRY_HINT_JITTER_S="${IPIGUARD_RETRY_HINT_JITTER_S}" \
       PYTHONUNBUFFERED=1 \
       python run/eval.py \
       --benchmark_version "${IPIGUARD_BENCHMARK_VERSION}" \
@@ -289,10 +301,16 @@ run_ipiguard_one() {
   local rc=$?
   set -e
   read -r has_summary existing_rows resume_uid resume_iid resume_max_user resume_max_iid <<< "$(_ipiguard_resume_info "${mode}" "${results_path}")"
+  if grep -qi 'insufficient_quota' "${log_path}" 2>/dev/null; then
+    mkdir -p "$(dirname "${QUOTA_FLAG}")"
+    printf '%s\n' "[$(date '+%Y-%m-%d %H:%M:%S %Z')] insufficient_quota detected in ${log_path}" > "${QUOTA_FLAG}"
+    echo "[fatal][IPIGuard] mode=${mode} suite=${suite} insufficient_quota detected; wrote ${QUOTA_FLAG}"
+    return 86
+  fi
   if [[ "${rc}" -ne 0 ]]; then
     if [[ "${existing_rows}" -gt 0 ]]; then
-      echo "[warn][IPIGuard] mode=${mode} suite=${suite} rc=${rc} (partial unique task rows=${existing_rows}/${expected_rows}; continuing): ${results_path}"
-      return 0
+      echo "[warn][IPIGuard] mode=${mode} suite=${suite} rc=${rc} (partial unique task rows=${existing_rows}/${expected_rows}; restarting pass before next suite): ${results_path}"
+      return "${rc}"
     fi
     echo "[error][IPIGuard] mode=${mode} suite=${suite} rc=${rc}; see log=${log_path}"
     return "${rc}"

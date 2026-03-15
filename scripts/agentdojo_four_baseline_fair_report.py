@@ -320,6 +320,10 @@ def main() -> None:
             }
             equal_rows = len(set(rows.values())) == 1
             suite_out[f"equal_{mode}_rows"] = equal_rows
+            if mode == "under_attack":
+                suite_out["equal_attack_rows"] = equal_rows
+            else:
+                suite_out["equal_benign_rows"] = equal_rows
             if not equal_rows:
                 if mode == "under_attack":
                     attack_reasons.append(f"rows_mismatch:{mode}:{suite}:{rows}")

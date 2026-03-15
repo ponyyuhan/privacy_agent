@@ -3,6 +3,7 @@ from typing import Dict, Any
 from ..handles import HandleStore
 from ..egress_policy import EgressPolicyEngine
 from ..executor_client import get_executor_client
+from .constraint_utils import policy_constraints
 
 class NetExec:
     def __init__(self, handles: HandleStore, policy: EgressPolicyEngine):
@@ -13,8 +14,7 @@ class NetExec:
         """Dry-run network policy without performing the fetch."""
         resource_id = str(inputs.get("resource_id", "example"))
         domain = str(inputs.get("domain", "example.com"))
-        auth_ctx = (constraints or {}).get("_auth_ctx") if isinstance((constraints or {}).get("_auth_ctx"), dict) else {}
-        pv_constraints = {"_auth_ctx": dict(auth_ctx)} if auth_ctx else {}
+        pv_constraints = policy_constraints(constraints)
         pv = self.policy.preview(
             intent_id="CheckFetchPolicy",
             inputs={"resource_id": resource_id, "domain": domain, "recipient": str(inputs.get("recipient", "")), "text": str(inputs.get("text", ""))},
@@ -52,23 +52,10 @@ class NetExec:
         domain = str(inputs.get("domain", "example.com"))
         tx_id = str(inputs.get("tx_id") or "").strip()
         user_confirm = bool((constraints or {}).get("user_confirm", False))
-        auth_ctx = (constraints or {}).get("_auth_ctx") if isinstance((constraints or {}).get("_auth_ctx"), dict) else {}
-        pv_constraints = {"_auth_ctx": dict(auth_ctx)} if auth_ctx else {}
+        exec_constraints = policy_constraints(constraints, user_confirm=user_confirm)
+        pv_constraints = policy_constraints(constraints)
 
-        if tx_id:
-            auth = self.policy.commit_from_tx(
-                tx_id=tx_id,
-                intent_id="FetchResource",
-                constraints={"user_confirm": user_confirm, "_auth_ctx": dict(auth_ctx)} if auth_ctx else {"user_confirm": user_confirm},
-                session=session,
-                caller=caller,
-            )
-            if auth.get("status") != "OK":
-                return auth
-            commit_ev = (auth.get("data") or {}).get("commit_evidence") or {}
-            action_id = str((auth.get("data") or {}).get("action_id") or "")
-            request_sha256 = str((auth.get("data") or {}).get("request_sha256") or "")
-        else:
+        if not tx_id:
             pv = self.policy.preview(
                 intent_id="FetchResource",
                 inputs={"resource_id": resource_id, "domain": domain, "recipient": str(inputs.get("recipient", "")), "text": str(inputs.get("text", ""))},
@@ -92,9 +79,22 @@ class NetExec:
                     "artifacts": [],
                     "reason_code": "REQUIRE_CONFIRM",
                 }
-            commit_ev = (pv.get("evidence") or {}).get("commit") or {}
-            action_id = str(pv.get("action_id") or "")
-            request_sha256 = str(pv.get("request_sha256") or "")
+            tx_id = str(pv.get("tx_id") or "")
+
+        auth = self.policy.commit_from_tx(
+            tx_id=tx_id,
+            intent_id="FetchResource",
+            constraints=exec_constraints,
+            session=session,
+            caller=caller,
+        )
+        if auth.get("status") != "OK":
+            return auth
+        auth_data = (auth.get("data") or {})
+        commit_ev = auth_data.get("commit_evidence") or {}
+        action_id = str(auth_data.get("action_id") or "")
+        request_sha256 = str(auth_data.get("request_sha256") or "")
+        auth_context = auth_data.get("auth_context") if isinstance(auth_data.get("auth_context"), dict) else {}
 
         ex = get_executor_client()
         if ex is None:
@@ -120,8 +120,9 @@ class NetExec:
             user_confirm=bool(user_confirm),
             recipient=str(dummy_recipient),
             text=str(dummy_text),
-            external_principal=str(auth_ctx.get("external_principal") or ""),
-            delegation_jti=str(auth_ctx.get("delegation_jti") or ""),
+            external_principal=str(auth_context.get("external_principal") or ""),
+            delegation_jti=str(auth_context.get("delegation_jti") or ""),
+            contextual_targets_sha256=str(auth_context.get("contextual_targets_sha256") or ""),
         )
         if resp.get("status") != "OK":
             return {

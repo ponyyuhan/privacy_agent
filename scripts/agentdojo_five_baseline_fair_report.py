@@ -327,6 +327,10 @@ def main() -> None:
             }
             equal_rows = len(set(rows.values())) == 1
             suite_out[f"equal_{mode}_rows"] = equal_rows
+            if mode == "under_attack":
+                suite_out["equal_attack_rows"] = equal_rows
+            else:
+                suite_out["equal_benign_rows"] = equal_rows
             if not equal_rows:
                 if mode == "under_attack":
                     attack_reasons.append(f"rows_mismatch:{mode}:{suite}:{rows}")
@@ -344,9 +348,10 @@ def main() -> None:
                 "secureclaw": secure,
                 "ipiguard": ipi,
                 "drift": drift,
+                "faramesh": faramesh,
             }
 
-            for base, rec in (("plain", plain), ("secureclaw", secure), ("ipiguard", ipi), ("drift", drift)):
+            for base, rec in (("plain", plain), ("secureclaw", secure), ("ipiguard", ipi), ("drift", drift), ("faramesh", faramesh)):
                 totals[mode][base]["rows"] += int(rec.get("rows") or 0)
                 totals[mode][base]["security_true"] += int(rec.get("security_true_count") or 0)
                 totals[mode][base]["utility_success"] += int(rec.get("utility_success_count") or 0)

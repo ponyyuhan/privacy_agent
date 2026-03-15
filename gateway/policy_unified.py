@@ -15,9 +15,10 @@ import requests
 import yaml
 
 from common.install_tokens import normalize_install_token
+from common.canonical import sha256_hex
 
 from common.canonical import request_sha256_v1
-from common.uds_http import uds_post_json
+from common.uds_http import uds_http_request, uds_post_json
 from common.sanitize import (
     PATCH_CLAMP_LEN,
     PATCH_NOOP,
@@ -36,6 +37,21 @@ from .http_session import session_for
 
 _HTTP_POOL = ThreadPoolExecutor(max_workers=8)
 _TRACE_LOCK = threading.Lock()
+
+
+def _normalize_ctx_target(raw: Any) -> str:
+    s = str(raw or "").strip().lower()
+    return s
+
+
+def _ctx_target_match(targets: set[str], *, recipient: str, domain: str) -> tuple[bool, bool]:
+    rec = _normalize_ctx_target(recipient)
+    dom = _normalize_ctx_target(domain)
+    rec_ok = bool(rec and rec in targets)
+    dom_ok = bool(dom and dom in targets)
+    if not dom_ok and rec and "@" in rec:
+        dom_ok = rec.rsplit("@", 1)[1] in targets
+    return rec_ok, dom_ok
 
 
 def _uds_or_http_post_json(
@@ -483,8 +499,16 @@ def _load_bundle_cfg(pir: PirClient, *, domain_size: int) -> BundleConfig | None
     if not bool(int(os.getenv("USE_POLICY_BUNDLE", "1"))):
         return None
     try:
-        u0 = str(pir.policy0_url).rstrip("/")
-        meta = session_for(u0).get(f"{u0}/meta", timeout=2.0).json()
+        uds0 = (str(getattr(pir, "policy0_uds_path", "") or "").strip() or None)
+        if uds0:
+            st, _hdrs, body = uds_http_request(uds_path=uds0, method="GET", path="/meta", timeout_s=2.0)
+            if int(st) != 200:
+                return None
+            import json
+            meta = json.loads(body.decode("utf-8", errors="replace") or "{}")
+        else:
+            u0 = str(pir.policy0_url).rstrip("/")
+            meta = session_for(u0).get(f"{u0}/meta", timeout=2.0).json()
     except Exception:
         return None
     b = (meta.get("bundle") or {}) if isinstance(meta, dict) else {}
@@ -1328,6 +1352,11 @@ class UnifiedPolicyEngine:
             hash_ctx["external_principal"] = external_principal
         if delegation_jti:
             hash_ctx["delegation_jti"] = delegation_jti
+        contextual_targets_raw = (constraints or {}).get("contextual_targets") if isinstance((constraints or {}).get("contextual_targets"), list) else []
+        contextual_targets = {_normalize_ctx_target(x) for x in contextual_targets_raw if str(x or "").strip()}
+        if contextual_targets:
+            digest = sha256_hex("|".join(sorted(contextual_targets)).encode("utf-8"))
+            hash_ctx["contextual_targets_sha256"] = digest
         if self.handles is None:
             raise RuntimeError("unified_egress_requires_handle_store")
         intent = str(intent_id)
@@ -1442,6 +1471,13 @@ class UnifiedPolicyEngine:
             skill_md=os.getenv("DUMMY_SKILL_MD", ""),
             action_id=action_id,
         )
+        if contextual_targets:
+            ctx_rec_ok, ctx_dom_ok = _ctx_target_match(contextual_targets, recipient=recipient, domain=domain)
+            feats = dict(feats)
+            if ctx_rec_ok:
+                feats["recipient_ok"] = 1
+            if ctx_dom_ok:
+                feats["domain_ok"] = 1
 
         # Optional DFA confirm stage (keeps legacy demo semantics).
         dlp_mode = (os.getenv("DLP_MODE", "fourgram") or "fourgram").strip().lower()

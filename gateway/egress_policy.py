@@ -11,7 +11,7 @@ from pathlib import Path
 import requests
 import yaml
 
-from common.canonical import request_sha256_v1
+from common.canonical import request_sha256_v1, sha256_hex
 from common.sanitize import (
     PATCH_CLAMP_LEN,
     PATCH_NOOP,
@@ -28,6 +28,22 @@ from .http_session import session_for
 
 
 _HTTP_POOL = ThreadPoolExecutor(max_workers=8)
+
+
+def _hash_context_from_constraints(constraints: Dict[str, Any] | None) -> dict[str, Any]:
+    auth_ctx = (constraints or {}).get("_auth_ctx") if isinstance((constraints or {}).get("_auth_ctx"), dict) else {}
+    out: dict[str, Any] = {}
+    external_principal = str((auth_ctx or {}).get("external_principal") or "").strip()
+    delegation_jti = str((auth_ctx or {}).get("delegation_jti") or "").strip()
+    if external_principal:
+        out["external_principal"] = external_principal
+    if delegation_jti:
+        out["delegation_jti"] = delegation_jti
+    raw_targets = (constraints or {}).get("contextual_targets") if isinstance((constraints or {}).get("contextual_targets"), list) else []
+    normalized_targets = sorted({str(x or "").strip().lower() for x in raw_targets if str(x or "").strip()})
+    if normalized_targets:
+        out["contextual_targets_sha256"] = sha256_hex("|".join(normalized_targets).encode("utf-8"))
+    return out
 
 
 @dataclass(frozen=True, slots=True)
@@ -809,7 +825,7 @@ class EgressPolicyEngine:
             return {"status": "DENY", "summary": "tx_id bound to a different caller.", "data": {}, "artifacts": [], "reason_code": "TX_CALLER_MISMATCH"}
 
         pv = rec.preview or {}
-        auth_ctx = (constraints or {}).get("_auth_ctx") if isinstance((constraints or {}).get("_auth_ctx"), dict) else {}
+        auth_ctx = _hash_context_from_constraints(constraints)
         expected_ctx = pv.get("auth_context") if isinstance(pv.get("auth_context"), dict) else {}
         if expected_ctx:
             # Request-hash context must remain stable across preview and commit.
@@ -850,6 +866,7 @@ class EgressPolicyEngine:
                 "action_id": rec.action_id,
                 "request_sha256": rec.request_sha256,
                 "patch": patch.to_dict(),
+                "auth_context": dict(expected_ctx or auth_ctx),
                 "commit_evidence": pv.get("commit_evidence") or {},
             },
             "artifacts": [],

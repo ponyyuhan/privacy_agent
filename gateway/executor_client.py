@@ -30,6 +30,7 @@ class ExecutorClient:
         domain: str = "",
         external_principal: str = "",
         delegation_jti: str = "",
+        contextual_targets_sha256: str = "",
     ) -> Dict[str, Any]:
         payload = {
             "action_id": action_id,
@@ -46,6 +47,7 @@ class ExecutorClient:
             "user_confirm": bool(user_confirm),
             "external_principal": str(external_principal or ""),
             "delegation_jti": str(delegation_jti or ""),
+            "contextual_targets_sha256": str(contextual_targets_sha256 or ""),
         }
         u = str(self.base_url).rstrip("/")
         r = session_for(u).post(f"{u}/exec/send_message", json=payload, timeout=10)
@@ -67,6 +69,7 @@ class ExecutorClient:
         text: str = "",
         external_principal: str = "",
         delegation_jti: str = "",
+        contextual_targets_sha256: str = "",
     ) -> Dict[str, Any]:
         payload = {
             "action_id": action_id,
@@ -81,6 +84,7 @@ class ExecutorClient:
             "text": text,
             "external_principal": str(external_principal or ""),
             "delegation_jti": str(delegation_jti or ""),
+            "contextual_targets_sha256": str(contextual_targets_sha256 or ""),
         }
         u = str(self.base_url).rstrip("/")
         r = session_for(u).post(f"{u}/exec/fetch", json=payload, timeout=10)
@@ -103,6 +107,7 @@ class ExecutorClient:
         text: str = "",
         external_principal: str = "",
         delegation_jti: str = "",
+        contextual_targets_sha256: str = "",
     ) -> Dict[str, Any]:
         payload = {
             "action_id": action_id,
@@ -118,6 +123,7 @@ class ExecutorClient:
             "text": text,
             "external_principal": str(external_principal or ""),
             "delegation_jti": str(delegation_jti or ""),
+            "contextual_targets_sha256": str(contextual_targets_sha256 or ""),
         }
         u = str(self.base_url).rstrip("/")
         r = session_for(u).post(f"{u}/exec/webhook", json=payload, timeout=10)

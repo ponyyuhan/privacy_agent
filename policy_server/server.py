@@ -494,6 +494,17 @@ def mpc_finalize(req: MpcFinalizeReq):
 
 def main():
     access_log = bool(int(os.getenv("ACCESS_LOG", "0")))
+    uds = (os.getenv("POLICY_UDS_PATH") or "").strip()
+    if uds:
+        p = Path(uds)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            if p.exists():
+                p.unlink()
+        except Exception:
+            pass
+        uvicorn.run("policy_server.server:app", uds=uds, reload=False, access_log=access_log)
+        return
     uvicorn.run("policy_server.server:app", host="0.0.0.0", port=settings.port, reload=False, access_log=access_log)
 
 if __name__ == "__main__":

@@ -20,6 +20,9 @@ import yaml
 REPO_ROOT = Path(__file__).resolve().parents[1]
 IPIGUARD_DIR = REPO_ROOT / "third_party" / "ipiguard"
 
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
 SUITES = ("banking", "slack", "travel", "workspace")
 
 
@@ -31,6 +34,24 @@ class ResumeInfo:
     next_iid: int
 
 
+def _model_uses_openai(model: str) -> bool:
+    name = str(model or "").strip().lower()
+    if not name:
+        return False
+    return name.startswith(("gpt-", "chatgpt-", "o1", "o3", "o4"))
+
+
+def _require_runtime_credentials(model: str) -> None:
+    if not _model_uses_openai(model):
+        return
+    api_key = str(os.getenv("OPENAI_API_KEY", "")).strip()
+    if api_key:
+        return
+    raise SystemExit(
+        f"OPENAI_API_KEY is required for model '{model}'. Refusing to run to avoid polluted benchmark results."
+    )
+
+
 def _compute_expected_rows(
     benchmark_version: str,
     suites: list[str],
@@ -40,6 +61,8 @@ def _compute_expected_rows(
     version-specific constants.
     """
     src_root = IPIGUARD_DIR / "agentdojo" / "src"
+    if str(REPO_ROOT) not in sys.path:
+        sys.path.insert(0, str(REPO_ROOT))
     if str(src_root) not in sys.path:
         sys.path.insert(0, str(src_root))
 
@@ -63,7 +86,7 @@ def _compute_expected_rows(
 
 def _pick_port() -> int:
     s = socket.socket()
-    s.bind(("", 0))
+    s.bind(("127.0.0.1", 0))
     port = int(s.getsockname()[1])
     s.close()
     return port
@@ -81,6 +104,14 @@ def _wait_http_ok(url: str, tries: int = 160) -> None:
             pass
         time.sleep(0.1)
     raise RuntimeError(f"health check failed: {url}")
+
+
+def _wait_path_ok(path: Path, tries: int = 200) -> None:
+    for _ in range(int(tries)):
+        if path.exists():
+            return
+        time.sleep(0.1)
+    raise RuntimeError(f"path not ready: {path}")
 
 
 def _iter_json_objects(path: Path):
@@ -339,7 +370,7 @@ class SecureClawInfra:
                     merged[k] = v
             used_override = True
 
-        discovery_mode = str(os.getenv("SECURECLAW_POLICY_DISCOVERY", "env_entities")).strip().lower()
+        discovery_mode = str(os.getenv("SECURECLAW_POLICY_DISCOVERY", "off")).strip().lower()
         used_discovery = False
         if discovery_mode not in {"off", "0", "disabled", "none"}:
             recs, doms = self._discover_policy_entities_from_env()
@@ -365,15 +396,29 @@ class SecureClawInfra:
         self.run_dir.mkdir(parents=True, exist_ok=True)
         runtime_state_dir = self.run_dir / "runtime_state"
         runtime_state_dir.mkdir(parents=True, exist_ok=True)
-        p0 = _pick_port()
-        p1 = _pick_port()
-        ex = _pick_port()
+        socket_dir = Path("/tmp") / f"sc_{secrets.token_hex(4)}"
+        socket_dir.mkdir(parents=True, exist_ok=True)
+        p0_sock = socket_dir / "p0.sock"
+        p1_sock = socket_dir / "p1.sock"
+        p0_port = _pick_port()
+        p1_port = _pick_port()
+        ex_port = _pick_port()
+        gw_port = _pick_port()
+        for sock in (p0_sock, p1_sock):
+            try:
+                sock.unlink()
+            except FileNotFoundError:
+                pass
+            except Exception:
+                pass
 
         base_env = os.environ.copy()
         base_env["PYTHONPATH"] = str(REPO_ROOT)
-        base_env["POLICY0_URL"] = f"http://127.0.0.1:{p0}"
-        base_env["POLICY1_URL"] = f"http://127.0.0.1:{p1}"
-        base_env["EXECUTOR_URL"] = f"http://127.0.0.1:{ex}"
+        base_env["POLICY0_URL"] = f"http://127.0.0.1:{p0_port}"
+        base_env["POLICY1_URL"] = f"http://127.0.0.1:{p1_port}"
+        base_env["POLICY0_UDS_PATH"] = ""
+        base_env["POLICY1_UDS_PATH"] = ""
+        base_env["EXECUTOR_URL"] = f"http://127.0.0.1:{ex_port}"
         base_env["POLICY0_MAC_KEY"] = base_env.get("POLICY0_MAC_KEY", secrets.token_hex(32))
         base_env["POLICY1_MAC_KEY"] = base_env.get("POLICY1_MAC_KEY", secrets.token_hex(32))
         # Request binding key is shared by gateway + executor only (not policy servers),
@@ -384,18 +429,18 @@ class SecureClawInfra:
         base_env["SIGNED_PIR"] = "1"
         base_env["MIRAGE_POLICY_BYPASS"] = "0"
         base_env["SINGLE_SERVER_POLICY"] = "0"
-        base_env["MIRAGE_ENFORCE_FINAL_OUTPUT_GATE"] = base_env.get("MIRAGE_ENFORCE_FINAL_OUTPUT_GATE", "1")
+        base_env["MIRAGE_ENFORCE_FINAL_OUTPUT_GATE"] = base_env.get("MIRAGE_ENFORCE_FINAL_OUTPUT_GATE", "0")
         base_env["MIRAGE_FINAL_OUTPUT_CONFIRM_ALWAYS"] = base_env.get("MIRAGE_FINAL_OUTPUT_CONFIRM_ALWAYS", "0")
         base_env["USE_POLICY_BUNDLE"] = base_env.get("USE_POLICY_BUNDLE", "1")
-        base_env["DLP_MODE"] = base_env.get("DLP_MODE", "fourgram")
-        base_env["LEAKAGE_BUDGET_ENABLED"] = base_env.get("LEAKAGE_BUDGET_ENABLED", "1")
+        base_env["DLP_MODE"] = base_env.get("DLP_MODE", "dfa")
+        base_env["LEAKAGE_BUDGET_ENABLED"] = base_env.get("LEAKAGE_BUDGET_ENABLED", "0")
         base_env["MIRAGE_SESSION_ID"] = base_env.get("MIRAGE_SESSION_ID", "agentdojo-secureclaw")
         base_env["SECURECLAW_SESSION_SCOPE"] = base_env.get("SECURECLAW_SESSION_SCOPE", "per_turn")
         base_env["SECURECLAW_STRICT_SINK_BINDING"] = base_env.get("SECURECLAW_STRICT_SINK_BINDING", "1")
         base_env["SECURECLAW_DENY_UNMAPPED_EFFECT"] = base_env.get("SECURECLAW_DENY_UNMAPPED_EFFECT", "0")
         base_env["SECURECLAW_ALLOW_LOCAL_STATE_EFFECTS"] = base_env.get("SECURECLAW_ALLOW_LOCAL_STATE_EFFECTS", "1")
         base_env["SECURECLAW_INTENT_CONTRACT_MODE"] = base_env.get("SECURECLAW_INTENT_CONTRACT_MODE", "intent_v1")
-        base_env["SECURECLAW_MAX_TOOL_ITERS"] = base_env.get("SECURECLAW_MAX_TOOL_ITERS", "25")
+        base_env["SECURECLAW_MAX_TOOL_ITERS"] = base_env.get("SECURECLAW_MAX_TOOL_ITERS", "35")
         base_env["SECURECLAW_LOCAL_RECIPIENT"] = base_env.get("SECURECLAW_LOCAL_RECIPIENT", "alice@example.com")
         base_env["SECURECLAW_LOCAL_DOMAIN"] = base_env.get("SECURECLAW_LOCAL_DOMAIN", "local.invalid")
         base_env["SECURECLAW_ENFORCE_COMMIT_PATH"] = base_env.get("SECURECLAW_ENFORCE_COMMIT_PATH", "1")
@@ -427,6 +472,25 @@ class SecureClawInfra:
         policy_cfg = self._resolve_policy_config()
         base_env["POLICY_CONFIG_PATH"] = str(policy_cfg)
 
+        if bool(int(base_env.get("SECURECLAW_NO_LISTEN", "0") or "0")):
+            self.env_patch = {
+                "POLICY_CONFIG_PATH": str(base_env["POLICY_CONFIG_PATH"]),
+                "MIRAGE_SESSION_ID": str(base_env["MIRAGE_SESSION_ID"]),
+                "SECURECLAW_LOCAL_EXECUTOR": "1",
+                "SECURECLAW_AUTO_USER_CONFIRM": str(base_env["SECURECLAW_AUTO_USER_CONFIRM"]),
+                "SECURECLAW_HANDLEIZE_READ_OUTPUT": str(base_env["SECURECLAW_HANDLEIZE_READ_OUTPUT"]),
+                "SECURECLAW_READ_OUTPUT_MODE": str(base_env["SECURECLAW_READ_OUTPUT_MODE"]),
+                "SECURECLAW_READ_SUMMARY_MAX_ITEMS": str(base_env["SECURECLAW_READ_SUMMARY_MAX_ITEMS"]),
+                "SECURECLAW_READ_SUMMARY_MAX_CHARS": str(base_env["SECURECLAW_READ_SUMMARY_MAX_CHARS"]),
+                "SECURECLAW_ALLOW_LOCAL_STATE_EFFECTS": str(base_env["SECURECLAW_ALLOW_LOCAL_STATE_EFFECTS"]),
+                "SECURECLAW_DENY_UNMAPPED_EFFECT": str(base_env["SECURECLAW_DENY_UNMAPPED_EFFECT"]),
+                "SECURECLAW_MAX_TOOL_ITERS": str(base_env["SECURECLAW_MAX_TOOL_ITERS"]),
+                "SECURECLAW_LOCAL_RECIPIENT": str(base_env["SECURECLAW_LOCAL_RECIPIENT"]),
+                "SECURECLAW_LOCAL_DOMAIN": str(base_env["SECURECLAW_LOCAL_DOMAIN"]),
+                "DLP_MODE": str(base_env["DLP_MODE"]),
+            }
+            return self
+
         subprocess.run(
             [sys.executable, "-m", "policy_server.build_dbs"],
             check=True,
@@ -437,7 +501,8 @@ class SecureClawInfra:
         env0 = base_env.copy()
         env0.pop("SECURECLAW_REQUEST_BINDING_KEY_HEX", None)
         env0["SERVER_ID"] = "0"
-        env0["PORT"] = str(p0)
+        env0.pop("POLICY_UDS_PATH", None)
+        env0["PORT"] = str(p0_port)
         env0["POLICY_MAC_KEY"] = env0["POLICY0_MAC_KEY"]
         p0_proc = subprocess.Popen([sys.executable, "-m", "policy_server.server"], cwd=str(REPO_ROOT), env=env0, text=True)
         self.procs.append(p0_proc)
@@ -445,24 +510,36 @@ class SecureClawInfra:
         env1 = base_env.copy()
         env1.pop("SECURECLAW_REQUEST_BINDING_KEY_HEX", None)
         env1["SERVER_ID"] = "1"
-        env1["PORT"] = str(p1)
+        env1.pop("POLICY_UDS_PATH", None)
+        env1["PORT"] = str(p1_port)
         env1["POLICY_MAC_KEY"] = env1["POLICY1_MAC_KEY"]
         p1_proc = subprocess.Popen([sys.executable, "-m", "policy_server.server"], cwd=str(REPO_ROOT), env=env1, text=True)
         self.procs.append(p1_proc)
+        _wait_http_ok(f"{base_env['POLICY0_URL']}/health")
+        _wait_http_ok(f"{base_env['POLICY1_URL']}/health")
 
         envx = base_env.copy()
-        envx["EXECUTOR_PORT"] = str(ex)
+        envx["EXECUTOR_PORT"] = str(ex_port)
         ex_proc = subprocess.Popen([sys.executable, "-m", "executor_server.server"], cwd=str(REPO_ROOT), env=envx, text=True)
         self.procs.append(ex_proc)
+        _wait_http_ok(f"http://127.0.0.1:{ex_port}/health")
 
-        _wait_http_ok(f"http://127.0.0.1:{p0}/health")
-        _wait_http_ok(f"http://127.0.0.1:{p1}/health")
-        _wait_http_ok(f"http://127.0.0.1:{ex}/health")
+        envg = base_env.copy()
+        envg["MIRAGE_HTTP_BIND"] = "127.0.0.1"
+        envg["MIRAGE_HTTP_PORT"] = str(gw_port)
+        gw_proc = subprocess.Popen([sys.executable, "-m", "gateway.http_server"], cwd=str(REPO_ROOT), env=envg, text=True)
+        self.procs.append(gw_proc)
+        _wait_http_ok(f"http://127.0.0.1:{gw_port}/health")
 
         self.env_patch = {
-            "POLICY0_URL": f"http://127.0.0.1:{p0}",
-            "POLICY1_URL": f"http://127.0.0.1:{p1}",
-            "EXECUTOR_URL": f"http://127.0.0.1:{ex}",
+            "POLICY0_URL": str(base_env["POLICY0_URL"]),
+            "POLICY1_URL": str(base_env["POLICY1_URL"]),
+            "POLICY0_UDS_PATH": str(base_env["POLICY0_UDS_PATH"]),
+            "POLICY1_UDS_PATH": str(base_env["POLICY1_UDS_PATH"]),
+            "EXECUTOR_URL": str(base_env["EXECUTOR_URL"]),
+            "AGENTDOJO_SECURECLAW_BASE_URL": f"http://127.0.0.1:{gw_port}",
+            "AGENTDOJO_SECURECLAW_TIMEOUT_S": str(os.getenv("AGENTDOJO_SECURECLAW_TIMEOUT_S", "30")),
+            "SECURECLAW_LOCAL_EXECUTOR": "0",
             "POLICY0_MAC_KEY": str(base_env["POLICY0_MAC_KEY"]),
             "POLICY1_MAC_KEY": str(base_env["POLICY1_MAC_KEY"]),
             "SECURECLAW_REQUEST_BINDING_KEY_HEX": str(base_env["SECURECLAW_REQUEST_BINDING_KEY_HEX"]),
@@ -512,6 +589,11 @@ class SecureClawInfra:
                     p.kill()
                 except Exception:
                     pass
+        for sock in self.run_dir.glob("runtime_state/*.sock"):
+            try:
+                sock.unlink()
+            except Exception:
+                pass
 
 
 def _run_one(
@@ -561,7 +643,7 @@ def _run_one(
     ]
     env = os.environ.copy()
     env.update(env_extra)
-    env["PYTHONPATH"] = f"{IPIGUARD_DIR}:{IPIGUARD_DIR / 'agentdojo' / 'src'}:{env.get('PYTHONPATH','')}"
+    env["PYTHONPATH"] = f"{REPO_ROOT}:{IPIGUARD_DIR}:{IPIGUARD_DIR / 'agentdojo' / 'src'}:{env.get('PYTHONPATH','')}"
 
     with log_path.open("a", encoding="utf-8") as lf:
         lf.write(
@@ -607,6 +689,7 @@ def main() -> None:
 
     suites = [s.strip() for s in str(args.suites).split(",") if s.strip()]
     modes = [m.strip() for m in str(args.modes).split(",") if m.strip()]
+    _require_runtime_credentials(str(args.model))
     expected_rows = _compute_expected_rows(str(args.benchmark_version), suites)
 
     report: dict[str, Any] = {

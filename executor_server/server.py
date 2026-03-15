@@ -471,6 +471,7 @@ class ExecSendMessageReq(BaseModel):
     user_confirm: bool = False
     external_principal: str = ""
     delegation_jti: str = ""
+    contextual_targets_sha256: str = ""
 
 
 class ExecFetchReq(BaseModel):
@@ -486,6 +487,7 @@ class ExecFetchReq(BaseModel):
     text: str = ""
     external_principal: str = ""
     delegation_jti: str = ""
+    contextual_targets_sha256: str = ""
 
 
 class ExecWebhookReq(BaseModel):
@@ -502,6 +504,7 @@ class ExecWebhookReq(BaseModel):
     text: str = ""
     external_principal: str = ""
     delegation_jti: str = ""
+    contextual_targets_sha256: str = ""
 
 class ExecSkillInstallReq(BaseModel):
     action_id: str
@@ -518,14 +521,17 @@ class ExecSkillInstallReq(BaseModel):
 app = FastAPI(title="MIRAGE-OG++ Executor", version="0.1")
 
 
-def _req_hash_context(*, external_principal: str, delegation_jti: str) -> dict[str, Any]:
+def _req_hash_context(*, external_principal: str, delegation_jti: str, contextual_targets_sha256: str = "") -> dict[str, Any]:
     ctx: dict[str, Any] = {}
     ep = str(external_principal or "").strip()
     dj = str(delegation_jti or "").strip()
+    ct = str(contextual_targets_sha256 or "").strip()
     if ep:
         ctx["external_principal"] = ep
     if dj:
         ctx["delegation_jti"] = dj
+    if ct:
+        ctx["contextual_targets_sha256"] = ct
     return ctx
 
 
@@ -549,7 +555,11 @@ def exec_send_message(req: ExecSendMessageReq):
 
     # New path: PREVIEW->COMMIT commit tokens from both policy servers.
     if isinstance(req.commit, dict) and req.commit.get("policy0") and req.commit.get("policy1"):
-        hctx = _req_hash_context(external_principal=req.external_principal, delegation_jti=req.delegation_jti)
+        hctx = _req_hash_context(
+            external_principal=req.external_principal,
+            delegation_jti=req.delegation_jti,
+            contextual_targets_sha256=req.contextual_targets_sha256,
+        )
         request_sha = request_sha256_v1(
             intent_id="SendMessage",
             caller=str(req.caller or ""),
@@ -628,7 +638,11 @@ def exec_fetch(req: ExecFetchReq):
         return {"status": "OK", "reason_code": "ALLOW_INSECURE", "data": {"resource_id": req.resource_id, "domain": req.domain, "content_preview": "<html>...</html>"}}
 
     if isinstance(req.commit, dict) and req.commit.get("policy0") and req.commit.get("policy1"):
-        hctx = _req_hash_context(external_principal=req.external_principal, delegation_jti=req.delegation_jti)
+        hctx = _req_hash_context(
+            external_principal=req.external_principal,
+            delegation_jti=req.delegation_jti,
+            contextual_targets_sha256=req.contextual_targets_sha256,
+        )
         request_sha = request_sha256_v1(
             intent_id="FetchResource",
             caller=str(req.caller or ""),
@@ -676,7 +690,11 @@ def exec_webhook(req: ExecWebhookReq):
     if EXECUTOR_INSECURE_ALLOW:
         return {"status": "OK", "reason_code": "ALLOW_INSECURE", "data": {"domain": req.domain, "path": req.path, "sent_chars": len(req.body)}}
     if isinstance(req.commit, dict) and req.commit.get("policy0") and req.commit.get("policy1"):
-        hctx = _req_hash_context(external_principal=req.external_principal, delegation_jti=req.delegation_jti)
+        hctx = _req_hash_context(
+            external_principal=req.external_principal,
+            delegation_jti=req.delegation_jti,
+            contextual_targets_sha256=req.contextual_targets_sha256,
+        )
         request_sha = request_sha256_v1(
             intent_id="PostWebhook",
             caller=str(req.caller or ""),
